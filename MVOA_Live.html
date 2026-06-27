@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>MVOA</title>
+<link rel="stylesheet" href="css/shared.css">
+</head>
+<body>
+
+  <!-- ═══════════════ SETUP SCREEN (first run / no config) ═══════════════ -->
+  <div id="setup-screen" class="screen hidden">
+    <div class="card">
+      <h1>MVOA Setup</h1>
+      <p class="muted">One-time setup. Stored locally in this browser only.</p>
+      <label>Google Sheet ID
+        <input id="setup-sheet-id" type="text" placeholder="from the Sheet URL">
+      </label>
+      <label>API Key (read access)
+        <input id="setup-api-key" type="text" placeholder="Google Cloud API key">
+      </label>
+      <label>Service Account JSON (write access)
+        <textarea id="setup-sa-json" rows="4" placeholder='{"type":"service_account","client_email":"...","private_key":"..."}'></textarea>
+      </label>
+      <label>Drive Folder ID (for photo storage)
+        <input id="setup-drive-folder" type="text" placeholder="from the folder's URL, after /folders/">
+      </label>
+      <label>Photo Upload URL (Apps Script Web App)
+        <input id="setup-photo-url" type="text" placeholder="ends in /exec">
+      </label>
+      <label>Photo Upload Secret
+        <input id="setup-photo-secret" type="text" placeholder="matches SHARED_SECRET in the Apps Script">
+      </label>
+      <p class="muted" style="margin-top:-8px;">Create a Drive folder, and deploy the photo-upload Apps Script under your own Google account (not the service account) — uploads use its quota instead.</p>
+      <button id="setup-save-btn" class="btn-primary">Save &amp; Continue</button>
+      <p class="error-text" id="setup-error"></p>
+    </div>
+  </div>
+
+  <!-- ═══════════════ LOGIN SCREEN ═══════════════ -->
+  <div id="login-screen" class="screen hidden">
+    <div class="card login-card">
+      <div class="logo-area">
+        <div id="login-logo"></div>
+        <h1>MVOA</h1>
+        <p class="muted">Myans Villas Owners Association</p>
+      </div>
+      <label>Enter PIN
+        <input id="login-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="8">
+      </label>
+      <button id="login-btn" class="btn-primary">Login</button>
+      <p class="error-text" id="login-error"></p>
+    </div>
+  </div>
+
+  <!-- ═══════════════ HOME SCREEN ═══════════════ -->
+  <div id="home-screen" class="screen hidden">
+    <header class="home-header">
+      <div class="home-header-left">
+        <div id="home-logo"></div>
+        <div>
+          <div class="home-greeting">Hi, <span id="home-user-name"></span></div>
+          <div class="home-role muted" id="home-user-role"></div>
+        </div>
+      </div>
+      <div>
+        <button id="settings-btn" class="btn-secondary" title="Settings">⚙️</button>
+        <button id="logout-btn" class="btn-secondary">Logout</button>
+      </div>
+    </header>
+    <div id="module-tiles" class="tiles-grid"></div>
+  </div>
+
+  <!-- ═══════════════ SETTINGS SCREEN (edit config anytime) ═══════════════ -->
+  <div id="settings-screen" class="screen hidden">
+    <div class="card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">Settings</h1>
+        <button id="settings-back-btn" class="btn-secondary">&larr; Home</button>
+      </div>
+      <p class="muted">Edit connection details. Stored locally in this browser only.</p>
+      <label>Google Sheet ID
+        <input id="settings-sheet-id" type="text">
+      </label>
+      <label>API Key (read access)
+        <input id="settings-api-key" type="text">
+      </label>
+      <label>Service Account JSON (write access)
+        <textarea id="settings-sa-json" rows="4"></textarea>
+      </label>
+      <label>Drive Folder ID (for photo storage)
+        <input id="settings-drive-folder" type="text">
+      </label>
+      <label>Photo Upload URL (Apps Script Web App)
+        <input id="settings-photo-url" type="text" placeholder="ends in /exec">
+      </label>
+      <label>Photo Upload Secret
+        <input id="settings-photo-secret" type="text">
+      </label>
+      <button id="settings-save-btn" class="btn-primary">Save Changes</button>
+      <p class="error-text" id="settings-error"></p>
+      <p class="muted" id="settings-saved-msg"></p>
+    </div>
+  </div>
+
+  <!-- ═══════════════ MODULE CONTAINER (a module renders itself in here) ═══════════════ -->
+  <div id="module-screen" class="screen hidden">
+    <header class="module-header">
+      <button id="module-back-btn" class="btn-secondary">&larr; Home</button>
+      <div id="module-logo"></div>
+      <span id="module-title"></span>
+    </header>
+    <div id="module-container"></div>
+  </div>
+
+  <!-- ═══════════════ SCRIPTS ═══════════════ -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="js/shared.js"></script>
+  <script src="js/module-ops.js"></script>
+  <script src="js/module-hs.js"></script>
+  <!-- module-expense.js will be added here later, no other changes needed -->
+
+  <script>
+    function show(id) {
+      document.querySelectorAll('.screen').forEach(el => el.classList.add('hidden'));
+      document.getElementById(id).classList.remove('hidden');
+    }
+
+    function boot() {
+      MVOA.loadConfig();
+      document.getElementById('login-logo').innerHTML = MVOA.logoSvg(56);
+      document.getElementById('home-logo').innerHTML = MVOA.logoSvg(36);
+      document.getElementById('module-logo').innerHTML = MVOA.logoSvg(24);
+      if (!MVOA.CFG.sheetId || !MVOA.CFG.apiKey || !MVOA.CFG.saJson) {
+        show('setup-screen');
+        return;
+      }
+      const user = MVOA.restoreSession();
+      if (user) {
+        showHome(user);
+      } else {
+        show('login-screen');
+      }
+    }
+
+    // ---- Setup ----
+    document.getElementById('setup-save-btn').addEventListener('click', () => {
+      const sheetId = document.getElementById('setup-sheet-id').value.trim();
+      const apiKey = document.getElementById('setup-api-key').value.trim();
+      const saRaw = document.getElementById('setup-sa-json').value.trim();
+      const driveFolderId = document.getElementById('setup-drive-folder').value.trim();
+      const photoUploadUrl = document.getElementById('setup-photo-url').value.trim();
+      const photoUploadSecret = document.getElementById('setup-photo-secret').value.trim();
+      const errEl = document.getElementById('setup-error');
+      let saJson;
+      try { saJson = JSON.parse(saRaw); }
+      catch (e) { errEl.textContent = 'Service account JSON is not valid JSON.'; return; }
+      if (!sheetId || !apiKey) { errEl.textContent = 'Sheet ID and API Key are required.'; return; }
+      errEl.textContent = '';
+      MVOA.saveConfig({ sheetId, apiKey, saJson, driveFolderId, photoUploadUrl, photoUploadSecret });
+      show('login-screen');
+    });
+
+    // ---- Login ----
+    document.getElementById('login-btn').addEventListener('click', doLogin);
+    document.getElementById('login-pin').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+    async function doLogin() {
+      const pin = document.getElementById('login-pin').value.trim();
+      const errEl = document.getElementById('login-error');
+      errEl.textContent = '';
+      if (!pin) return;
+      try {
+        const user = await MVOA.login(pin);
+        document.getElementById('login-pin').value = '';
+        showHome(user);
+      } catch (e) {
+        if (e.message && e.message.includes('Sheets read error')) {
+          errEl.textContent = 'Could not read Roles sheet: ' + e.message;
+        } else {
+          errEl.textContent = 'Invalid PIN. Try again.';
+        }
+        console.error('[MVOA login]', e);
+      }
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', () => {
+      MVOA.logout();
+      show('login-screen');
+    });
+
+    // ---- Settings ----
+    document.getElementById('settings-btn').addEventListener('click', () => {
+      document.getElementById('settings-sheet-id').value = MVOA.CFG.sheetId || '';
+      document.getElementById('settings-api-key').value = MVOA.CFG.apiKey || '';
+      document.getElementById('settings-sa-json').value = MVOA.CFG.saJson ? JSON.stringify(MVOA.CFG.saJson) : '';
+      document.getElementById('settings-drive-folder').value = MVOA.CFG.driveFolderId || '';
+      document.getElementById('settings-photo-url').value = MVOA.CFG.photoUploadUrl || '';
+      document.getElementById('settings-photo-secret').value = MVOA.CFG.photoUploadSecret || '';
+      document.getElementById('settings-error').textContent = '';
+      document.getElementById('settings-saved-msg').textContent = '';
+      show('settings-screen');
+    });
+    document.getElementById('settings-back-btn').addEventListener('click', () => {
+      show('home-screen');
+    });
+    document.getElementById('settings-save-btn').addEventListener('click', () => {
+      const sheetId = document.getElementById('settings-sheet-id').value.trim();
+      const apiKey = document.getElementById('settings-api-key').value.trim();
+      const saRaw = document.getElementById('settings-sa-json').value.trim();
+      const driveFolderId = document.getElementById('settings-drive-folder').value.trim();
+      const photoUploadUrl = document.getElementById('settings-photo-url').value.trim();
+      const photoUploadSecret = document.getElementById('settings-photo-secret').value.trim();
+      const errEl = document.getElementById('settings-error');
+      const savedEl = document.getElementById('settings-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+      let saJson;
+      try { saJson = saRaw ? JSON.parse(saRaw) : MVOA.CFG.saJson; }
+      catch (e) { errEl.textContent = 'Service account JSON is not valid JSON.'; return; }
+      if (!sheetId || !apiKey) { errEl.textContent = 'Sheet ID and API Key are required.'; return; }
+      MVOA.saveConfig({ sheetId, apiKey, saJson, driveFolderId, photoUploadUrl, photoUploadSecret });
+      savedEl.textContent = 'Saved.';
+    });
+
+    document.getElementById('module-back-btn').addEventListener('click', () => {
+      document.getElementById('module-container').innerHTML = '';
+      show('home-screen');
+    });
+
+    // ---- Home screen: role-aware module tiles ----
+    function showHome(user) {
+      document.getElementById('home-user-name').textContent = user.name;
+      document.getElementById('home-user-role').textContent = user.role;
+      const tilesEl = document.getElementById('module-tiles');
+      tilesEl.innerHTML = '';
+      const tiles = MVOA.modulesForRole(user.role);
+      if (!tiles.length) {
+        tilesEl.innerHTML = '<p class="muted">No modules available for your role yet.</p>';
+      }
+      tiles.forEach(m => {
+        const div = document.createElement('div');
+        div.className = 'tile';
+        div.innerHTML = `<div class="tile-icon">${m.icon || '📋'}</div><div class="tile-label">${m.label}</div>`;
+        div.addEventListener('click', () => openModule(m));
+        tilesEl.appendChild(div);
+      });
+      show('home-screen');
+    }
+
+    function openModule(m) {
+      document.getElementById('module-title').textContent = m.label;
+      const container = document.getElementById('module-container');
+      container.innerHTML = '';
+      show('module-screen');
+      m.init(container);
+    }
+
+    boot();
+  </script>
+</body>
+</html>

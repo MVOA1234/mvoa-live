@@ -1,0 +1,404 @@
+// ═══════════════════════════════════════════════════════════════
+// MVOA SHARED INFRASTRUCTURE
+// Used by: MVOA_Live.html (shell) and every module-*.js file
+// ═══════════════════════════════════════════════════════════════
+
+const MVOA = (function () {
+
+  // ───────────────────────────────────────────────────────────
+  // CONFIG (filled in by setup screen / localStorage, same pattern
+  // as the existing Inventory/Spares/O&M apps)
+  // ───────────────────────────────────────────────────────────
+  const CFG = {
+    sheetId: '',
+    apiKey: '',
+    saJson: null,   // parsed service-account JSON {client_email, private_key, ...}
+    driveFolderId: '',     // Google Drive folder where photos get uploaded
+    photoUploadUrl: '',    // Apps Script Web App URL (proxy that uploads under a real Google account's quota)
+    photoUploadSecret: ''  // shared secret matching the Apps Script's SHARED_SECRET
+  };
+
+  function loadConfig() {
+    try {
+      const raw = localStorage.getItem('mvoa_cfg');
+      if (raw) {
+        const saved = JSON.parse(raw);
+        Object.assign(CFG, saved);
+      }
+    } catch (e) { console.warn('[MVOA] config load failed', e); }
+    return CFG;
+  }
+
+  function saveConfig(partial) {
+    Object.assign(CFG, partial);
+    localStorage.setItem('mvoa_cfg', JSON.stringify(CFG));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SHEET TAB NAMES — central place to rename a tab without
+  // hunting through module files
+  // ───────────────────────────────────────────────────────────
+  const TABS = {
+    roles: 'Roles',
+    auditLog: 'AuditLog',
+    opsTasks: 'OpsTasks',
+    hsTemplates: 'HSChecklistTemplates',
+    hsItems: 'HSChecklistItems',
+    hsItemOptions: 'HSChecklistItemOptions',
+    hsLog: 'HSChecklistLog',
+    hsItemResults: 'HSChecklistItemResults',
+    expenseRequests: 'Expense_Requests',
+    expenseVotes: 'Expense_Votes',
+    approvalMatrix: 'ApprovalMatrix'
+  };
+
+  // ───────────────────────────────────────────────────────────
+  // GOOGLE SHEETS API (read via API key, write via service-account JWT)
+  // ───────────────────────────────────────────────────────────
+  async function sheetsRead(sheetName) {
+    // Uses the service-account token, not the plain API key — a bare API key
+    // can only read spreadsheets that are public ("anyone with the link"),
+    // and this Sheet is intentionally kept Restricted. The service account
+    // already has Editor access, so reuse that for reads too.
+    const token = await getServiceAccountToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}`;
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`Sheets read error (${sheetName}): ${r.status} ${body}`);
+    }
+    const d = await r.json();
+    return d.values || [];
+  }
+
+  async function sheetsWrite(sheetName, data) {
+    const token = await getServiceAccountToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}?valueInputOption=RAW&key=${CFG.apiKey}`;
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: data })
+    });
+    if (!r.ok) throw new Error(`Sheets write error (${sheetName}): ${r.status}`);
+    return r.json();
+  }
+
+  async function sheetsAppend(sheetName, row) {
+    const token = await getServiceAccountToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: [row] })
+    });
+    if (!r.ok) throw new Error(`Sheets append error (${sheetName}): ${r.status}`);
+    return r.json();
+  }
+
+  // batch append for multiple rows (e.g. logging several vote rows at once)
+  async function sheetsAppendMany(sheetName, rows) {
+    if (!rows.length) return;
+    const token = await getServiceAccountToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: rows })
+    });
+    if (!r.ok) throw new Error(`Sheets append error (${sheetName}): ${r.status}`);
+    return r.json();
+  }
+
+  // Updates one specific row (1-based, including the header as row 1) —
+  // used to edit an existing record in place, e.g. closing an OpsTask.
+  async function sheetsUpdateRow(sheetName, rowNumber, rowValues) {
+    const token = await getServiceAccountToken();
+    const range = `${sheetName}!A${rowNumber}`;
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ range, majorDimension: 'ROWS', values: [rowValues] })
+    });
+    if (!r.ok) throw new Error(`Sheets update error (${sheetName} row ${rowNumber}): ${r.status}`);
+    return r.json();
+  }
+
+  // Service Account JWT token generation (cached until near-expiry)
+  let saTokenCache = { token: '', expires: 0 };
+  async function getServiceAccountToken() {
+    if (Date.now() < saTokenCache.expires) return saTokenCache.token;
+    const sa = CFG.saJson;
+    if (!sa) throw new Error('No service account configured');
+    const now = Math.floor(Date.now() / 1000);
+    const b64url = s => s.replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const header = b64url(btoa(JSON.stringify({ alg: 'RS256', typ: 'JWT' })));
+    const claim = b64url(btoa(JSON.stringify({
+      iss: sa.client_email,
+      scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+      aud: 'https://oauth2.googleapis.com/token', exp: now + 3600, iat: now
+    })));
+    const sigInput = header + '.' + claim;
+    const pemBody = sa.private_key.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+    const keyBuf = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('pkcs8', keyBuf, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(sigInput));
+    const sigB64 = b64url(btoa(String.fromCharCode(...new Uint8Array(sig))));
+    const jwt = sigInput + '.' + sigB64;
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
+    });
+    const tok = await resp.json();
+    if (!tok.access_token) throw new Error('Token exchange failed: ' + JSON.stringify(tok));
+    saTokenCache = { token: tok.access_token, expires: Date.now() + (tok.expires_in - 60) * 1000 };
+    return tok.access_token;
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // PIN / ROLE AUTH
+  // ───────────────────────────────────────────────────────────
+  async function hashPin(pin) {
+    const enc = new TextEncoder();
+    const buf = await crypto.subtle.digest('SHA-256', enc.encode('MVOA_SALT_2026_' + pin));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function verifyPin(pin, hash) { return (await hashPin(pin)) === hash; }
+
+  let rolesCache = null;
+  async function loadRoles(force) {
+    if (rolesCache && !force) return rolesCache;
+    const rows = await sheetsRead(TABS.roles);
+    if (!rows.length) { rolesCache = []; return rolesCache; }
+    // Expected columns: Name | Role | PIN_Hash | Phone | Email | Active | EC_Member
+    rolesCache = rows.slice(1).map(r => ({
+      name: r[0] || '', role: r[1] || '', pinHash: r[2] || '',
+      phone: r[3] || '', email: r[4] || '',
+      active: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
+      ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[6]))
+    })).filter(u => u.name);
+    return rolesCache;
+  }
+
+  let currentUser = null;
+  async function login(pin) {
+    const users = await loadRoles();
+    for (const u of users) {
+      if (!u.active) continue;
+      if (await verifyPin(pin, u.pinHash)) {
+        currentUser = u;
+        sessionStorage.setItem('mvoa_user', JSON.stringify(u));
+        return u;
+      }
+    }
+    throw new Error('Invalid PIN');
+  }
+
+  function restoreSession() {
+    try {
+      const raw = sessionStorage.getItem('mvoa_user');
+      if (raw) currentUser = JSON.parse(raw);
+    } catch (e) { /* ignore */ }
+    return currentUser;
+  }
+
+  function logout() {
+    currentUser = null;
+    sessionStorage.removeItem('mvoa_user');
+  }
+
+  function getUser() { return currentUser; }
+
+  // ───────────────────────────────────────────────────────────
+  // AUDIT LOG (append-only, shared across all modules)
+  // Columns: Timestamp | Module | RequestID | EventType | Actor |
+  //          ActorRole | Comment | AmountAtAction | StatusAfter
+  // ───────────────────────────────────────────────────────────
+  async function logAudit({ module, requestId, eventType, comment = '', amount = '', statusAfter = '' }) {
+    const u = getUser() || { name: 'Unknown', role: '' };
+    const row = [
+      new Date().toISOString(),
+      module,
+      requestId,
+      eventType,
+      u.name,
+      u.role,
+      comment,
+      amount,
+      statusAfter
+    ];
+    return sheetsAppend(TABS.auditLog, row);
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // ID GENERATION — simple prefix + zero-padded counter based on
+  // existing rows. Good enough for this scale; not safe against
+  // true concurrent writes (last-write-wins on Sheets), acceptable here.
+  // ───────────────────────────────────────────────────────────
+  function nextId(prefix, existingIds) {
+    let max = 0;
+    existingIds.forEach(id => {
+      const m = String(id).match(new RegExp('^' + prefix + '-(\\d+)$'));
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    });
+    return prefix + '-' + String(max + 1).padStart(4, '0');
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // PHOTO CAPTURE (camera on phone via <input capture>, file picker
+  // on desktop — same input element handles both automatically)
+  // Returns a data URL; actual upload-to-storage strategy (e.g. Drive)
+  // is left to a TODO since Sheets cells can't hold binary data.
+  // ───────────────────────────────────────────────────────────
+  function capturePhoto({ accept = 'image/*', useCamera = true } = {}) {
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = accept;
+      if (useCamera) input.capture = 'environment';
+      input.style.display = 'none';
+      document.body.appendChild(input);
+      input.onchange = () => {
+        const file = input.files[0];
+        document.body.removeChild(input);
+        if (!file) return resolve(null);
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, dataUrl: reader.result, file });
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      };
+      input.click();
+    });
+  }
+  // TODO: photo storage destination not yet decided (Google Drive upload
+  // via the same service account vs. some other host). PhotoURL columns
+  // across the schema assume a real URL once this is wired up.
+
+  // ───────────────────────────────────────────────────────────
+  // LOGO — real finalized asset at assets/logo.png (relative to
+  // MVOA_Live.html). Returns an <img> tag, sized by the caller.
+  // ───────────────────────────────────────────────────────────
+  function logoSvg(size = 32) {
+    return `<img src="assets/logo.png" alt="MVOA" style="height:${size}px;width:auto;display:block;">`;
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // PHOTO UPLOAD — via Apps Script Web App proxy.
+  // Service accounts have no Drive storage quota on a personal
+  // (non-Workspace) account, so direct Drive API uploads with the
+  // service account token fail with storageQuotaExceeded. Instead,
+  // a small Apps Script (owned by a real Google account) receives
+  // the photo as base64 and saves it under that account's quota.
+  // ───────────────────────────────────────────────────────────
+  async function uploadPhotoToDrive(file, filename) {
+    if (!file) return '';
+    if (!CFG.photoUploadUrl) throw new Error('No photo upload URL configured (Settings → Photo Upload URL)');
+    if (!CFG.driveFolderId) throw new Error('No Drive folder configured for photo storage');
+
+    const base64 = await fileToBase64(file);
+    const r = await fetch(CFG.photoUploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight against Apps Script
+      body: JSON.stringify({
+        secret: CFG.photoUploadSecret,
+        base64,
+        filename: filename || ('mvoa-' + Date.now() + '.jpg'),
+        mimeType: file.type || 'image/jpeg',
+        folderId: CFG.driveFolderId
+      })
+    });
+    if (!r.ok) throw new Error('Photo upload proxy error: ' + r.status);
+    const d = await r.json();
+    if (d.error) throw new Error('Photo upload failed: ' + d.error);
+    return d.url;
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        // reader.result is a data URL like "data:image/jpeg;base64,XXXX" — strip the prefix
+        const result = reader.result;
+        const idx = result.indexOf(',');
+        resolve(idx >= 0 ? result.slice(idx + 1) : result);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // STATUS BADGES (shared visual vocabulary across modules)
+  // ───────────────────────────────────────────────────────────
+  const STATUS_STYLES = {
+    Open: { bg: '#fff3cd', fg: '#7a5b00' },
+    Pending: { bg: '#fff3cd', fg: '#7a5b00' },
+    Compliant: { bg: '#d4edda', fg: '#1e6b33' },
+    Pass: { bg: '#d4edda', fg: '#1e6b33' },
+    Approved: { bg: '#d4edda', fg: '#1e6b33' },
+    Closed: { bg: '#e2e3e5', fg: '#41464b' },
+    Overdue: { bg: '#f8d7da', fg: '#842029' },
+    Fail: { bg: '#f8d7da', fg: '#842029' },
+    Rejected: { bg: '#f8d7da', fg: '#842029' },
+    PartialFail: { bg: '#ffe5b4', fg: '#8a4b00' },
+    Escalated: { bg: '#ffe5b4', fg: '#8a4b00' }
+  };
+  function statusBadgeHtml(status) {
+    const s = STATUS_STYLES[status] || { bg: '#e2e3e5', fg: '#41464b' };
+    return `<span class="mvoa-badge" style="background:${s.bg};color:${s.fg}">${status}</span>`;
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // APP ICON BADGE (badge-on-open — see design discussion)
+  // ───────────────────────────────────────────────────────────
+  function setAppBadge(count) {
+    if ('setAppBadge' in navigator) {
+      if (count > 0) navigator.setAppBadge(count).catch(() => {});
+      else if ('clearAppBadge' in navigator) navigator.clearAppBadge().catch(() => {});
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // ASSET QR PARSING (shared by Operations module; format defined
+  // by Inventory's label printer: MVOA|AssetID|AssetName|Category|Location)
+  // ───────────────────────────────────────────────────────────
+  function parseAssetQR(text) {
+    if (typeof text !== 'string') return null;
+    const parts = text.split('|');
+    if (parts[0] !== 'MVOA' || parts.length < 5) return null;
+    return { assetId: parts[1], assetName: parts[2], category: parts[3], location: parts[4] };
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // MODULE REGISTRY — each module-*.js calls MVOA.registerModule()
+  // The shell loops over MVOA.modules to build home-screen tiles
+  // without hardcoding any module-specific logic.
+  // ───────────────────────────────────────────────────────────
+  const modules = {};
+  function registerModule(key, def) {
+    // def: { label, icon, roles: [...], init: function(container){...} }
+    modules[key] = def;
+  }
+  function modulesForRole(role) {
+    return Object.entries(modules)
+      .filter(([k, m]) => !m.roles || m.roles.includes(role) || m.roles.includes('ALL'))
+      .map(([k, m]) => ({ key: k, ...m }));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // PUBLIC API
+  // ───────────────────────────────────────────────────────────
+  return {
+    CFG, TABS,
+    loadConfig, saveConfig,
+    sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
+    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser,
+    logAudit, nextId,
+    capturePhoto, uploadPhotoToDrive,
+    logoSvg,
+    statusBadgeHtml, STATUS_STYLES,
+    setAppBadge,
+    parseAssetQR,
+    registerModule, modulesForRole, modules
+  };
+})();
