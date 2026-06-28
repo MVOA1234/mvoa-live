@@ -173,7 +173,8 @@ const MVOA = (function () {
     const rows = await sheetsRead(TABS.roles);
     if (!rows.length) { rolesCache = []; return rolesCache; }
     // Expected columns: Name | Role | PIN_Hash | Phone | Email | Active | EC_Member
-    rolesCache = rows.slice(1).map(r => ({
+    rolesCache = rows.slice(1).map((r, i) => ({
+      rowNumber: i + 2,
       name: r[0] || '', role: r[1] || '', pinHash: r[2] || '',
       phone: r[3] || '', email: r[4] || '',
       active: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
@@ -207,6 +208,28 @@ const MVOA = (function () {
   function logout() {
     currentUser = null;
     sessionStorage.removeItem('mvoa_user');
+  }
+
+  // Self-service PIN change for the currently logged-in user. Re-verifies
+  // the current PIN against the live sheet (not the cached/session copy)
+  // before allowing the change, so a stale local session can't be used
+  // to silently overwrite someone else's PIN.
+  async function changePin(currentPin, newPin) {
+    if (!currentUser) throw new Error('Not logged in.');
+    const users = await loadRoles(true);
+    const fresh = users.find(u => u.name === currentUser.name);
+    if (!fresh) throw new Error('Your user record could not be found — contact a Developer.');
+    const ok = await verifyPin(currentPin, fresh.pinHash);
+    if (!ok) throw new Error('Current PIN is incorrect.');
+    const newHash = await hashPin(newPin);
+    await sheetsUpdateRow(TABS.roles, fresh.rowNumber, [
+      fresh.name, fresh.role, newHash, fresh.phone, fresh.email,
+      fresh.active ? 'TRUE' : 'FALSE', fresh.ecMember ? 'TRUE' : 'FALSE'
+    ]);
+    fresh.pinHash = newHash;
+    currentUser = fresh;
+    sessionStorage.setItem('mvoa_user', JSON.stringify(currentUser));
+    await logAudit({ module: 'Settings', requestId: currentUser.name, eventType: 'PinChanged', comment: 'Self-service PIN change', statusAfter: 'Active' });
   }
 
   function getUser() { return currentUser; }
@@ -559,7 +582,7 @@ const MVOA = (function () {
     CFG, TABS,
     loadConfig, saveConfig,
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
-    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel,
+    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, changePin,
     loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
     logAudit, nextId,
     capturePhoto, uploadPhotoToDrive,
