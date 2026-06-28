@@ -4,7 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>MVOA</title>
-<link rel="stylesheet" href="css/shared.css">
+<script>
+  // ─── CACHE-BUSTING LOADER ───────────────────────────────────
+  // Appends a timestamp (?v=...) to every shared CSS/JS file URL so
+  // the browser always fetches the current version from GitHub Pages
+  // on each page load, instead of serving a stale cached copy after
+  // a deploy. No manual version bump needed — this runs automatically.
+  window.MVOA_CACHE_BUST = Date.now();
+  document.write('<link rel="stylesheet" href="css/shared.css?v=' + window.MVOA_CACHE_BUST + '">');
+</script>
 </head>
 <body>
 
@@ -114,11 +122,33 @@
   </div>
 
   <!-- ═══════════════ SCRIPTS ═══════════════ -->
-  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-  <script src="js/shared.js"></script>
-  <script src="js/module-ops.js"></script>
-  <script src="js/module-hs.js"></script>
-  <!-- module-expense.js will be added here later, no other changes needed -->
+  <script>
+    // Loads each script in order, with a cache-busting ?v= timestamp on
+    // the local MVOA files (jsQR is a versioned CDN URL already, left as-is).
+    // Order matters: shared.js must load before the module-*.js files,
+    // which register themselves against the MVOA object shared.js defines.
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('Failed to load ' + src));
+        document.body.appendChild(s);
+      });
+    }
+
+    const v = window.MVOA_CACHE_BUST;
+    loadScript('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js')
+      .then(() => loadScript('js/shared.js?v=' + v))
+      .then(() => loadScript('js/module-ops.js?v=' + v))
+      .then(() => loadScript('js/module-hs.js?v=' + v))
+      // .then(() => loadScript('js/module-expense.js?v=' + v)) // add here later, no other changes needed
+      .then(() => boot())
+      .catch(err => {
+        document.body.innerHTML = '<p style="padding:20px;color:#b3261e;">Failed to load app files: ' + err.message + '<br>Please check your connection and reload.</p>';
+        console.error('[MVOA] script load error', err);
+      });
+  </script>
 
   <script>
     function show(id) {
@@ -254,8 +284,6 @@
       show('module-screen');
       m.init(container);
     }
-
-    boot();
   </script>
 </body>
 </html>
