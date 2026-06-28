@@ -178,7 +178,8 @@ const MVOA = (function () {
       name: r[0] || '', role: r[1] || '', pinHash: r[2] || '',
       phone: r[3] || '', email: r[4] || '',
       active: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
-      ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[6]))
+      ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
+      title: r[7] || '' // optional per-person display title, e.g. "Secretary" — overrides roleLabel() on screen only
     })).filter(u => u.name);
     return rolesCache;
   }
@@ -236,7 +237,7 @@ const MVOA = (function () {
     const newHash = await hashPin(newPin);
     await sheetsUpdateRow(TABS.roles, fresh.rowNumber, [
       fresh.name, fresh.role, newHash, fresh.phone, fresh.email,
-      fresh.active ? 'TRUE' : 'FALSE', fresh.ecMember ? 'TRUE' : 'FALSE'
+      fresh.active ? 'TRUE' : 'FALSE', fresh.ecMember ? 'TRUE' : 'FALSE', fresh.title || ''
     ]);
     fresh.pinHash = newHash;
     currentUser = fresh;
@@ -259,6 +260,13 @@ const MVOA = (function () {
   };
   function roleLabel(code) {
     return ROLE_LABELS[code] || code || '';
+  }
+  // Per-person display title (e.g. "Secretary", "President") if set on
+  // their Roles row, falling back to the generic role-code label. This
+  // is purely cosmetic — access-control logic always uses user.role.
+  function displayTitle(user) {
+    if (!user) return '';
+    return user.title || roleLabel(user.role);
   }
 
   // ───────────────────────────────────────────────────────────
@@ -315,7 +323,7 @@ const MVOA = (function () {
   // is "user:<name>" or "tech:<TechnicianID>" so the two namespaces never collide.
   async function loadAssigneeOptions() {
     const [users, techs] = await Promise.all([loadRoles(), loadTechnicians()]);
-    const userOpts = users.filter(u => u.active).map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + roleLabel(u.role) + ')' }));
+    const userOpts = users.filter(u => u.active).map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + displayTitle(u) + ')' }));
     const techOpts = techs.filter(t => t.Active).map(t => ({ value: 'tech:' + t.TechnicianID, label: t.Name + ' (Technician)' }));
     return userOpts.concat(techOpts).sort((a, b) => a.label.localeCompare(b.label));
   }
@@ -594,7 +602,7 @@ const MVOA = (function () {
     CFG, TABS,
     loadConfig, saveConfig,
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
-    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, changePin,
+    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
     logAudit, nextId,
     capturePhoto, uploadPhotoToDrive,
