@@ -211,6 +211,21 @@ const MVOA = (function () {
 
   function getUser() { return currentUser; }
 
+  // Friendly display names for role codes — the codes themselves (DEV, FM,
+  // TRES, SEC, EC, OPS) are what all access-control logic checks against,
+  // this is purely cosmetic for what's shown on screen.
+  const ROLE_LABELS = {
+    DEV: 'Developer',
+    FM: 'Facility Manager',
+    OPS: 'Operations Staff',
+    SEC: 'Security',
+    TRES: 'Treasurer',
+    EC: 'Executive Committee'
+  };
+  function roleLabel(code) {
+    return ROLE_LABELS[code] || code || '';
+  }
+
   // ───────────────────────────────────────────────────────────
   // OPS CATEGORIES (sub-tiles within Daily Operations) + TECHNICIANS
   // Columns (OpsCategories): CategoryID | Name | Icon | Color |
@@ -265,7 +280,7 @@ const MVOA = (function () {
   // is "user:<name>" or "tech:<TechnicianID>" so the two namespaces never collide.
   async function loadAssigneeOptions() {
     const [users, techs] = await Promise.all([loadRoles(), loadTechnicians()]);
-    const userOpts = users.filter(u => u.active).map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + u.role + ')' }));
+    const userOpts = users.filter(u => u.active).map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + roleLabel(u.role) + ')' }));
     const techOpts = techs.filter(t => t.Active).map(t => ({ value: 'tech:' + t.TechnicianID, label: t.Name + ' (Technician)' }));
     return userOpts.concat(techOpts).sort((a, b) => a.label.localeCompare(b.label));
   }
@@ -544,7 +559,7 @@ const MVOA = (function () {
     CFG, TABS,
     loadConfig, saveConfig,
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
-    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser,
+    hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel,
     loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
     logAudit, nextId,
     capturePhoto, uploadPhotoToDrive,
