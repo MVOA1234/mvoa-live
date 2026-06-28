@@ -42,6 +42,8 @@ const MVOA = (function () {
     roles: 'Roles',
     auditLog: 'AuditLog',
     opsTasks: 'OpsTasks',
+    opsCategories: 'OpsCategories',
+    technicians: 'Technicians',
     hsTemplates: 'HSChecklistTemplates',
     hsItems: 'HSChecklistItems',
     hsItemOptions: 'HSChecklistItemOptions',
@@ -210,6 +212,74 @@ const MVOA = (function () {
   function getUser() { return currentUser; }
 
   // ───────────────────────────────────────────────────────────
+  // OPS CATEGORIES (sub-tiles within Daily Operations) + TECHNICIANS
+  // Columns (OpsCategories): CategoryID | Name | Icon | Color |
+  //   AllowedRoles | AllowedUsers | Active | SortOrder
+  // Columns (Technicians): TechnicianID | Name | Contact | Active
+  // ───────────────────────────────────────────────────────────
+  let categoriesCache = null;
+  async function loadCategories(force) {
+    if (categoriesCache && !force) return categoriesCache;
+    const rows = await sheetsRead(TABS.opsCategories);
+    if (!rows.length) { categoriesCache = []; return categoriesCache; }
+    categoriesCache = rows.slice(1).map((r, i) => ({
+      rowNumber: i + 2,
+      CategoryID: r[0] || '', Name: r[1] || '', Icon: r[2] || '', Color: r[3] || '',
+      AllowedRoles: (r[4] || '').split(',').map(s => s.trim()).filter(Boolean),
+      AllowedUsers: (r[5] || '').split(',').map(s => s.trim()).filter(Boolean),
+      Active: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
+      SortOrder: parseInt(r[7], 10) || 0
+    })).filter(c => c.CategoryID);
+    categoriesCache.sort((a, b) => a.SortOrder - b.SortOrder);
+    return categoriesCache;
+  }
+
+  let techniciansCache = null;
+  async function loadTechnicians(force) {
+    if (techniciansCache && !force) return techniciansCache;
+    const rows = await sheetsRead(TABS.technicians);
+    if (!rows.length) { techniciansCache = []; return techniciansCache; }
+    techniciansCache = rows.slice(1).map((r, i) => ({
+      rowNumber: i + 2,
+      TechnicianID: r[0] || '', Name: r[1] || '', Contact: r[2] || '',
+      Active: ['true', 'TRUE', '1', 'yes'].includes(String(r[3]))
+    })).filter(t => t.TechnicianID);
+    return techniciansCache;
+  }
+
+  // DEV role always has full access. Otherwise: a user can EDIT a category
+  // if their role is in AllowedRoles OR their name is in AllowedUsers.
+  // Anyone who can see the parent module (role-gated at module level) can
+  // at least VIEW every category — categories without edit access render
+  // grayed out / read-only rather than being hidden.
+  function canEditCategory(category, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    if (category.AllowedRoles.includes(user.role)) return true;
+    if (category.AllowedUsers.includes(user.name)) return true;
+    return false;
+  }
+
+  // Combined Assigned-To options: app Users (from Roles, active only) +
+  // external Technicians. Stored/returned as {value, label} where value
+  // is "user:<name>" or "tech:<TechnicianID>" so the two namespaces never collide.
+  async function loadAssigneeOptions() {
+    const [users, techs] = await Promise.all([loadRoles(), loadTechnicians()]);
+    const userOpts = users.filter(u => u.active).map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + u.role + ')' }));
+    const techOpts = techs.filter(t => t.Active).map(t => ({ value: 'tech:' + t.TechnicianID, label: t.Name + ' (Technician)' }));
+    return userOpts.concat(techOpts).sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  function assigneeLabel(assignedTo, assigneeOptions) {
+    if (!assignedTo) return '';
+    const found = (assigneeOptions || []).find(o => o.value === assignedTo);
+    if (found) return found.label;
+    // fallback if options weren't loaded / person since deactivated
+    return assignedTo.replace(/^user:|^tech:/, '');
+  }
+
+
+  // ───────────────────────────────────────────────────────────
   // AUDIT LOG (append-only, shared across all modules)
   // Columns: Timestamp | Module | RequestID | EventType | Actor |
   //          ActorRole | Comment | AmountAtAction | StatusAfter
@@ -247,10 +317,44 @@ const MVOA = (function () {
   // ───────────────────────────────────────────────────────────
   // PHOTO CAPTURE (camera on phone via <input capture>, file picker
   // on desktop — same input element handles both automatically)
-  // Returns a data URL; actual upload-to-storage strategy (e.g. Drive)
-  // is left to a TODO since Sheets cells can't hold binary data.
+  // Captured photos are resized/compressed client-side before they're
+  // ever uploaded — phone cameras often shoot 8-12MP photos, which is
+  // overkill for task/checklist evidence and slow on mobile data.
+  // Resized to a max edge of ~1280px, JPEG quality ~0.7.
   // ───────────────────────────────────────────────────────────
-  function capturePhoto({ accept = 'image/*', useCamera = true } = {}) {
+  const PHOTO_MAX_EDGE = 1280;
+  const PHOTO_JPEG_QUALITY = 0.7;
+
+  function resizeAndCompressImage(dataUrl, maxEdge = PHOTO_MAX_EDGE, quality = PHOTO_JPEG_QUALITY) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxEdge || height > maxEdge) {
+          if (width >= height) {
+            height = Math.round(height * (maxEdge / width));
+            width = maxEdge;
+          } else {
+            width = Math.round(width * (maxEdge / height));
+            height = maxEdge;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(blob => {
+          if (!blob) { reject(new Error('Image compression failed')); return; }
+          resolve(blob);
+        }, 'image/jpeg', quality);
+      };
+      img.onerror = () => reject(new Error('Could not load captured image for compression'));
+      img.src = dataUrl;
+    });
+  }
+
+  function capturePhoto({ accept = 'image/*', useCamera = true, maxEdge = PHOTO_MAX_EDGE, quality = PHOTO_JPEG_QUALITY } = {}) {
     return new Promise((resolve, reject) => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -263,7 +367,29 @@ const MVOA = (function () {
         document.body.removeChild(input);
         if (!file) return resolve(null);
         const reader = new FileReader();
-        reader.onload = () => resolve({ name: file.name, dataUrl: reader.result, file });
+        reader.onload = async () => {
+          const originalDataUrl = reader.result;
+          try {
+            const compressedBlob = await resizeAndCompressImage(originalDataUrl, maxEdge, quality);
+            // Give the compressed blob a real filename + jpeg type so it behaves
+            // like a normal File for the upload code path (which expects file.name/type).
+            const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
+            const compressedFile = new File([compressedBlob], baseName + '.jpg', { type: 'image/jpeg' });
+            const compressedReader = new FileReader();
+            compressedReader.onload = () => resolve({
+              name: compressedFile.name,
+              dataUrl: compressedReader.result,
+              file: compressedFile,
+              originalSizeBytes: file.size,
+              compressedSizeBytes: compressedFile.size
+            });
+            compressedReader.onerror = reject;
+            compressedReader.readAsDataURL(compressedFile);
+          } catch (e) {
+            console.warn('[MVOA] photo compression failed, using original', e);
+            resolve({ name: file.name, dataUrl: originalDataUrl, file, originalSizeBytes: file.size, compressedSizeBytes: file.size });
+          }
+        };
         reader.onerror = reject;
         reader.readAsDataURL(file);
       };
@@ -419,6 +545,7 @@ const MVOA = (function () {
     loadConfig, saveConfig,
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser,
+    loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
     logAudit, nextId,
     capturePhoto, uploadPhotoToDrive,
     logoSvg,
