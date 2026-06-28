@@ -764,16 +764,31 @@ const OpsModule = (function () {
           table { width: 100%; border-collapse: collapse; margin-top: 16px; }
           th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.85rem; }
           th { background: #f5f6f8; }
+          .back-btn {
+            display: inline-block; margin-bottom: 16px; padding: 10px 18px;
+            border-radius: 8px; border: none; background: #1d4e6b; color: white;
+            font-size: 0.95rem; font-weight: 600; cursor: pointer;
+          }
+          @media print { .back-btn { display: none; } }
         </style>
       </head>
       <body>
+        <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
         <h1>MVOA — ${escapeHtml(title)}</h1>
         <p class="muted">Generated ${new Date().toLocaleString()}</p>
         <table>
           <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
           <tbody>${tableRows || `<tr><td colspan="${columns.length}">No data.</td></tr>`}</tbody>
         </table>
-        <script>window.onload = () => { window.print(); };</script>
+        <script>
+          window.onload = () => { window.print(); };
+          document.getElementById('back-to-app-btn').addEventListener('click', () => {
+            window.close();
+            setTimeout(() => {
+              document.body.innerHTML = '<p style="padding:20px;">You can close this tab/window now and return to the MVOA app in your other tab.</p>';
+            }, 300);
+          });
+        </script>
       </body>
       </html>
     `);
