@@ -53,6 +53,9 @@
         <h1>MVOA</h1>
         <p class="muted">Myans Villas Owners Association</p>
       </div>
+      <label>Logging in as
+        <select id="login-name"><option value="">Loading…</option></select>
+      </label>
       <label>Enter PIN
         <input id="login-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="8">
       </label>
@@ -232,6 +235,21 @@
         showHome(user);
       } else {
         show('login-screen');
+        populateLoginNames();
+      }
+    }
+
+    async function populateLoginNames(force) {
+      const sel = document.getElementById('login-name');
+      sel.innerHTML = '<option value="">Loading…</option>';
+      try {
+        const users = await MVOA.loadRoles(force);
+        const active = users.filter(u => u.active).sort((a, b) => a.name.localeCompare(b.name));
+        sel.innerHTML = '<option value="">— Select your name —</option>' +
+          active.map(u => `<option value="${u.name.replace(/"/g, '&quot;')}">${u.name} (${MVOA.roleLabel(u.role)})</option>`).join('');
+      } catch (e) {
+        sel.innerHTML = '<option value="">Could not load names</option>';
+        console.error('[MVOA] populateLoginNames error', e);
       }
     }
 
@@ -251,6 +269,7 @@
       errEl.textContent = '';
       MVOA.saveConfig({ sheetId, apiKey, saJson, driveFolderId, photoUploadUrl, photoUploadSecret });
       show('login-screen');
+      populateLoginNames();
     });
 
     // ---- Login ----
@@ -258,12 +277,14 @@
     document.getElementById('login-pin').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 
     async function doLogin() {
+      const name = document.getElementById('login-name').value;
       const pin = document.getElementById('login-pin').value.trim();
       const errEl = document.getElementById('login-error');
       errEl.textContent = '';
+      if (!name) { errEl.textContent = 'Please select who you are logging in as.'; return; }
       if (!pin) return;
       try {
-        const user = await MVOA.login(pin);
+        const user = await MVOA.login(pin, name);
         document.getElementById('login-pin').value = '';
         showHome(user);
       } catch (e) {
@@ -279,6 +300,7 @@
     document.getElementById('logout-btn').addEventListener('click', () => {
       MVOA.logout();
       show('login-screen');
+      populateLoginNames(true);
     });
 
     // ---- Settings ----
