@@ -125,12 +125,12 @@
       </label>
       <label>Role
         <select id="mu-role">
-          <option value="DEV">DEV</option>
-          <option value="FM">FM</option>
-          <option value="OPS">OPS</option>
-          <option value="SEC">SEC</option>
-          <option value="TRES">TRES</option>
-          <option value="EC">EC</option>
+          <option value="DEV">Developer</option>
+          <option value="FM">Facility Manager</option>
+          <option value="OPS">Operations Staff</option>
+          <option value="SEC">Security</option>
+          <option value="TRES">Treasurer</option>
+          <option value="EC">Executive Committee</option>
         </select>
       </label>
       <label>PIN (4&ndash;8 digits)
@@ -316,7 +316,7 @@
         }
         listEl.innerHTML = users.map(u => `
           <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
-            <span>${u.name} <span class="muted">(${u.role})</span></span>
+            <span>${u.name} <span class="muted">(${MVOA.roleLabel(u.role)})</span></span>
             <span>${u.active ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Closed')}</span>
           </div>
         `).join('');
@@ -379,7 +379,7 @@
     // ---- Home screen: role-aware module tiles ----
     function showHome(user) {
       document.getElementById('home-user-name').textContent = user.name;
-      document.getElementById('home-user-role').textContent = user.role;
+      document.getElementById('home-user-role').textContent = MVOA.roleLabel(user.role);
       const tilesEl = document.getElementById('module-tiles');
       tilesEl.innerHTML = '';
       const tiles = MVOA.modulesForRole(user.role);
