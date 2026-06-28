@@ -134,12 +134,13 @@ input, textarea, select {
 }
 .mvoa-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 
-table.mvoa-table { width: 100%; border-collapse: collapse; }
+table.mvoa-table { width: 100%; border-collapse: collapse; min-width: 480px; }
 table.mvoa-table th, table.mvoa-table td {
   border-bottom: 1px solid var(--border);
-  padding: 8px 6px;
+  padding: 8px 10px;
   text-align: left;
   font-size: 0.9rem;
+  white-space: nowrap;
 }
 .report-row-overdue td { background: #f8d7da; }
 
