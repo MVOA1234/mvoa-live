@@ -658,7 +658,8 @@ const OpsModule = (function () {
         Assignee: key ? MVOA.assigneeLabel(key, assigneeOptions) : 'Unassigned',
         Open: list.filter(t => t.Status === 'Open').length,
         Closed: list.filter(t => t.Status === 'Closed').length,
-        'Avg Days to Close': avgDays
+        'Avg Days to Close': avgDays,
+        _key: key // not rendered as a column — used only to drive the drill-down
       };
     }).sort((a, b) => b.Open - a.Open);
 
@@ -666,8 +667,45 @@ const OpsModule = (function () {
       title: 'Tasks by Assignee',
       columns: ['Assignee', 'Open', 'Closed', 'Avg Days to Close'],
       rows,
-      filenameBase: 'ops-report-by-assignee'
+      filenameBase: 'ops-report-by-assignee',
+      onRowClick: row => renderAssigneeDrillDown(body, row)
     });
+  }
+
+  // Shows the actual task list for one assignee, right below the table,
+  // when their row is tapped in the By Assignee report.
+  function renderAssigneeDrillDown(body, row) {
+    let panel = body.querySelector('#ops-assignee-drilldown');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'ops-assignee-drilldown';
+      panel.className = 'card';
+      panel.style.marginTop = '14px';
+      body.appendChild(panel);
+    }
+    const list = tasksCache.filter(t => (t.AssignedTo || '') === row._key)
+      .sort((a, b) => (b.CreatedDate || '').localeCompare(a.CreatedDate || ''));
+
+    panel.innerHTML = `
+      <div class="mvoa-row">
+        <h3 style="margin:0;color:var(--mvoa-blue);">${escapeHtml(row.Assignee)}'s Tasks</h3>
+        <button class="btn-secondary" id="ops-drilldown-close">✕ Close</button>
+      </div>
+      <div style="margin-top:10px;">
+        ${list.length ? list.map(t => `
+          <div class="mvoa-list-item">
+            <div class="mvoa-row">
+              <strong>${escapeHtml(t.Title)}</strong>
+              ${MVOA.statusBadgeHtml(t.Status === 'Open' ? 'Open' : 'Closed')}
+            </div>
+            <p class="muted" style="margin:4px 0;font-size:0.8rem;">${escapeHtml(categoryName(t.CategoryID))} · Priority: ${escapeHtml(t.Priority)} · Created ${formatDate(t.CreatedDate)}</p>
+            ${t.Status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>` : ''}
+          </div>
+        `).join('') : '<p class="muted">No tasks found.</p>'}
+      </div>
+    `;
+    panel.querySelector('#ops-drilldown-close').addEventListener('click', () => panel.remove());
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   function renderReportOverdue(body) {
@@ -699,7 +737,7 @@ const OpsModule = (function () {
 
   // Generic table renderer + CSV/PDF export, shared by all three reports.
   function renderReportTable(body, opts) {
-    const { title, columns, rows, filenameBase, rowClass, append } = opts;
+    const { title, columns, rows, filenameBase, rowClass, append, onRowClick } = opts;
     const tableHtml = `
       <div class="card" style="max-width:100%;margin:0 0 14px 0;">
         <div class="mvoa-row">
@@ -709,11 +747,12 @@ const OpsModule = (function () {
             <button class="btn-secondary ops-report-pdf-btn">🖨 Print to PDF</button>
           </div>
         </div>
+        ${onRowClick ? `<p class="muted" style="margin:8px 0 0;">Tap a row to see that person's tasks.</p>` : ''}
         <div style="overflow-x:auto;margin-top:10px;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:8px;">
           <table class="mvoa-table" id="ops-report-table">
             <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
             <tbody>
-              ${rows.length ? rows.map(r => `<tr class="${rowClass ? rowClass(r) : ''}">${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' ? r[c] : (typeof r[c] === 'number' ? r[c] : '—')))}</td>`).join('')}</tr>`).join('')
+              ${rows.length ? rows.map((r, i) => `<tr class="${rowClass ? rowClass(r) : ''}" ${onRowClick ? `data-row-index="${i}" style="cursor:pointer;"` : ''}>${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' ? r[c] : (typeof r[c] === 'number' ? r[c] : '—')))}</td>`).join('')}</tr>`).join('')
                        : `<tr><td colspan="${columns.length}" class="muted">No data.</td></tr>`}
             </tbody>
           </table>
@@ -723,11 +762,16 @@ const OpsModule = (function () {
     if (append) body.insertAdjacentHTML('beforeend', tableHtml);
     else body.innerHTML = tableHtml;
 
-    const scope = append ? body : body; // querySelector still finds the just-inserted block either way
     const csvBtn = [...body.querySelectorAll('.ops-report-csv-btn')].pop();
     const pdfBtn = [...body.querySelectorAll('.ops-report-pdf-btn')].pop();
     csvBtn.addEventListener('click', () => exportReportCsv(title, columns, rows, filenameBase));
     pdfBtn.addEventListener('click', () => printReportPdf(title, columns, rows));
+    if (onRowClick) {
+      const table = [...body.querySelectorAll('#ops-report-table')].pop();
+      table.querySelectorAll('tbody tr[data-row-index]').forEach(tr => {
+        tr.addEventListener('click', () => onRowClick(rows[parseInt(tr.dataset.rowIndex, 10)]));
+      });
+    }
   }
 
   function exportReportCsv(title, columns, rows, filenameBase) {
