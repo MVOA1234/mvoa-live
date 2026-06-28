@@ -709,7 +709,7 @@ const OpsModule = (function () {
             <button class="btn-secondary ops-report-pdf-btn">🖨 Print to PDF</button>
           </div>
         </div>
-        <div style="overflow-x:auto;margin-top:10px;">
+        <div style="overflow-x:auto;margin-top:10px;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:8px;">
           <table class="mvoa-table" id="ops-report-table">
             <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
             <tbody>
