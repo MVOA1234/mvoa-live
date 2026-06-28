@@ -184,8 +184,20 @@ const MVOA = (function () {
   }
 
   let currentUser = null;
-  async function login(pin) {
+  async function login(pin, name) {
     const users = await loadRoles();
+    if (name) {
+      const u = users.find(u => u.name === name);
+      if (!u || !u.active) throw new Error('Invalid PIN');
+      if (await verifyPin(pin, u.pinHash)) {
+        currentUser = u;
+        sessionStorage.setItem('mvoa_user', JSON.stringify(u));
+        return u;
+      }
+      throw new Error('Invalid PIN');
+    }
+    // Fallback (no name selected): scan all active users, slower but
+    // keeps old behavior working if the dropdown ever fails to load.
     for (const u of users) {
       if (!u.active) continue;
       if (await verifyPin(pin, u.pinHash)) {
