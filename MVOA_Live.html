@@ -110,6 +110,24 @@
       <p class="muted" id="settings-saved-msg"></p>
     </div>
 
+    <!-- Visible to every logged-in user -->
+    <div class="card" id="change-pin-card" style="margin-top:16px;">
+      <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Change My PIN</h2>
+      <p class="muted">Update your own login PIN. You'll need your current PIN to confirm it's you.</p>
+      <label>Current PIN
+        <input id="cp-current" type="password" inputmode="numeric" maxlength="8">
+      </label>
+      <label>New PIN (4&ndash;8 digits)
+        <input id="cp-new" type="password" inputmode="numeric" maxlength="8">
+      </label>
+      <label>Confirm New PIN
+        <input id="cp-new-confirm" type="password" inputmode="numeric" maxlength="8">
+      </label>
+      <button id="cp-save-btn" class="btn-primary">Update PIN</button>
+      <p class="error-text" id="cp-error"></p>
+      <p class="muted" id="cp-saved-msg"></p>
+    </div>
+
     <!-- DEV-only: create new app users without ever touching the Roles
          sheet's PIN_Hash column by hand. Hashing happens here, in-app,
          using the same salt+SHA-256 scheme the login screen checks against. -->
@@ -134,11 +152,12 @@
         </select>
       </label>
       <label>PIN (4&ndash;8 digits)
-        <input id="mu-pin" type="password" inputmode="numeric" maxlength="8" placeholder="e.g. 4821">
+        <input id="mu-pin" type="password" inputmode="numeric" maxlength="8" placeholder="default: 1111">
       </label>
       <label>Confirm PIN
         <input id="mu-pin-confirm" type="password" inputmode="numeric" maxlength="8">
       </label>
+      <p class="muted" style="margin-top:-8px;">Standard default PIN for new users is <strong>1111</strong> — ask them to change it via Settings → Change My PIN after first login.</p>
       <label>Phone (optional)
         <input id="mu-phone" type="text">
       </label>
@@ -272,6 +291,11 @@
       document.getElementById('settings-photo-secret').value = MVOA.CFG.photoUploadSecret || '';
       document.getElementById('settings-error').textContent = '';
       document.getElementById('settings-saved-msg').textContent = '';
+      document.getElementById('cp-current').value = '';
+      document.getElementById('cp-new').value = '';
+      document.getElementById('cp-new-confirm').value = '';
+      document.getElementById('cp-error').textContent = '';
+      document.getElementById('cp-saved-msg').textContent = '';
 
       const muCard = document.getElementById('manage-users-card');
       const user = MVOA.getUser();
@@ -302,6 +326,34 @@
       if (!sheetId || !apiKey) { errEl.textContent = 'Sheet ID and API Key are required.'; return; }
       MVOA.saveConfig({ sheetId, apiKey, saJson, driveFolderId, photoUploadUrl, photoUploadSecret });
       savedEl.textContent = 'Saved.';
+    });
+
+    // ---- Change My PIN (any logged-in user) ----
+    document.getElementById('cp-save-btn').addEventListener('click', async () => {
+      const currentPin = document.getElementById('cp-current').value.trim();
+      const newPin = document.getElementById('cp-new').value.trim();
+      const newPinConfirm = document.getElementById('cp-new-confirm').value.trim();
+      const errEl = document.getElementById('cp-error');
+      const savedEl = document.getElementById('cp-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+
+      if (!currentPin) { errEl.textContent = 'Enter your current PIN.'; return; }
+      if (!/^\d{4,8}$/.test(newPin)) { errEl.textContent = 'New PIN must be 4-8 digits.'; return; }
+      if (newPin !== newPinConfirm) { errEl.textContent = 'New PIN and Confirm New PIN do not match.'; return; }
+      if (newPin === currentPin) { errEl.textContent = 'New PIN must be different from your current PIN.'; return; }
+
+      const btn = document.getElementById('cp-save-btn');
+      btn.disabled = true;
+      try {
+        await MVOA.changePin(currentPin, newPin);
+        document.getElementById('cp-current').value = '';
+        document.getElementById('cp-new').value = '';
+        document.getElementById('cp-new-confirm').value = '';
+        savedEl.textContent = '✓ PIN updated.';
+      } catch (e) {
+        errEl.textContent = e.message;
+      }
+      btn.disabled = false;
     });
 
     // ---- Manage Users (DEV only) ----
