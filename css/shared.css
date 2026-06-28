@@ -105,6 +105,8 @@ input, textarea, select {
 .tile:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.08); transform: translateY(-1px); }
 .tile-icon { font-size: 2rem; margin-bottom: 8px; }
 .tile-label { font-weight: 600; font-size: 0.95rem; }
+.tile-locked { opacity: 0.55; }
+.tile-locked:hover { box-shadow: none; transform: none; }
 
 .module-header {
   display: flex;
@@ -139,9 +141,10 @@ table.mvoa-table th, table.mvoa-table td {
   text-align: left;
   font-size: 0.9rem;
 }
+.report-row-overdue td { background: #f8d7da; }
 
 /* Operations module */
-.ops-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.ops-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
 .ops-tab-btn {
   padding: 8px 14px;
   border-radius: 8px;
