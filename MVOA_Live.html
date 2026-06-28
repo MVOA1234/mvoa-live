@@ -109,6 +109,49 @@
       <p class="error-text" id="settings-error"></p>
       <p class="muted" id="settings-saved-msg"></p>
     </div>
+
+    <!-- DEV-only: create new app users without ever touching the Roles
+         sheet's PIN_Hash column by hand. Hashing happens here, in-app,
+         using the same salt+SHA-256 scheme the login screen checks against. -->
+    <div class="card" id="manage-users-card" style="margin-top:16px;">
+      <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
+      <p class="muted">Create a new login. The PIN is hashed before it's saved — nobody, including you later, can read it back out.</p>
+
+      <div id="manage-users-list" style="margin:14px 0;"></div>
+
+      <h3 style="margin:18px 0 4px;font-size:0.95rem;">Add New User</h3>
+      <label>Name
+        <input id="mu-name" type="text" placeholder="e.g. Ramesh Kumar">
+      </label>
+      <label>Role
+        <select id="mu-role">
+          <option value="DEV">DEV</option>
+          <option value="FM">FM</option>
+          <option value="OPS">OPS</option>
+          <option value="SEC">SEC</option>
+          <option value="TRES">TRES</option>
+          <option value="EC">EC</option>
+        </select>
+      </label>
+      <label>PIN (4&ndash;8 digits)
+        <input id="mu-pin" type="password" inputmode="numeric" maxlength="8" placeholder="e.g. 4821">
+      </label>
+      <label>Confirm PIN
+        <input id="mu-pin-confirm" type="password" inputmode="numeric" maxlength="8">
+      </label>
+      <label>Phone (optional)
+        <input id="mu-phone" type="text">
+      </label>
+      <label>Email (optional)
+        <input id="mu-email" type="text">
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
+        <input id="mu-ec" type="checkbox" style="width:auto;"> EC Member
+      </label>
+      <button id="mu-add-btn" class="btn-primary">Create User</button>
+      <p class="error-text" id="mu-error"></p>
+      <p class="muted" id="mu-saved-msg"></p>
+    </div>
   </div>
 
   <!-- ═══════════════ MODULE CONTAINER (a module renders itself in here) ═══════════════ -->
@@ -229,6 +272,15 @@
       document.getElementById('settings-photo-secret').value = MVOA.CFG.photoUploadSecret || '';
       document.getElementById('settings-error').textContent = '';
       document.getElementById('settings-saved-msg').textContent = '';
+
+      const muCard = document.getElementById('manage-users-card');
+      const user = MVOA.getUser();
+      if (user && user.role === 'DEV') {
+        muCard.classList.remove('hidden');
+        loadManageUsersList();
+      } else {
+        muCard.classList.add('hidden');
+      }
       show('settings-screen');
     });
     document.getElementById('settings-back-btn').addEventListener('click', () => {
@@ -250,6 +302,73 @@
       if (!sheetId || !apiKey) { errEl.textContent = 'Sheet ID and API Key are required.'; return; }
       MVOA.saveConfig({ sheetId, apiKey, saJson, driveFolderId, photoUploadUrl, photoUploadSecret });
       savedEl.textContent = 'Saved.';
+    });
+
+    // ---- Manage Users (DEV only) ----
+    async function loadManageUsersList(force) {
+      const listEl = document.getElementById('manage-users-list');
+      listEl.innerHTML = '<p class="muted">Loading users…</p>';
+      try {
+        const users = await MVOA.loadRoles(force);
+        if (!users.length) {
+          listEl.innerHTML = '<p class="muted">No users yet.</p>';
+          return;
+        }
+        listEl.innerHTML = users.map(u => `
+          <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
+            <span>${u.name} <span class="muted">(${u.role})</span></span>
+            <span>${u.active ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Closed')}</span>
+          </div>
+        `).join('');
+      } catch (e) {
+        listEl.innerHTML = '<p class="error-text">Could not load users: ' + e.message + '</p>';
+      }
+    }
+
+    document.getElementById('mu-add-btn').addEventListener('click', async () => {
+      const name = document.getElementById('mu-name').value.trim();
+      const role = document.getElementById('mu-role').value;
+      const pin = document.getElementById('mu-pin').value.trim();
+      const pinConfirm = document.getElementById('mu-pin-confirm').value.trim();
+      const phone = document.getElementById('mu-phone').value.trim();
+      const email = document.getElementById('mu-email').value.trim();
+      const ecMember = document.getElementById('mu-ec').checked;
+      const errEl = document.getElementById('mu-error');
+      const savedEl = document.getElementById('mu-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+
+      if (!name) { errEl.textContent = 'Name is required.'; return; }
+      if (!/^\d{4,8}$/.test(pin)) { errEl.textContent = 'PIN must be 4-8 digits.'; return; }
+      if (pin !== pinConfirm) { errEl.textContent = 'PIN and Confirm PIN do not match.'; return; }
+
+      const existing = await MVOA.loadRoles();
+      if (existing.some(u => u.name.toLowerCase() === name.toLowerCase())) {
+        errEl.textContent = 'A user with this name already exists. Use a unique name (e.g. include a surname).';
+        return;
+      }
+
+      const addBtn = document.getElementById('mu-add-btn');
+      addBtn.disabled = true;
+      try {
+        const pinHash = await MVOA.hashPin(pin);
+        const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE'];
+        await MVOA.sheetsAppend(MVOA.TABS.roles, row);
+        await MVOA.logAudit({ module: 'Settings', requestId: name, eventType: 'UserCreated', comment: 'Role: ' + role, statusAfter: 'Active' });
+      } catch (e) {
+        errEl.textContent = 'Could not save user: ' + e.message;
+        addBtn.disabled = false;
+        return;
+      }
+      addBtn.disabled = false;
+
+      document.getElementById('mu-name').value = '';
+      document.getElementById('mu-pin').value = '';
+      document.getElementById('mu-pin-confirm').value = '';
+      document.getElementById('mu-phone').value = '';
+      document.getElementById('mu-email').value = '';
+      document.getElementById('mu-ec').checked = false;
+      savedEl.textContent = `✓ ${name} (${role}) created.`;
+      loadManageUsersList(true);
     });
 
     document.getElementById('module-back-btn').addEventListener('click', () => {
