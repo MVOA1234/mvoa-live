@@ -167,6 +167,9 @@
       <label>Email (optional)
         <input id="mu-email" type="text">
       </label>
+      <label>Title (optional override, e.g. "Secretary", "President")
+        <input id="mu-title" type="text" placeholder="leave blank to use the role's default label">
+      </label>
       <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
         <input id="mu-ec" type="checkbox" style="width:auto;"> EC Member
       </label>
@@ -246,7 +249,7 @@
         const users = await MVOA.loadRoles(force);
         const active = users.filter(u => u.active).sort((a, b) => a.name.localeCompare(b.name));
         sel.innerHTML = '<option value="">— Select your name —</option>' +
-          active.map(u => `<option value="${u.name.replace(/"/g, '&quot;')}">${u.name} (${MVOA.roleLabel(u.role)})</option>`).join('');
+          active.map(u => `<option value="${u.name.replace(/"/g, '&quot;')}">${u.name} (${MVOA.displayTitle(u)})</option>`).join('');
       } catch (e) {
         sel.innerHTML = '<option value="">Could not load names</option>';
         console.error('[MVOA] populateLoginNames error', e);
@@ -390,7 +393,7 @@
         }
         listEl.innerHTML = users.map(u => `
           <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
-            <span>${u.name} <span class="muted">(${MVOA.roleLabel(u.role)})</span></span>
+            <span>${u.name} <span class="muted">(${MVOA.displayTitle(u)})</span></span>
             <span>${u.active ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Closed')}</span>
           </div>
         `).join('');
@@ -406,6 +409,7 @@
       const pinConfirm = document.getElementById('mu-pin-confirm').value.trim();
       const phone = document.getElementById('mu-phone').value.trim();
       const email = document.getElementById('mu-email').value.trim();
+      const title = document.getElementById('mu-title').value.trim();
       const ecMember = document.getElementById('mu-ec').checked;
       const errEl = document.getElementById('mu-error');
       const savedEl = document.getElementById('mu-saved-msg');
@@ -425,7 +429,7 @@
       addBtn.disabled = true;
       try {
         const pinHash = await MVOA.hashPin(pin);
-        const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE'];
+        const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE', title];
         await MVOA.sheetsAppend(MVOA.TABS.roles, row);
         await MVOA.logAudit({ module: 'Settings', requestId: name, eventType: 'UserCreated', comment: 'Role: ' + role, statusAfter: 'Active' });
       } catch (e) {
@@ -440,8 +444,9 @@
       document.getElementById('mu-pin-confirm').value = '';
       document.getElementById('mu-phone').value = '';
       document.getElementById('mu-email').value = '';
+      document.getElementById('mu-title').value = '';
       document.getElementById('mu-ec').checked = false;
-      savedEl.textContent = `✓ ${name} (${role}) created.`;
+      savedEl.textContent = `✓ ${name} (${title || role}) created.`;
       loadManageUsersList(true);
     });
 
@@ -453,7 +458,7 @@
     // ---- Home screen: role-aware module tiles ----
     function showHome(user) {
       document.getElementById('home-user-name').textContent = user.name;
-      document.getElementById('home-user-role').textContent = MVOA.roleLabel(user.role);
+      document.getElementById('home-user-role').textContent = MVOA.displayTitle(user);
       const tilesEl = document.getElementById('module-tiles');
       tilesEl.innerHTML = '';
       const tiles = MVOA.modulesForRole(user.role);
