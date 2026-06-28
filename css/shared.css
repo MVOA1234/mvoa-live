@@ -143,6 +143,7 @@ table.mvoa-table th, table.mvoa-table td {
   white-space: nowrap;
 }
 .report-row-overdue td { background: #f8d7da; }
+table.mvoa-table tbody tr[data-row-index]:hover td { background: #eef2f5; }
 
 /* Operations module */
 .ops-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
