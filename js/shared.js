@@ -359,14 +359,40 @@ const MVOA = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
-  // ASSET QR PARSING (shared by Operations module; format defined
-  // by Inventory's label printer: MVOA|AssetID|AssetName|Category|Location)
+  // ASSET QR PARSING — Inventory's label format has been observed
+  // in two shapes so far:
+  //   Old:  MVOA|AssetID|AssetName|Category|Location
+  //   New:  Code: X Name: Y Category: Z Sub-Category: W Location: V
+  // This parses either; extend the regex list below if a third
+  // format shows up from a different label batch.
   // ───────────────────────────────────────────────────────────
   function parseAssetQR(text) {
     if (typeof text !== 'string') return null;
+
+    // New labeled-field format (current Inventory label printer)
+    if (/Code\s*:/.test(text)) {
+      const grab = (label, nextLabels) => {
+        const re = new RegExp(label + '\\s*:\\s*(.*?)\\s*(?:' + nextLabels.join('|') + '|$)');
+        const m = text.match(re);
+        return m ? m[1].trim() : '';
+      };
+      const assetId = grab('Code', ['Name:']);
+      const assetName = grab('Name', ['Category:']);
+      const category = grab('Category', ['Sub-Category:', 'Location:']);
+      const subCategory = grab('Sub-Category', ['Location:']);
+      const location = grab('Location', ['$']);
+      if (assetId && assetName) {
+        return { assetId, assetName, category, subCategory, location };
+      }
+    }
+
+    // Old pipe-delimited format
     const parts = text.split('|');
-    if (parts[0] !== 'MVOA' || parts.length < 5) return null;
-    return { assetId: parts[1], assetName: parts[2], category: parts[3], location: parts[4] };
+    if (parts[0] === 'MVOA' && parts.length >= 5) {
+      return { assetId: parts[1], assetName: parts[2], category: parts[3], location: parts[4] };
+    }
+
+    return null;
   }
 
   // ───────────────────────────────────────────────────────────
