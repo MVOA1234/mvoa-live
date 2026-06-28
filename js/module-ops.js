@@ -24,13 +24,17 @@ MVOA.registerModule('ops', {
 const OpsModule = (function () {
   const TAB = MVOA.TABS.opsTasks;
   let tasksCache = [];
-  let currentView = 'new';
+  let categories = [];
+  let assigneeOptions = [];
+  let currentCategory = null; // null = show sub-tile grid; otherwise the selected category object
+  let currentView = 'open';
   let pendingAsset = null;
   let pendingPhoto = null;
+  let pendingAssignee = '';
 
   const COLS = ['TaskID','Title','Description','Priority','AssetID','AssetName',
     'CreatedBy','CreatedDate','PhotoURL_Initial','Status','ComplianceComment',
-    'PhotoURL_Compliance','ClosedDate','ClosedBy'];
+    'PhotoURL_Compliance','ClosedDate','ClosedBy','CategoryID','AssignedTo'];
 
   function rowToObj(row, rowNumber) {
     const o = { rowNumber };
@@ -52,31 +56,163 @@ const OpsModule = (function () {
   }
 
   async function mount(container) {
-    container.innerHTML = `<p class="muted">Loading tasks…</p>`;
-    try { await loadTasks(); } catch (e) {
-      container.innerHTML = `<p class="error-text">Could not load tasks: ${e.message}</p>`;
+    container.innerHTML = `<p class="muted">Loading…</p>`;
+    try {
+      await Promise.all([loadTasks(), loadCategoriesAndAssignees()]);
+    } catch (e) {
+      container.innerHTML = `<p class="error-text">Could not load Daily Operations: ${e.message}</p>`;
       return;
     }
-    render(container);
+    currentCategory = null;
+    renderRoot(container);
+  }
+
+  async function loadCategoriesAndAssignees(force) {
+    categories = (await MVOA.loadCategories(force)).filter(c => c.Active);
+    assigneeOptions = await MVOA.loadAssigneeOptions();
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // ROOT RENDER — either the sub-tile category grid, or (once a
+  // category is selected) the existing tabbed task view scoped to it.
+  // ───────────────────────────────────────────────────────────
+  function renderRoot(container) {
+    if (!currentCategory) {
+      renderCategoryGrid(container);
+    } else {
+      render(container);
+    }
+  }
+
+  function renderCategoryGrid(container) {
+    const user = MVOA.getUser();
+    const uncategorizedCount = tasksCache.filter(t => !t.CategoryID).length;
+    if (!categories.length && !uncategorizedCount) {
+      container.innerHTML = `<p class="muted">No categories set up yet. Ask a Developer to add some in Settings.</p>`;
+      return;
+    }
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:14px;">
+        <p class="muted" style="margin:0;">Choose a category</p>
+        <div>
+          <button id="ops-reports-btn" class="btn-secondary">📊 Reports</button>
+          <button id="ops-cat-refresh-btn" class="btn-secondary">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="tiles-grid" id="ops-cat-tiles"></div>
+    `;
+    const tilesEl = container.querySelector('#ops-cat-tiles');
+    categories.forEach(cat => {
+      const canEdit = MVOA.canEditCategory(cat, user);
+      const openCount = tasksCache.filter(t => t.CategoryID === cat.CategoryID && t.Status === 'Open').length;
+      const div = document.createElement('div');
+      div.className = 'tile' + (canEdit ? '' : ' tile-locked');
+      div.innerHTML = `
+        <div class="tile-icon">${cat.Icon || '📋'}</div>
+        <div class="tile-label">${cat.Name}</div>
+        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openCount} open${canEdit ? '' : ' · view only'}</div>
+      `;
+      div.addEventListener('click', () => {
+        currentCategory = cat;
+        currentView = canEdit ? 'new' : 'open';
+        render(container);
+      });
+      tilesEl.appendChild(div);
+    });
+    // Synthesized fallback tile for legacy tasks with no CategoryID — only
+    // appears if such tasks exist. Everyone who can open this module can
+    // edit/close these (they predate the category system, no AllowedRoles
+    // list applies), but there's no "+ New Task" here — new tasks should
+    // always pick a real category going forward.
+    if (uncategorizedCount > 0) {
+      const div = document.createElement('div');
+      div.className = 'tile';
+      const openUncat = tasksCache.filter(t => !t.CategoryID && t.Status === 'Open').length;
+      div.innerHTML = `
+        <div class="tile-icon">📦</div>
+        <div class="tile-label">Uncategorized</div>
+        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openUncat} open</div>
+      `;
+      div.addEventListener('click', () => {
+        currentCategory = { CategoryID: '', Name: 'Uncategorized', Icon: '📦', _isUncategorized: true };
+        currentView = 'open';
+        render(container);
+      });
+      tilesEl.appendChild(div);
+    }
+    container.querySelector('#ops-reports-btn').addEventListener('click', () => renderReports(container));
+    container.querySelector('#ops-cat-refresh-btn').addEventListener('click', async () => {
+      const btn = container.querySelector('#ops-cat-refresh-btn');
+      btn.disabled = true; btn.textContent = '↻ Refreshing…';
+      try {
+        await Promise.all([loadTasks(), loadCategoriesAndAssignees(true)]);
+        renderCategoryGrid(container);
+      } catch (e) {
+        btn.disabled = false; btn.textContent = '↻ Refresh';
+        alert('Refresh failed: ' + e.message);
+      }
+    });
   }
 
   function render(container) {
+    const user = MVOA.getUser();
+    const isUncategorized = !!currentCategory._isUncategorized;
+    const canEdit = isUncategorized ? true : MVOA.canEditCategory(currentCategory, user);
+    const showNewTab = canEdit && !isUncategorized; // never offer "+ New Task" inside the Uncategorized bucket
+    if (currentView === 'new' && !showNewTab) currentView = 'open';
+
     container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="ops-back-to-cats" class="btn-secondary">← Categories</button>
+        <strong>${currentCategory.Icon || '📋'} ${currentCategory.Name}</strong>
+      </div>
       <div class="ops-tabs">
-        <button data-view="new" class="ops-tab-btn ${currentView==='new'?'active':''}">+ New Task</button>
-        <button data-view="open" class="ops-tab-btn ${currentView==='open'?'active':''}">Open (${tasksCache.filter(t=>t.Status==='Open').length})</button>
+        ${showNewTab ? `<button data-view="new" class="ops-tab-btn ${currentView==='new'?'active':''}">+ New Task</button>` : ''}
+        <button data-view="open" class="ops-tab-btn ${currentView==='open'?'active':''}">Open (${tasksCache.filter(t=>t.CategoryID===currentCategory.CategoryID && t.Status==='Open').length})</button>
         <button data-view="closed" class="ops-tab-btn ${currentView==='closed'?'active':''}">Closed</button>
         <button data-view="history" class="ops-tab-btn ${currentView==='history'?'active':''}">📅 History</button>
+        <button id="ops-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
+      ${canEdit ? '' : `<p class="muted" style="margin-top:-6px;">View only — you don't have edit access to this category.</p>`}
+      ${isUncategorized ? `<p class="muted" style="margin-top:-6px;">Legacy tasks created before categories existed. New tasks should be created inside a real category.</p>` : ''}
       <div id="ops-view-body"></div>
     `;
-    container.querySelectorAll('.ops-tab-btn').forEach(btn => {
+    container.querySelector('#ops-back-to-cats').addEventListener('click', () => {
+      currentCategory = null;
+      renderRoot(container);
+    });
+    container.querySelectorAll('.ops-tab-btn[data-view]').forEach(btn => {
       btn.addEventListener('click', () => { currentView = btn.dataset.view; render(container); });
     });
+    container.querySelector('#ops-refresh-btn').addEventListener('click', () => refreshNow(container));
     const body = container.querySelector('#ops-view-body');
     if (currentView === 'new') renderNewTaskForm(body, container);
     else if (currentView === 'history') renderHistory(body, container);
     else renderTaskList(body, container, currentView === 'open' ? 'Open' : 'Closed');
+  }
+
+  // Manual refresh — re-pulls from the Sheet on demand, independent of
+  // any background auto-sync timer. Disables the button briefly and
+  // shows a quick confirmation so it's obvious something happened.
+  async function refreshNow(container) {
+    const btn = container.querySelector('#ops-refresh-btn');
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '↻ Refreshing…';
+    try {
+      await Promise.all([loadTasks(), loadCategoriesAndAssignees(true)]);
+      render(container);
+      const freshBtn = container.querySelector('#ops-refresh-btn');
+      if (freshBtn) {
+        freshBtn.textContent = '✓ Updated';
+        setTimeout(() => { if (freshBtn) freshBtn.textContent = original; }, 1500);
+      }
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = original;
+      alert('Refresh failed: ' + e.message);
+    }
   }
 
   function renderNewTaskForm(body, container) {
@@ -93,6 +229,12 @@ const OpsModule = (function () {
             <option value="Urgent">Urgent</option>
             <option value="Medium" selected>Medium</option>
             <option value="Low">Low</option>
+          </select>
+        </label>
+        <label>Assigned To (optional)
+          <select id="ops-assignee">
+            <option value="">— Unassigned —</option>
+            ${assigneeOptions.map(o => `<option value="${o.value}" ${pendingAssignee===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
           </select>
         </label>
 
@@ -135,11 +277,15 @@ const OpsModule = (function () {
     const el = body.querySelector('#ops-photo-chip');
     if (!el) return;
     el.innerHTML = pendingPhoto
-      ? `<div class="mvoa-row" style="margin-top:8px;"><span>🖼️ ${pendingPhoto.name}</span>
+      ? `<div class="mvoa-row" style="margin-top:8px;"><span>🖼️ ${pendingPhoto.name}${pendingPhoto.compressedSizeBytes ? ` <span class="muted">(${formatKB(pendingPhoto.compressedSizeBytes)})</span>` : ''}</span>
          <button class="btn-secondary" id="ops-clear-photo">Clear</button></div>`
       : '';
     const clearBtn = el.querySelector('#ops-clear-photo');
     if (clearBtn) clearBtn.addEventListener('click', () => { pendingPhoto = null; renderPhotoChip(body); });
+  }
+
+  function formatKB(bytes) {
+    return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
   }
 
   async function submitNewTask(body, container, opts) {
@@ -147,6 +293,7 @@ const OpsModule = (function () {
     const title = body.querySelector('#ops-title').value.trim();
     const desc = body.querySelector('#ops-desc').value.trim();
     const priority = body.querySelector('#ops-priority').value;
+    const assignedTo = body.querySelector('#ops-assignee').value;
     const errEl = body.querySelector('#ops-form-error');
     const savedEl = body.querySelector('#ops-form-saved-msg');
     errEl.textContent = ''; savedEl.textContent = '';
@@ -175,7 +322,8 @@ const OpsModule = (function () {
       AssetName: pendingAsset ? pendingAsset.assetName : '',
       CreatedBy: user.name, CreatedDate: now,
       PhotoURL_Initial: photoUrl,
-      Status: 'Open', ComplianceComment: '', PhotoURL_Compliance: '', ClosedDate: '', ClosedBy: ''
+      Status: 'Open', ComplianceComment: '', PhotoURL_Compliance: '', ClosedDate: '', ClosedBy: '',
+      CategoryID: currentCategory.CategoryID, AssignedTo: assignedTo
     };
 
     try {
@@ -186,7 +334,7 @@ const OpsModule = (function () {
       return;
     }
 
-    pendingAsset = null; pendingPhoto = null;
+    pendingAsset = null; pendingPhoto = null; pendingAssignee = '';
     await loadTasks();
 
     if (opts.stayOnForm) {
@@ -258,7 +406,7 @@ const OpsModule = (function () {
   }
 
   function renderTaskList(body, container, statusFilter) {
-    const list = tasksCache.filter(t => t.Status === statusFilter)
+    const list = tasksCache.filter(t => t.CategoryID === currentCategory.CategoryID && t.Status === statusFilter)
       .sort((a, b) => (b.CreatedDate || '').localeCompare(a.CreatedDate || ''));
     if (!list.length) {
       body.innerHTML = `<p class="muted">No ${statusFilter.toLowerCase()} tasks.</p>`;
@@ -272,7 +420,7 @@ const OpsModule = (function () {
         </div>
         ${t.Description ? `<p class="muted" style="margin:6px 0;">${t.Description}</p>` : ''}
         ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${t.AssetName} (${t.AssetID})</p>` : ''}
-        <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${t.CreatedBy} · ${formatDate(t.CreatedDate)} · Priority: ${t.Priority}</p>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${t.CreatedBy} · ${formatDate(t.CreatedDate)} · Priority: ${t.Priority}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
         ${t.PhotoURL_Initial ? `<p class="muted" style="font-size:0.8rem;">🖼️ <a href="${t.PhotoURL_Initial}" target="_blank" rel="noopener">Photo</a></p>` : ''}
         ${statusFilter === 'Open'
           ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:10px;">Mark Compliant / Close</button>`
@@ -331,7 +479,7 @@ const OpsModule = (function () {
       return !isNaN(t) && t >= fromTs && t <= toTs;
     };
 
-    const list = tasksCache.filter(t => inRange(t.CreatedDate) || inRange(t.ClosedDate))
+    const list = tasksCache.filter(t => t.CategoryID === currentCategory.CategoryID && (inRange(t.CreatedDate) || inRange(t.ClosedDate)))
       .sort((a, b) => (b.CreatedDate || '').localeCompare(a.CreatedDate || ''));
 
     if (!list.length) {
@@ -345,7 +493,7 @@ const OpsModule = (function () {
           ${MVOA.statusBadgeHtml(t.Status === 'Open' ? 'Open' : 'Closed')}
         </div>
         ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${t.AssetName} (${t.AssetID})</p>` : ''}
-        <p class="muted" style="margin:4px 0;font-size:0.8rem;">Created by ${t.CreatedBy} · ${formatDate(t.CreatedDate)} · Priority: ${t.Priority}</p>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">Created by ${t.CreatedBy} · ${formatDate(t.CreatedDate)} · Priority: ${t.Priority}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
         ${t.Status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed by ${t.ClosedBy} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + t.ComplianceComment : ''}</p>` : ''}
       </div>
     `).join('');
@@ -384,7 +532,7 @@ const OpsModule = (function () {
 
     function renderChip() {
       const el = modal.querySelector('#ops-comply-photo-chip');
-      el.innerHTML = compliancePhoto ? `<p class="muted">🖼️ ${compliancePhoto.name}</p>` : '';
+      el.innerHTML = compliancePhoto ? `<p class="muted">🖼️ ${compliancePhoto.name}${compliancePhoto.compressedSizeBytes ? ` (${formatKB(compliancePhoto.compressedSizeBytes)})` : ''}</p>` : '';
     }
     modal.querySelector('#ops-comply-photo-btn').addEventListener('click', async () => {
       const p = await MVOA.capturePhoto({ useCamera: true });
@@ -428,6 +576,208 @@ const OpsModule = (function () {
       await loadTasks();
       render(container);
     });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // REPORTS — Tasks by Category, Tasks by Assignee, Overdue/Aging.
+  // Each renders an on-screen table plus CSV export and Print-to-PDF
+  // buttons, matching the pattern used in the Inventory app.
+  // ───────────────────────────────────────────────────────────
+  let reportView = 'byCategory';
+  const OVERDUE_DAYS_THRESHOLD = 3;
+
+  function categoryName(categoryId) {
+    if (!categoryId) return 'Uncategorized';
+    const c = categories.find(c => c.CategoryID === categoryId);
+    return c ? c.Name : categoryId;
+  }
+
+  function daysOpen(createdDate) {
+    const t = new Date(createdDate).getTime();
+    if (isNaN(t)) return 0;
+    return Math.floor((Date.now() - t) / (1000 * 60 * 60 * 24));
+  }
+
+  function renderReports(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="ops-reports-back" class="btn-secondary">← Categories</button>
+        <strong>📊 Reports</strong>
+      </div>
+      <div class="ops-tabs">
+        <button data-report="byCategory" class="ops-tab-btn ${reportView==='byCategory'?'active':''}">By Category</button>
+        <button data-report="byAssignee" class="ops-tab-btn ${reportView==='byAssignee'?'active':''}">By Assignee</button>
+        <button data-report="overdue" class="ops-tab-btn ${reportView==='overdue'?'active':''}">Overdue / Aging</button>
+      </div>
+      <div id="ops-report-body"></div>
+    `;
+    container.querySelector('#ops-reports-back').addEventListener('click', () => { currentCategory = null; renderRoot(container); });
+    container.querySelectorAll('.ops-tab-btn[data-report]').forEach(btn => {
+      btn.addEventListener('click', () => { reportView = btn.dataset.report; renderReports(container); });
+    });
+    const body = container.querySelector('#ops-report-body');
+    if (reportView === 'byCategory') renderReportByCategory(body);
+    else if (reportView === 'byAssignee') renderReportByAssignee(body);
+    else renderReportOverdue(body);
+  }
+
+  function renderReportByCategory(body) {
+    const allCatIds = categories.map(c => c.CategoryID).concat(['']); // '' = Uncategorized bucket
+    const rows = allCatIds.map(id => {
+      const inCat = tasksCache.filter(t => t.CategoryID === id);
+      return {
+        Category: categoryName(id),
+        Open: inCat.filter(t => t.Status === 'Open').length,
+        Closed: inCat.filter(t => t.Status === 'Closed').length,
+        Total: inCat.length
+      };
+    }).filter(r => r.Total > 0);
+
+    renderReportTable(body, {
+      title: 'Tasks by Category',
+      columns: ['Category', 'Open', 'Closed', 'Total'],
+      rows,
+      filenameBase: 'ops-report-by-category'
+    });
+  }
+
+  function renderReportByAssignee(body) {
+    const map = {};
+    tasksCache.forEach(t => {
+      const key = t.AssignedTo || '';
+      if (!map[key]) map[key] = [];
+      map[key].push(t);
+    });
+    const rows = Object.keys(map).map(key => {
+      const list = map[key];
+      const closedWithDates = list.filter(t => t.Status === 'Closed' && t.CreatedDate && t.ClosedDate);
+      const avgDays = closedWithDates.length
+        ? Math.round(closedWithDates.reduce((sum, t) => sum + (new Date(t.ClosedDate) - new Date(t.CreatedDate)) / (1000*60*60*24), 0) / closedWithDates.length * 10) / 10
+        : '';
+      return {
+        Assignee: key ? MVOA.assigneeLabel(key, assigneeOptions) : 'Unassigned',
+        Open: list.filter(t => t.Status === 'Open').length,
+        Closed: list.filter(t => t.Status === 'Closed').length,
+        'Avg Days to Close': avgDays
+      };
+    }).sort((a, b) => b.Open - a.Open);
+
+    renderReportTable(body, {
+      title: 'Tasks by Assignee',
+      columns: ['Assignee', 'Open', 'Closed', 'Avg Days to Close'],
+      rows,
+      filenameBase: 'ops-report-by-assignee'
+    });
+  }
+
+  function renderReportOverdue(body) {
+    const rows = tasksCache.filter(t => t.Status === 'Open')
+      .map(t => ({
+        Task: t.Title,
+        Category: categoryName(t.CategoryID),
+        Assignee: t.AssignedTo ? MVOA.assigneeLabel(t.AssignedTo, assigneeOptions) : 'Unassigned',
+        Priority: t.Priority,
+        'Days Open': daysOpen(t.CreatedDate),
+        Created: formatDate(t.CreatedDate)
+      }))
+      .sort((a, b) => b['Days Open'] - a['Days Open']);
+
+    const bodyWrap = document.createElement('div');
+    bodyWrap.innerHTML = `<p class="muted">Flagging anything open ${OVERDUE_DAYS_THRESHOLD}+ days.</p>`;
+    body.innerHTML = '';
+    body.appendChild(bodyWrap);
+
+    renderReportTable(body, {
+      title: 'Overdue / Aging Report',
+      columns: ['Task', 'Category', 'Assignee', 'Priority', 'Days Open', 'Created'],
+      rows,
+      filenameBase: 'ops-report-overdue',
+      rowClass: r => r['Days Open'] >= OVERDUE_DAYS_THRESHOLD ? 'report-row-overdue' : '',
+      append: true
+    });
+  }
+
+  // Generic table renderer + CSV/PDF export, shared by all three reports.
+  function renderReportTable(body, opts) {
+    const { title, columns, rows, filenameBase, rowClass, append } = opts;
+    const tableHtml = `
+      <div class="card" style="max-width:100%;margin:0 0 14px 0;">
+        <div class="mvoa-row">
+          <h3 style="margin:0;color:var(--mvoa-blue);">${title}</h3>
+          <div>
+            <button class="btn-secondary ops-report-csv-btn">⬇ CSV</button>
+            <button class="btn-secondary ops-report-pdf-btn">🖨 Print to PDF</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="mvoa-table" id="ops-report-table">
+            <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+            <tbody>
+              ${rows.length ? rows.map(r => `<tr class="${rowClass ? rowClass(r) : ''}">${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' ? r[c] : (typeof r[c] === 'number' ? r[c] : '—')))}</td>`).join('')}</tr>`).join('')
+                       : `<tr><td colspan="${columns.length}" class="muted">No data.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    if (append) body.insertAdjacentHTML('beforeend', tableHtml);
+    else body.innerHTML = tableHtml;
+
+    const scope = append ? body : body; // querySelector still finds the just-inserted block either way
+    const csvBtn = [...body.querySelectorAll('.ops-report-csv-btn')].pop();
+    const pdfBtn = [...body.querySelectorAll('.ops-report-pdf-btn')].pop();
+    csvBtn.addEventListener('click', () => exportReportCsv(title, columns, rows, filenameBase));
+    pdfBtn.addEventListener('click', () => printReportPdf(title, columns, rows));
+  }
+
+  function exportReportCsv(title, columns, rows, filenameBase) {
+    const esc = v => {
+      const s = String(v !== undefined && v !== null ? v : '');
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const lines = [columns.map(esc).join(',')]
+      .concat(rows.map(r => columns.map(c => esc(r[c])).join(',')));
+    const csv = lines.join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `${filenameBase}-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function printReportPdf(title, columns, rows) {
+    const win = window.open('', '_blank');
+    const tableRows = rows.map(r => `<tr>${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' ? r[c] : '—'))}</td>`).join('')}</tr>`).join('');
+    win.document.write(`
+      <html>
+      <head>
+        <title>${escapeHtml(title)}</title>
+        <style>
+          body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
+          h1 { color: #1d4e6b; font-size: 1.3rem; margin-bottom: 4px; }
+          .muted { color: #6b7280; font-size: 0.85rem; margin-top: 0; }
+          table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+          th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.85rem; }
+          th { background: #f5f6f8; }
+        </style>
+      </head>
+      <body>
+        <h1>MVOA — ${escapeHtml(title)}</h1>
+        <p class="muted">Generated ${new Date().toLocaleString()}</p>
+        <table>
+          <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+          <tbody>${tableRows || `<tr><td colspan="${columns.length}">No data.</td></tr>`}</tbody>
+        </table>
+        <script>window.onload = () => { window.print(); };</script>
+      </body>
+      </html>
+    `);
+    win.document.close();
   }
 
   return { mount };
