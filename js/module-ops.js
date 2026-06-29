@@ -15,7 +15,7 @@
 MVOA.registerModule('ops', {
   label: 'Daily Operations',
   icon: '📋',
-  roles: ['FM', 'DEV'],
+  roles: ['ALL'], // TESTING: opened to all roles temporarily — revert to ['FM','DEV'] (plus whichever else should have it) once roles are finalized
   init: function (container) {
     OpsModule.mount(container);
   }
