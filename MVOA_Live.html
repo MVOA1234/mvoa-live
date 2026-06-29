@@ -84,7 +84,7 @@
 
   <!-- ═══════════════ SETTINGS SCREEN (edit config anytime) ═══════════════ -->
   <div id="settings-screen" class="screen hidden">
-    <div class="card">
+    <div class="card" id="connection-settings-card">
       <div class="mvoa-row">
         <h1 style="margin:0;">Settings</h1>
         <button id="settings-back-btn" class="btn-secondary">&larr; Home</button>
@@ -113,6 +113,16 @@
       <p class="muted" id="settings-saved-msg"></p>
     </div>
 
+    <!-- Shown instead of the card above when the logged-in user is not an
+         admin (DEV / AdminAccess=TRUE) — connection credentials stay hidden. -->
+    <div class="card hidden" id="connection-settings-masked-card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">Settings</h1>
+        <button id="settings-back-btn-2" class="btn-secondary">&larr; Home</button>
+      </div>
+      <p class="muted">Connection details are managed by your Developer or another admin. Contact them if the app stops connecting.</p>
+    </div>
+
     <!-- Visible to every logged-in user -->
     <div class="card" id="change-pin-card" style="margin-top:16px;">
       <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Change My PIN</h2>
@@ -129,6 +139,14 @@
       <button id="cp-save-btn" class="btn-primary">Update PIN</button>
       <p class="error-text" id="cp-error"></p>
       <p class="muted" id="cp-saved-msg"></p>
+    </div>
+
+    <!-- Admin only (DEV or AdminAccess=TRUE): entry point to the separate
+         PIN Management screen (reset/suspend/rename OTHER users). -->
+    <div class="card hidden" id="pin-mgmt-entry-card" style="margin-top:16px;">
+      <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">User Administration</h2>
+      <p class="muted">Reset a forgotten PIN, suspend/activate a login, or correct someone's display name.</p>
+      <button id="open-pin-mgmt-btn" class="btn-primary">🔑 Open PIN Management</button>
     </div>
 
     <!-- DEV-only: create new app users without ever touching the Roles
@@ -173,9 +191,24 @@
       <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
         <input id="mu-ec" type="checkbox" style="width:auto;"> EC Member
       </label>
+      <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
+        <input id="mu-admin" type="checkbox" style="width:auto;"> Admin Access (unmasked Settings + can manage other users' PINs)
+      </label>
       <button id="mu-add-btn" class="btn-primary">Create User</button>
       <p class="error-text" id="mu-error"></p>
       <p class="muted" id="mu-saved-msg"></p>
+    </div>
+  </div>
+
+  <!-- ═══════════════ PIN MANAGEMENT SCREEN (admin only) ═══════════════ -->
+  <div id="pin-mgmt-screen" class="screen hidden">
+    <div class="card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">User Administration</h1>
+        <button id="pin-mgmt-back-btn" class="btn-secondary">&larr; Settings</button>
+      </div>
+      <p class="muted">Reset a forgotten PIN to the default (1111), suspend/activate a login, or correct a display name.</p>
+      <div id="pin-mgmt-list" style="margin-top:14px;"></div>
     </div>
   </div>
 
@@ -308,14 +341,30 @@
 
     // ---- Settings ----
     document.getElementById('settings-btn').addEventListener('click', () => {
-      document.getElementById('settings-sheet-id').value = MVOA.CFG.sheetId || '';
-      document.getElementById('settings-api-key').value = MVOA.CFG.apiKey || '';
-      document.getElementById('settings-sa-json').value = MVOA.CFG.saJson ? JSON.stringify(MVOA.CFG.saJson) : '';
-      document.getElementById('settings-drive-folder').value = MVOA.CFG.driveFolderId || '';
-      document.getElementById('settings-photo-url').value = MVOA.CFG.photoUploadUrl || '';
-      document.getElementById('settings-photo-secret').value = MVOA.CFG.photoUploadSecret || '';
-      document.getElementById('settings-error').textContent = '';
-      document.getElementById('settings-saved-msg').textContent = '';
+      const user = MVOA.getUser();
+      const admin = MVOA.isAdmin(user);
+      const connCard = document.getElementById('connection-settings-card');
+      const maskedCard = document.getElementById('connection-settings-masked-card');
+      const pinMgmtEntry = document.getElementById('pin-mgmt-entry-card');
+
+      if (admin) {
+        connCard.classList.remove('hidden');
+        maskedCard.classList.add('hidden');
+        pinMgmtEntry.classList.remove('hidden');
+        document.getElementById('settings-sheet-id').value = MVOA.CFG.sheetId || '';
+        document.getElementById('settings-api-key').value = MVOA.CFG.apiKey || '';
+        document.getElementById('settings-sa-json').value = MVOA.CFG.saJson ? JSON.stringify(MVOA.CFG.saJson) : '';
+        document.getElementById('settings-drive-folder').value = MVOA.CFG.driveFolderId || '';
+        document.getElementById('settings-photo-url').value = MVOA.CFG.photoUploadUrl || '';
+        document.getElementById('settings-photo-secret').value = MVOA.CFG.photoUploadSecret || '';
+        document.getElementById('settings-error').textContent = '';
+        document.getElementById('settings-saved-msg').textContent = '';
+      } else {
+        connCard.classList.add('hidden');
+        maskedCard.classList.remove('hidden');
+        pinMgmtEntry.classList.add('hidden');
+      }
+
       document.getElementById('cp-current').value = '';
       document.getElementById('cp-new').value = '';
       document.getElementById('cp-new-confirm').value = '';
@@ -323,8 +372,7 @@
       document.getElementById('cp-saved-msg').textContent = '';
 
       const muCard = document.getElementById('manage-users-card');
-      const user = MVOA.getUser();
-      if (user && user.role === 'DEV') {
+      if (user && admin) {
         muCard.classList.remove('hidden');
         loadManageUsersList();
       } else {
@@ -334,6 +382,16 @@
     });
     document.getElementById('settings-back-btn').addEventListener('click', () => {
       show('home-screen');
+    });
+    document.getElementById('settings-back-btn-2').addEventListener('click', () => {
+      show('home-screen');
+    });
+    document.getElementById('open-pin-mgmt-btn').addEventListener('click', () => {
+      show('pin-mgmt-screen');
+      loadPinMgmtList();
+    });
+    document.getElementById('pin-mgmt-back-btn').addEventListener('click', () => {
+      show('settings-screen');
     });
     document.getElementById('settings-save-btn').addEventListener('click', () => {
       const sheetId = document.getElementById('settings-sheet-id').value.trim();
@@ -411,6 +469,7 @@
       const email = document.getElementById('mu-email').value.trim();
       const title = document.getElementById('mu-title').value.trim();
       const ecMember = document.getElementById('mu-ec').checked;
+      const adminAccess = document.getElementById('mu-admin').checked;
       const errEl = document.getElementById('mu-error');
       const savedEl = document.getElementById('mu-saved-msg');
       errEl.textContent = ''; savedEl.textContent = '';
@@ -429,7 +488,7 @@
       addBtn.disabled = true;
       try {
         const pinHash = await MVOA.hashPin(pin);
-        const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE', title];
+        const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE', title, adminAccess ? 'TRUE' : 'FALSE'];
         await MVOA.sheetsAppend(MVOA.TABS.roles, row);
         await MVOA.logAudit({ module: 'Settings', requestId: name, eventType: 'UserCreated', comment: 'Role: ' + role, statusAfter: 'Active' });
       } catch (e) {
@@ -446,9 +505,122 @@
       document.getElementById('mu-email').value = '';
       document.getElementById('mu-title').value = '';
       document.getElementById('mu-ec').checked = false;
+      document.getElementById('mu-admin').checked = false;
       savedEl.textContent = `✓ ${name} (${title || role}) created.`;
       loadManageUsersList(true);
     });
+
+    // ---- PIN Management screen (admin only): reset/suspend/rename OTHER users ----
+    async function loadPinMgmtList(force) {
+      const listEl = document.getElementById('pin-mgmt-list');
+      listEl.innerHTML = '<p class="muted">Loading users…</p>';
+      try {
+        const users = await MVOA.loadRoles(force);
+        const me = MVOA.getUser();
+        listEl.innerHTML = users.map(u => `
+          <div class="mvoa-list-item" data-user-name="${u.name.replace(/"/g, '&quot;')}">
+            <div class="mvoa-row">
+              <span class="pm-name-display">
+                <strong>${u.name}</strong> <span class="muted">(${MVOA.displayTitle(u)})</span>
+              </span>
+              <span>${u.active ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Closed')}</span>
+            </div>
+            <div class="pm-rename-row hidden" style="margin-top:8px;display:flex;gap:8px;">
+              <input type="text" class="pm-rename-input" value="${u.name.replace(/"/g, '&quot;')}" style="flex:1;">
+              <button class="btn-primary pm-rename-save" style="margin:0;white-space:nowrap;">✓ Save</button>
+              <button class="btn-secondary pm-rename-cancel" style="margin:0;">Cancel</button>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn-secondary pm-reset-btn">Reset PIN</button>
+              <button class="btn-secondary pm-toggle-active-btn">${u.active ? 'Suspend' : 'Activate'}</button>
+              <button class="btn-secondary pm-rename-btn">✏ Rename</button>
+            </div>
+            <p class="error-text pm-row-error"></p>
+            <p class="muted pm-row-msg"></p>
+          </div>
+        `).join('');
+
+        listEl.querySelectorAll('.pm-reset-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const row = btn.closest('[data-user-name]');
+            const name = row.dataset.userName;
+            const errEl = row.querySelector('.pm-row-error');
+            const msgEl = row.querySelector('.pm-row-msg');
+            errEl.textContent = ''; msgEl.textContent = '';
+            if (!confirm(`Reset ${name}'s PIN to the default (1111)? They'll need to set a new one on next login.`)) return;
+            btn.disabled = true;
+            try {
+              await MVOA.resetUserPin(name);
+              msgEl.textContent = `✓ PIN reset to 1111. Tell ${name} to log in and set a new PIN.`;
+            } catch (e) {
+              errEl.textContent = e.message;
+            }
+            btn.disabled = false;
+          });
+        });
+
+        listEl.querySelectorAll('.pm-toggle-active-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const row = btn.closest('[data-user-name]');
+            const name = row.dataset.userName;
+            const errEl = row.querySelector('.pm-row-error');
+            const msgEl = row.querySelector('.pm-row-msg');
+            errEl.textContent = ''; msgEl.textContent = '';
+            const wantActive = btn.textContent.trim() === 'Activate';
+            const verb = wantActive ? 'activate' : 'suspend (block login for)';
+            if (!confirm(`Are you sure you want to ${verb} ${name}?`)) return;
+            btn.disabled = true;
+            try {
+              await MVOA.setUserActive(name, wantActive);
+              if (!wantActive && me && me.name === name) {
+                alert('You suspended your own account — you will be logged out now.');
+                show('login-screen');
+                populateLoginNames(true);
+                return;
+              }
+              msgEl.textContent = wantActive ? '✓ Activated.' : '✓ Suspended.';
+              loadPinMgmtList(true);
+            } catch (e) {
+              errEl.textContent = e.message;
+              btn.disabled = false;
+            }
+          });
+        });
+
+        listEl.querySelectorAll('.pm-rename-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const row = btn.closest('[data-user-name]');
+            row.querySelector('.pm-rename-row').classList.remove('hidden');
+          });
+        });
+        listEl.querySelectorAll('.pm-rename-cancel').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const row = btn.closest('[data-user-name]');
+            row.querySelector('.pm-rename-row').classList.add('hidden');
+          });
+        });
+        listEl.querySelectorAll('.pm-rename-save').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const row = btn.closest('[data-user-name]');
+            const oldName = row.dataset.userName;
+            const newName = row.querySelector('.pm-rename-input').value.trim();
+            const errEl = row.querySelector('.pm-row-error');
+            errEl.textContent = '';
+            if (!newName || newName === oldName) { row.querySelector('.pm-rename-row').classList.add('hidden'); return; }
+            btn.disabled = true;
+            try {
+              await MVOA.renameUser(oldName, newName);
+              loadPinMgmtList(true);
+            } catch (e) {
+              errEl.textContent = e.message;
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (e) {
+        listEl.innerHTML = '<p class="error-text">Could not load users: ' + e.message + '</p>';
+      }
+    }
 
     document.getElementById('module-back-btn').addEventListener('click', () => {
       document.getElementById('module-container').innerHTML = '';
