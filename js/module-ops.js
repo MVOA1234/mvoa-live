@@ -290,6 +290,13 @@ const OpsModule = (function () {
 
   async function submitNewTask(body, container, opts) {
     opts = opts || {};
+    const submitBtn = body.querySelector('#ops-submit-btn');
+    const submitAnotherBtn = body.querySelector('#ops-submit-another-btn');
+    // Guard against double-tap / double-click creating two identical tasks —
+    // disable immediately, before any async work or validation even starts.
+    if (submitBtn) submitBtn.disabled = true;
+    if (submitAnotherBtn) submitAnotherBtn.disabled = true;
+
     const title = body.querySelector('#ops-title').value.trim();
     const desc = body.querySelector('#ops-desc').value.trim();
     const priority = body.querySelector('#ops-priority').value;
@@ -297,7 +304,12 @@ const OpsModule = (function () {
     const errEl = body.querySelector('#ops-form-error');
     const savedEl = body.querySelector('#ops-form-saved-msg');
     errEl.textContent = ''; savedEl.textContent = '';
-    if (!title) { errEl.textContent = 'Title is required.'; return; }
+    if (!title) {
+      errEl.textContent = 'Title is required.';
+      if (submitBtn) submitBtn.disabled = false;
+      if (submitAnotherBtn) submitAnotherBtn.disabled = false;
+      return;
+    }
 
     const user = MVOA.getUser();
     const existingIds = tasksCache.map(t => t.TaskID);
@@ -311,6 +323,8 @@ const OpsModule = (function () {
         photoUrl = await MVOA.uploadPhotoToDrive(pendingPhoto.file, `${taskId}_initial_${pendingPhoto.name}`);
       } catch (e) {
         errEl.textContent = 'Photo upload failed: ' + e.message + ' (task not saved — remove the photo or fix Drive setup and retry)';
+        if (submitBtn) submitBtn.disabled = false;
+        if (submitAnotherBtn) submitAnotherBtn.disabled = false;
         return;
       }
     }
@@ -331,6 +345,8 @@ const OpsModule = (function () {
       await MVOA.logAudit({ module: 'DailyOps', requestId: taskId, eventType: 'Created', comment: title, statusAfter: 'Open' });
     } catch (e) {
       errEl.textContent = 'Could not save task: ' + e.message;
+      if (submitBtn) submitBtn.disabled = false;
+      if (submitAnotherBtn) submitAnotherBtn.disabled = false;
       return;
     }
 
