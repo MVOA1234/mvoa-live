@@ -6,7 +6,7 @@
 MVOA.registerModule('hs', {
   label: 'Health & Safety',
   icon: '🛟',
-  roles: ['FM', 'SEC', 'DEV'],   // SEC = Security/Tech staff filling specific checklists
+  roles: ['ALL'],   // TESTING: opened to all roles temporarily — revert to ['FM','SEC','DEV'] once roles are finalized
   init: function (container) {
     container.innerHTML = `
       <p class="muted">Health &amp; Safety module — coming next.</p>
