@@ -179,9 +179,19 @@ const MVOA = (function () {
       phone: r[3] || '', email: r[4] || '',
       active: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
       ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
-      title: r[7] || '' // optional per-person display title, e.g. "Secretary" — overrides roleLabel() on screen only
+      title: r[7] || '', // optional per-person display title, e.g. "Secretary" — overrides roleLabel() on screen only
+      adminAccess: ['true', 'TRUE', '1', 'yes'].includes(String(r[8])) // grants unmasked connection settings + PIN Management, independent of Title
     })).filter(u => u.name);
     return rolesCache;
+  }
+
+  // DEV always counts as admin. Anyone else needs AdminAccess=TRUE on their
+  // Roles row. This is the single gate for: seeing connection credentials
+  // unmasked, and access to the PIN Management screen (reset/suspend/rename
+  // OTHER people — not to be confused with Change My Own PIN, which stays
+  // available to everyone regardless of this flag).
+  function isAdmin(user) {
+    return !!user && (user.role === 'DEV' || user.adminAccess === true);
   }
 
   let currentUser = null;
@@ -235,14 +245,79 @@ const MVOA = (function () {
     const ok = await verifyPin(currentPin, fresh.pinHash);
     if (!ok) throw new Error('Current PIN is incorrect.');
     const newHash = await hashPin(newPin);
-    await sheetsUpdateRow(TABS.roles, fresh.rowNumber, [
-      fresh.name, fresh.role, newHash, fresh.phone, fresh.email,
-      fresh.active ? 'TRUE' : 'FALSE', fresh.ecMember ? 'TRUE' : 'FALSE', fresh.title || ''
-    ]);
     fresh.pinHash = newHash;
+    await writeRolesRow(fresh);
     currentUser = fresh;
     sessionStorage.setItem('mvoa_user', JSON.stringify(currentUser));
     await logAudit({ module: 'Settings', requestId: currentUser.name, eventType: 'PinChanged', comment: 'Self-service PIN change', statusAfter: 'Active' });
+  }
+
+  const DEFAULT_RESET_PIN = '1111';
+
+  function writeRolesRow(u) {
+    return sheetsUpdateRow(TABS.roles, u.rowNumber, [
+      u.name, u.role, u.pinHash, u.phone, u.email,
+      u.active ? 'TRUE' : 'FALSE', u.ecMember ? 'TRUE' : 'FALSE', u.title || '',
+      u.adminAccess ? 'TRUE' : 'FALSE'
+    ]);
+  }
+
+  // Resets someone else's PIN back to the standard default. The Developer's
+  // own row can ONLY be reset by the Developer themselves — mirrors the
+  // "Developer's PIN can only be reset by the Developer" rule from the
+  // Inventory app's user-management pattern.
+  async function resetUserPin(targetName) {
+    if (!isAdmin(currentUser)) throw new Error('Not authorized.');
+    const users = await loadRoles(true);
+    const target = users.find(u => u.name === targetName);
+    if (!target) throw new Error('User not found.');
+    if (target.role === 'DEV' && currentUser.role !== 'DEV') {
+      throw new Error("Only the Developer can reset the Developer's PIN.");
+    }
+    target.pinHash = await hashPin(DEFAULT_RESET_PIN);
+    await writeRolesRow(target);
+    await logAudit({ module: 'Settings', requestId: targetName, eventType: 'PinReset', comment: 'Reset by ' + currentUser.name, statusAfter: 'Active' });
+    return DEFAULT_RESET_PIN;
+  }
+
+  // Suspend immediately blocks login (Active=FALSE); Activate restores it.
+  async function setUserActive(targetName, active) {
+    if (!isAdmin(currentUser)) throw new Error('Not authorized.');
+    const users = await loadRoles(true);
+    const target = users.find(u => u.name === targetName);
+    if (!target) throw new Error('User not found.');
+    if (target.role === 'DEV' && currentUser.role !== 'DEV') {
+      throw new Error("Only the Developer can suspend/activate the Developer's account.");
+    }
+    target.active = !!active;
+    await writeRolesRow(target);
+    await logAudit({ module: 'Settings', requestId: targetName, eventType: active ? 'UserActivated' : 'UserSuspended', comment: 'By ' + currentUser.name, statusAfter: active ? 'Active' : 'Suspended' });
+    // If an admin suspends their OWN account, force them out immediately.
+    if (!active && currentUser.name === targetName) logout();
+  }
+
+  // Corrects a person's display name (e.g. fixing a typo) — same person,
+  // same PIN, same historical records under the old name. This is NOT
+  // for handing a position to a different person — that should be a new
+  // row, so that audit history stays correctly attributed per individual.
+  async function renameUser(targetName, newName) {
+    if (!isAdmin(currentUser)) throw new Error('Not authorized.');
+    newName = (newName || '').trim();
+    if (!newName) throw new Error('New name cannot be blank.');
+    const users = await loadRoles(true);
+    const target = users.find(u => u.name === targetName);
+    if (!target) throw new Error('User not found.');
+    if (users.some(u => u.name !== targetName && u.name.toLowerCase() === newName.toLowerCase())) {
+      throw new Error('Another user already has that name.');
+    }
+    const oldName = target.name;
+    target.name = newName;
+    await writeRolesRow(target);
+    await logAudit({ module: 'Settings', requestId: newName, eventType: 'UserRenamed', comment: oldName + ' → ' + newName, statusAfter: 'Active' });
+    if (currentUser.name === oldName) {
+      currentUser.name = newName;
+      sessionStorage.setItem('mvoa_user', JSON.stringify(currentUser));
+    }
   }
 
   function getUser() { return currentUser; }
@@ -603,6 +678,7 @@ const MVOA = (function () {
     loadConfig, saveConfig,
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
+    isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
     logAudit, nextId,
     capturePhoto, uploadPhotoToDrive,
