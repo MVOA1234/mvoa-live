@@ -288,12 +288,26 @@ const OpsModule = (function () {
     return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
   }
 
+  let isSubmittingTask = false; // hard re-entrancy guard — see submitNewTask
+
   async function submitNewTask(body, container, opts) {
+    // Checked synchronously, first line, before touching the DOM or state.
+    // A disabled button alone isn't enough: two taps close enough together
+    // can both dispatch click events before the first handler's disabling
+    // code actually runs, so both handlers would otherwise execute fully.
+    if (isSubmittingTask) return;
+    isSubmittingTask = true;
+    try {
+      await doSubmitNewTask(body, container, opts);
+    } finally {
+      isSubmittingTask = false;
+    }
+  }
+
+  async function doSubmitNewTask(body, container, opts) {
     opts = opts || {};
     const submitBtn = body.querySelector('#ops-submit-btn');
     const submitAnotherBtn = body.querySelector('#ops-submit-another-btn');
-    // Guard against double-tap / double-click creating two identical tasks —
-    // disable immediately, before any async work or validation even starts.
     if (submitBtn) submitBtn.disabled = true;
     if (submitAnotherBtn) submitAnotherBtn.disabled = true;
 
@@ -312,6 +326,10 @@ const OpsModule = (function () {
     }
 
     const user = MVOA.getUser();
+    // Re-fetch fresh from the sheet (not the possibly-stale local cache)
+    // immediately before generating the ID, to shrink the window in which
+    // two different devices could compute the same "next" ID.
+    await loadTasks();
     const existingIds = tasksCache.map(t => t.TaskID);
     const taskId = MVOA.nextId('TASK', existingIds);
     const now = new Date().toISOString();
