@@ -29,12 +29,14 @@ const OpsModule = (function () {
   let currentCategory = null; // null = show sub-tile grid; otherwise the selected category object
   let currentView = 'open';
   let pendingAsset = null;
-  let pendingPhoto = null;
+  let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
   let pendingAssignee = '';
 
   const COLS = ['TaskID','Title','Description','Priority','AssetID','AssetName',
     'CreatedBy','CreatedDate','PhotoURL_Initial','Status','ComplianceComment',
-    'PhotoURL_Compliance','ClosedDate','ClosedBy','CategoryID','AssignedTo'];
+    'PhotoURL_Compliance','ClosedDate','ClosedBy','CategoryID','AssignedTo',
+    'AttachmentURL_2','AttachmentURL_3',
+    'ComplianceAttachmentURL_2','ComplianceAttachmentURL_3'];
 
   function rowToObj(row, rowNumber) {
     const o = { rowNumber };
@@ -241,8 +243,11 @@ const OpsModule = (function () {
         <div id="ops-asset-chip"></div>
         <button id="ops-scan-btn" class="btn-secondary" style="width:100%;margin-top:10px;">📷 Scan Asset QR (optional)</button>
 
-        <div id="ops-photo-chip"></div>
-        <button id="ops-photo-btn" class="btn-secondary" style="width:100%;margin-top:10px;">🖼️ Attach Photo (optional)</button>
+        <div style="margin-top:12px;">
+          <p class="muted" style="margin:0 0 6px;">Attachments (optional — up to 3 photos or documents)</p>
+          <div id="ops-attachment-chips"></div>
+          <div id="ops-attachment-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"></div>
+        </div>
 
         <button id="ops-submit-btn" class="btn-primary">Submit Task</button>
         <button id="ops-submit-another-btn" class="btn-secondary" style="width:100%;">Save &amp; Add Another</button>
@@ -251,13 +256,8 @@ const OpsModule = (function () {
       </div>
     `;
     renderAssetChip(body);
-    renderPhotoChip(body);
-
+    renderAttachmentChips(body, '#ops-attachment-chips', '#ops-attachment-btns', pendingAttachments, 3);
     body.querySelector('#ops-scan-btn').addEventListener('click', () => openQrScanner(body));
-    body.querySelector('#ops-photo-btn').addEventListener('click', async () => {
-      const photo = await MVOA.capturePhoto({ useCamera: true });
-      if (photo) { pendingPhoto = photo; renderPhotoChip(body); }
-    });
     body.querySelector('#ops-submit-btn').addEventListener('click', () => submitNewTask(body, container, { stayOnForm: false }));
     body.querySelector('#ops-submit-another-btn').addEventListener('click', () => submitNewTask(body, container, { stayOnForm: true }));
   }
@@ -273,19 +273,49 @@ const OpsModule = (function () {
     if (clearBtn) clearBtn.addEventListener('click', () => { pendingAsset = null; renderAssetChip(body); });
   }
 
-  function renderPhotoChip(body) {
-    const el = body.querySelector('#ops-photo-chip');
-    if (!el) return;
-    el.innerHTML = pendingPhoto
-      ? `<div class="mvoa-row" style="margin-top:8px;"><span>🖼️ ${pendingPhoto.name}${pendingPhoto.compressedSizeBytes ? ` <span class="muted">(${formatKB(pendingPhoto.compressedSizeBytes)})</span>` : ''}</span>
-         <button class="btn-secondary" id="ops-clear-photo">Clear</button></div>`
-      : '';
-    const clearBtn = el.querySelector('#ops-clear-photo');
-    if (clearBtn) clearBtn.addEventListener('click', () => { pendingPhoto = null; renderPhotoChip(body); });
-  }
-
   function formatKB(bytes) {
     return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
+  }
+
+  // Reusable attachment picker: renders chips for each attachment in the
+  // given array, plus "Add Photo" / "Add Document" buttons when under the
+  // max limit. Mutates the attachments array in place so the caller (submit
+  // handler or close dialog) always reads the current state.
+  function renderAttachmentChips(scope, chipsSelector, btnsSelector, attachments, maxCount) {
+    const chipsEl = typeof chipsSelector === 'string' ? scope.querySelector(chipsSelector) : chipsSelector;
+    const btnsEl = typeof btnsSelector === 'string' ? scope.querySelector(btnsSelector) : btnsSelector;
+    if (!chipsEl || !btnsEl) return;
+
+    chipsEl.innerHTML = attachments.map((a, i) => `
+      <div class="mvoa-row" style="margin-bottom:4px;">
+        <span>${a.isPhoto ? '📷' : '📄'} ${escapeHtml(a.name)} <span class="muted">(${formatKB(a.compressedSizeBytes)})</span></span>
+        <button class="btn-secondary att-remove" data-idx="${i}" style="padding:4px 10px;margin:0;">✕</button>
+      </div>
+    `).join('');
+
+    chipsEl.querySelectorAll('.att-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        attachments.splice(parseInt(btn.dataset.idx), 1);
+        renderAttachmentChips(scope, chipsSelector, btnsSelector, attachments, maxCount);
+      });
+    });
+
+    if (attachments.length < maxCount) {
+      btnsEl.innerHTML = `
+        <button class="btn-secondary att-photo-pick">📷 Add Photo</button>
+        <button class="btn-secondary att-doc-pick">📄 Add Document</button>
+      `;
+      btnsEl.querySelector('.att-photo-pick').addEventListener('click', async () => {
+        const a = await MVOA.pickAttachment({ photoOnly: true, useCamera: true });
+        if (a) { attachments.push(a); renderAttachmentChips(scope, chipsSelector, btnsSelector, attachments, maxCount); }
+      });
+      btnsEl.querySelector('.att-doc-pick').addEventListener('click', async () => {
+        const a = await MVOA.pickAttachment({ photoOnly: false, useCamera: false });
+        if (a) { attachments.push(a); renderAttachmentChips(scope, chipsSelector, btnsSelector, attachments, maxCount); }
+      });
+    } else {
+      btnsEl.innerHTML = `<p class="muted" style="margin:0;">Maximum ${maxCount} attachments reached.</p>`;
+    }
   }
 
   let isSubmittingTask = false; // hard re-entrancy guard — see submitNewTask
@@ -326,24 +356,24 @@ const OpsModule = (function () {
     }
 
     const user = MVOA.getUser();
-    // Re-fetch fresh from the sheet (not the possibly-stale local cache)
-    // immediately before generating the ID, to shrink the window in which
-    // two different devices could compute the same "next" ID.
     await loadTasks();
     const existingIds = tasksCache.map(t => t.TaskID);
     const taskId = MVOA.nextId('TASK', existingIds);
     const now = new Date().toISOString();
 
-    errEl.textContent = pendingPhoto ? 'Uploading photo…' : '';
-    let photoUrl = '';
-    if (pendingPhoto) {
-      try {
-        photoUrl = await MVOA.uploadPhotoToDrive(pendingPhoto.file, `${taskId}_initial_${pendingPhoto.name}`);
-      } catch (e) {
-        errEl.textContent = 'Photo upload failed: ' + e.message + ' (task not saved — remove the photo or fix Drive setup and retry)';
-        if (submitBtn) submitBtn.disabled = false;
-        if (submitAnotherBtn) submitAnotherBtn.disabled = false;
-        return;
+    const attachmentUrls = ['', '', ''];
+    if (pendingAttachments.length) {
+      errEl.textContent = `Uploading ${pendingAttachments.length} attachment(s)…`;
+      for (let i = 0; i < Math.min(pendingAttachments.length, 3); i++) {
+        const att = pendingAttachments[i];
+        try {
+          attachmentUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${taskId}_att${i+1}_${att.name}`);
+        } catch (e) {
+          errEl.textContent = `Attachment ${i+1} upload failed: ${e.message} — remove it or fix Drive setup and retry.`;
+          if (submitBtn) submitBtn.disabled = false;
+          if (submitAnotherBtn) submitAnotherBtn.disabled = false;
+          return;
+        }
       }
     }
     errEl.textContent = '';
@@ -353,9 +383,11 @@ const OpsModule = (function () {
       AssetID: pendingAsset ? pendingAsset.assetId : '',
       AssetName: pendingAsset ? pendingAsset.assetName : '',
       CreatedBy: user.name, CreatedDate: now,
-      PhotoURL_Initial: photoUrl,
+      PhotoURL_Initial: attachmentUrls[0],
       Status: 'Open', ComplianceComment: '', PhotoURL_Compliance: '', ClosedDate: '', ClosedBy: '',
-      CategoryID: currentCategory.CategoryID, AssignedTo: assignedTo
+      CategoryID: currentCategory.CategoryID, AssignedTo: assignedTo,
+      AttachmentURL_2: attachmentUrls[1], AttachmentURL_3: attachmentUrls[2],
+      ComplianceAttachmentURL_2: '', ComplianceAttachmentURL_3: ''
     };
 
     try {
@@ -368,11 +400,11 @@ const OpsModule = (function () {
       return;
     }
 
-    pendingAsset = null; pendingPhoto = null; pendingAssignee = '';
+    pendingAsset = null; pendingAttachments = []; pendingAssignee = '';
     await loadTasks();
 
     if (opts.stayOnForm) {
-      render(container); // rebuilds a blank New Task form, refreshes Open-count in tab label
+      render(container);
       const freshBody = container.querySelector('#ops-view-body');
       const msg = freshBody && freshBody.querySelector('#ops-form-saved-msg');
       if (msg) msg.textContent = `✓ "${title}" saved. Add the next task below.`;
@@ -455,10 +487,10 @@ const OpsModule = (function () {
         ${t.Description ? `<p class="muted" style="margin:6px 0;">${t.Description}</p>` : ''}
         ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${t.AssetName} (${t.AssetID})</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${t.CreatedBy} · ${formatDate(t.CreatedDate)} · Priority: ${t.Priority}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
-        ${t.PhotoURL_Initial ? `<p class="muted" style="font-size:0.8rem;">🖼️ <a href="${t.PhotoURL_Initial}" target="_blank" rel="noopener">Photo</a></p>` : ''}
+        ${attachmentLinksHtml(t)}
         ${statusFilter === 'Open'
           ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:10px;">Mark Compliant / Close</button>`
-          : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${t.ClosedBy} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + t.ComplianceComment : ''}</p>`}
+          : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${t.ClosedBy} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
       </div>
     `).join('');
     body.querySelectorAll('.ops-comply-btn').forEach(btn => {
@@ -543,6 +575,17 @@ const OpsModule = (function () {
     return isNaN(d) ? iso : d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  // Returns HTML showing all attachment links for a task card.
+  function attachmentLinksHtml(t, forCompliance) {
+    const urls = forCompliance
+      ? [t.PhotoURL_Compliance, t.ComplianceAttachmentURL_2, t.ComplianceAttachmentURL_3]
+      : [t.PhotoURL_Initial, t.AttachmentURL_2, t.AttachmentURL_3];
+    const links = urls.filter(Boolean).map((url, i) =>
+      `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>`
+    ).join(' · ');
+    return links ? `<p class="muted" style="font-size:0.8rem;">${links}</p>` : '';
+  }
+
   function openComplyDialog(taskId, container) {
     const task = tasksCache.find(t => t.TaskID === taskId);
     if (!task) return;
@@ -550,59 +593,75 @@ const OpsModule = (function () {
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
       <div class="ops-qr-box" style="text-align:left;">
-        <h3>Close: ${task.Title}</h3>
-        <label>Compliance Comment
-          <textarea id="ops-comply-comment" rows="3" placeholder="What was done?"></textarea>
+        <h3>Close: ${escapeHtml(task.Title)}</h3>
+        <label>Compliance Comment <span style="color:#b3261e;">*</span>
+          <textarea id="ops-comply-comment" rows="3" placeholder="What was done? (required)"></textarea>
         </label>
-        <div id="ops-comply-photo-chip"></div>
-        <button id="ops-comply-photo-btn" class="btn-secondary" style="width:100%;margin-top:8px;">🖼️ Attach Photo (optional)</button>
+        <p class="muted" style="margin-top:-4px;font-size:0.8rem;">Required — cannot close without a comment.</p>
+        <div style="margin-top:12px;">
+          <p class="muted" style="margin:0 0 6px;">Attachments (optional — up to 3)</p>
+          <div id="ops-comply-chips"></div>
+          <div id="ops-comply-att-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"></div>
+        </div>
         <button id="ops-comply-submit" class="btn-primary">Confirm Close</button>
         <button id="ops-comply-cancel" class="btn-secondary">Cancel</button>
         <p class="error-text" id="ops-comply-error"></p>
       </div>
     `;
     document.body.appendChild(modal);
-    let compliancePhoto = null;
 
-    function renderChip() {
-      const el = modal.querySelector('#ops-comply-photo-chip');
-      el.innerHTML = compliancePhoto ? `<p class="muted">🖼️ ${compliancePhoto.name}${compliancePhoto.compressedSizeBytes ? ` (${formatKB(compliancePhoto.compressedSizeBytes)})` : ''}</p>` : '';
-    }
-    modal.querySelector('#ops-comply-photo-btn').addEventListener('click', async () => {
-      const p = await MVOA.capturePhoto({ useCamera: true });
-      if (p) { compliancePhoto = p; renderChip(); }
-    });
+    const closeAttachments = [];
+    renderAttachmentChips(modal, '#ops-comply-chips', '#ops-comply-att-btns', closeAttachments, 3);
+
     modal.querySelector('#ops-comply-cancel').addEventListener('click', () => modal.remove());
     modal.querySelector('#ops-comply-submit').addEventListener('click', async () => {
       const comment = modal.querySelector('#ops-comply-comment').value.trim();
       const errEl = modal.querySelector('#ops-comply-error');
-      const user = MVOA.getUser();
-      const now = new Date().toISOString();
-
-      let photoUrl = '';
-      if (compliancePhoto) {
-        errEl.textContent = 'Uploading photo…';
-        try {
-          photoUrl = await MVOA.uploadPhotoToDrive(compliancePhoto.file, `${taskId}_compliance_${compliancePhoto.name}`);
-        } catch (e) {
-          errEl.textContent = 'Photo upload failed: ' + e.message;
-          return;
-        }
-      }
       errEl.textContent = '';
 
+      // Mandatory compliance comment
+      if (!comment) {
+        errEl.textContent = 'A compliance comment is required before closing this task.';
+        modal.querySelector('#ops-comply-comment').focus();
+        return;
+      }
+
+      const confirmBtn = modal.querySelector('#ops-comply-submit');
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Closing…';
+
+      const complianceUrls = ['', '', ''];
+      if (closeAttachments.length) {
+        confirmBtn.textContent = `Uploading ${closeAttachments.length} attachment(s)…`;
+        for (let i = 0; i < Math.min(closeAttachments.length, 3); i++) {
+          const att = closeAttachments[i];
+          try {
+            complianceUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${taskId}_compliance${i+1}_${att.name}`);
+          } catch (e) {
+            errEl.textContent = `Attachment ${i+1} upload failed: ${e.message}`;
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Confirm Close';
+            return;
+          }
+        }
+      }
+
+      const user = MVOA.getUser();
+      const now = new Date().toISOString();
       const updated = Object.assign({}, task, {
-        Status: 'Closed',
-        ComplianceComment: comment,
-        PhotoURL_Compliance: photoUrl,
-        ClosedDate: now,
-        ClosedBy: user.name
+        Status: 'Closed', ComplianceComment: comment,
+        PhotoURL_Compliance: complianceUrls[0],
+        ClosedDate: now, ClosedBy: user.name,
+        ComplianceAttachmentURL_2: complianceUrls[1],
+        ComplianceAttachmentURL_3: complianceUrls[2]
       });
       try {
         await MVOA.sheetsUpdateRow(TAB, task.rowNumber, objToRow(updated));
         await MVOA.logAudit({ module: 'DailyOps', requestId: taskId, eventType: 'Completed', comment, statusAfter: 'Closed' });
       } catch (e) {
         errEl.textContent = 'Could not close task: ' + e.message;
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Confirm Close';
         return;
       }
       modal.remove();
@@ -611,6 +670,7 @@ const OpsModule = (function () {
       render(container);
     });
   }
+
 
   // ───────────────────────────────────────────────────────────
   // REPORTS — Tasks by Category, Tasks by Assignee, Overdue/Aging.
