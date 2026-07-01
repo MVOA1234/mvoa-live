@@ -18,7 +18,7 @@ body {
   color: var(--text);
 }
 
-.hidden { display: none !important; }
+.hidden { display: none !important; pointer-events: none !important; }
 
 .screen {
   min-height: 100vh;
