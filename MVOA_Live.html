@@ -84,47 +84,49 @@
 
   <!-- ═══════════════ SETTINGS SCREEN (edit config anytime) ═══════════════ -->
   <div id="settings-screen" class="screen hidden">
-    <div class="card" id="connection-settings-card">
-      <div class="mvoa-row">
-        <h1 style="margin:0;">Settings</h1>
-        <button id="settings-back-btn" class="btn-secondary">&larr; Home</button>
+    <!-- Tab bar -->
+    <div class="mvoa-row" style="margin-bottom:16px;">
+      <div class="ops-tabs" style="margin-bottom:0;">
+        <button id="stab-connection-btn" class="ops-tab-btn active" data-stab="connection">Connection</button>
+        <button id="stab-mypin-btn" class="ops-tab-btn" data-stab="mypin">My PIN</button>
+        <button id="stab-admin-btn" class="ops-tab-btn hidden" data-stab="admin">Administration</button>
       </div>
-      <p class="muted">Edit connection details. Stored locally in this browser only.</p>
-      <label>Google Sheet ID
-        <input id="settings-sheet-id" type="text">
-      </label>
-      <label>API Key (read access)
-        <input id="settings-api-key" type="text">
-      </label>
-      <label>Service Account JSON (write access)
-        <textarea id="settings-sa-json" rows="4"></textarea>
-      </label>
-      <label>Drive Folder ID (for photo storage)
-        <input id="settings-drive-folder" type="text">
-      </label>
-      <label>Photo Upload URL (Apps Script Web App)
-        <input id="settings-photo-url" type="text" placeholder="ends in /exec">
-      </label>
-      <label>Photo Upload Secret
-        <input id="settings-photo-secret" type="text">
-      </label>
-      <button id="settings-save-btn" class="btn-primary">Save Changes</button>
-      <p class="error-text" id="settings-error"></p>
-      <p class="muted" id="settings-saved-msg"></p>
+      <button id="settings-back-btn" class="btn-secondary">&larr; Home</button>
     </div>
 
-    <!-- Shown instead of the card above when the logged-in user is not an
-         admin (DEV / AdminAccess=TRUE) — connection credentials stay hidden. -->
-    <div class="card hidden" id="connection-settings-masked-card">
-      <div class="mvoa-row">
-        <h1 style="margin:0;">Settings</h1>
-        <button id="settings-back-btn-2" class="btn-secondary">&larr; Home</button>
+    <!-- Tab 1: Connection (admin = full form; non-admin = masked message) -->
+    <div id="stab-connection" class="card">
+      <div id="stab-connection-admin">
+        <p class="muted">Edit connection details. Stored locally in this browser only.</p>
+        <label>Google Sheet ID
+          <input id="settings-sheet-id" type="text">
+        </label>
+        <label>API Key (read access)
+          <input id="settings-api-key" type="text">
+        </label>
+        <label>Service Account JSON (write access)
+          <textarea id="settings-sa-json" rows="4"></textarea>
+        </label>
+        <label>Drive Folder ID (for photo storage)
+          <input id="settings-drive-folder" type="text">
+        </label>
+        <label>Photo Upload URL (Apps Script Web App)
+          <input id="settings-photo-url" type="text" placeholder="ends in /exec">
+        </label>
+        <label>Photo Upload Secret
+          <input id="settings-photo-secret" type="text">
+        </label>
+        <button id="settings-save-btn" class="btn-primary">Save Changes</button>
+        <p class="error-text" id="settings-error"></p>
+        <p class="muted" id="settings-saved-msg"></p>
       </div>
-      <p class="muted">Connection details are managed by your Developer or another admin. Contact them if the app stops connecting.</p>
+      <div id="stab-connection-masked" class="hidden">
+        <p class="muted">Connection details are managed by your Developer or admin. Contact them if the app stops connecting.</p>
+      </div>
     </div>
 
-    <!-- Visible to every logged-in user -->
-    <div class="card" id="change-pin-card" style="margin-top:16px;">
+    <!-- Tab 2: My PIN (everyone) -->
+    <div id="stab-mypin" class="card hidden">
       <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Change My PIN</h2>
       <p class="muted">Update your own login PIN. You'll need your current PIN to confirm it's you.</p>
       <label>Current PIN
@@ -141,62 +143,59 @@
       <p class="muted" id="cp-saved-msg"></p>
     </div>
 
-    <!-- Admin only (DEV or AdminAccess=TRUE): entry point to the separate
-         PIN Management screen (reset/suspend/rename OTHER users). -->
-    <div class="card hidden" id="pin-mgmt-entry-card" style="margin-top:16px;">
-      <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">User Administration</h2>
-      <p class="muted">Reset a forgotten PIN, suspend/activate a login, or correct someone's display name.</p>
-      <button id="open-pin-mgmt-btn" class="btn-primary">🔑 Open PIN Management</button>
-    </div>
-
-    <!-- DEV-only: create new app users without ever touching the Roles
-         sheet's PIN_Hash column by hand. Hashing happens here, in-app,
-         using the same salt+SHA-256 scheme the login screen checks against. -->
-    <div class="card" id="manage-users-card" style="margin-top:16px;">
-      <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
-      <p class="muted">Create a new login. The PIN is hashed before it's saved — nobody, including you later, can read it back out.</p>
-
-      <div id="manage-users-list" style="margin:14px 0;"></div>
-
-      <h3 style="margin:18px 0 4px;font-size:0.95rem;">Add New User</h3>
-      <label>Name
-        <input id="mu-name" type="text" placeholder="e.g. Ramesh Kumar">
-      </label>
-      <label>Role
-        <select id="mu-role">
-          <option value="DEV">Developer</option>
-          <option value="FM">Facility Manager</option>
-          <option value="OPS">Operations Staff</option>
-          <option value="SEC">Security</option>
-          <option value="TRES">Treasurer</option>
-          <option value="EC">Executive Committee</option>
-        </select>
-      </label>
-      <label>PIN (4&ndash;8 digits)
-        <input id="mu-pin" type="password" inputmode="numeric" maxlength="8" placeholder="default: 1111">
-      </label>
-      <label>Confirm PIN
-        <input id="mu-pin-confirm" type="password" inputmode="numeric" maxlength="8">
-      </label>
-      <p class="muted" style="margin-top:-8px;">Standard default PIN for new users is <strong>1111</strong> — ask them to change it via Settings → Change My PIN after first login.</p>
-      <label>Phone (optional)
-        <input id="mu-phone" type="text">
-      </label>
-      <label>Email (optional)
-        <input id="mu-email" type="text">
-      </label>
-      <label>Title (optional override, e.g. "Secretary", "President")
-        <input id="mu-title" type="text" placeholder="leave blank to use the role's default label">
-      </label>
-      <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
-        <input id="mu-ec" type="checkbox" style="width:auto;"> EC Member
-      </label>
-      <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
-        <input id="mu-admin" type="checkbox" style="width:auto;"> Admin Access (unmasked Settings + can manage other users' PINs)
-      </label>
-      <button id="mu-add-btn" class="btn-primary">Create User</button>
-      <p class="error-text" id="mu-error"></p>
-      <p class="muted" id="mu-saved-msg"></p>
+    <!-- Tab 3: Administration (admin only) -->
+    <div id="stab-admin" class="hidden">
+      <!-- PIN Management entry -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">User Administration</h2>
+        <p class="muted">Reset a forgotten PIN, suspend/activate a login, or correct someone's display name.</p>
+        <button id="open-pin-mgmt-btn" class="btn-primary">🔑 Open PIN Management</button>
+      </div>
+      <!-- Manage Users -->
+      <div class="card" id="manage-users-card">
+        <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
+        <p class="muted">Create a new login. The PIN is hashed before it's saved — nobody, including you later, can read it back out.</p>
+        <div id="manage-users-list" style="margin:14px 0;"></div>
+        <h3 style="margin:18px 0 4px;font-size:0.95rem;">Add New User</h3>
+        <label>Name
+          <input id="mu-name" type="text" placeholder="e.g. Ramesh Kumar">
+        </label>
+        <label>Role
+          <select id="mu-role">
+            <option value="DEV">Developer</option>
+            <option value="FM">Facility Manager</option>
+            <option value="OPS">Operations Staff</option>
+            <option value="SEC">Security</option>
+            <option value="TRES">Treasurer</option>
+            <option value="EC">Executive Committee</option>
+          </select>
+        </label>
+        <label>PIN (4&ndash;8 digits)
+          <input id="mu-pin" type="password" inputmode="numeric" maxlength="8" placeholder="default: 1111">
+        </label>
+        <label>Confirm PIN
+          <input id="mu-pin-confirm" type="password" inputmode="numeric" maxlength="8">
+        </label>
+        <p class="muted" style="margin-top:-8px;">Standard default PIN is <strong>1111</strong> — ask them to change it via Settings → My PIN after first login.</p>
+        <label>Phone (optional)
+          <input id="mu-phone" type="text">
+        </label>
+        <label>Email (optional)
+          <input id="mu-email" type="text">
+        </label>
+        <label>Title (optional override, e.g. "Secretary", "President")
+          <input id="mu-title" type="text" placeholder="leave blank to use the role's default label">
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
+          <input id="mu-ec" type="checkbox" style="width:auto;"> EC Member
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
+          <input id="mu-admin" type="checkbox" style="width:auto;"> Admin Access (unmasked Settings + can manage other users' PINs)
+        </label>
+        <button id="mu-add-btn" class="btn-primary">Create User</button>
+        <p class="error-text" id="mu-error"></p>
+        <p class="muted" id="mu-saved-msg"></p>
+      </div>
     </div>
   </div>
 
@@ -340,17 +339,31 @@
     });
 
     // ---- Settings ----
+    // ---- Settings — tab switching helper ----
+    let activeSettingsTab = 'connection';
+    function switchSettingsTab(tab) {
+      activeSettingsTab = tab;
+      ['connection','mypin','admin'].forEach(t => {
+        const content = document.getElementById('stab-' + t);
+        const btn = document.getElementById('stab-' + t + '-btn');
+        if (content) content.classList.toggle('hidden', t !== tab);
+        if (btn) btn.classList.toggle('active', t === tab);
+      });
+    }
+    document.querySelectorAll('.ops-tab-btn[data-stab]').forEach(btn => {
+      btn.addEventListener('click', () => switchSettingsTab(btn.dataset.stab));
+    });
+
     document.getElementById('settings-btn').addEventListener('click', () => {
       const user = MVOA.getUser();
       const admin = MVOA.isAdmin(user);
-      const connCard = document.getElementById('connection-settings-card');
-      const maskedCard = document.getElementById('connection-settings-masked-card');
-      const pinMgmtEntry = document.getElementById('pin-mgmt-entry-card');
 
+      // Show/hide Connection tab content based on admin status
+      const connAdmin = document.getElementById('stab-connection-admin');
+      const connMasked = document.getElementById('stab-connection-masked');
       if (admin) {
-        connCard.classList.remove('hidden');
-        maskedCard.classList.add('hidden');
-        pinMgmtEntry.classList.remove('hidden');
+        connAdmin.classList.remove('hidden');
+        connMasked.classList.add('hidden');
         document.getElementById('settings-sheet-id').value = MVOA.CFG.sheetId || '';
         document.getElementById('settings-api-key').value = MVOA.CFG.apiKey || '';
         document.getElementById('settings-sa-json').value = MVOA.CFG.saJson ? JSON.stringify(MVOA.CFG.saJson) : '';
@@ -360,39 +373,33 @@
         document.getElementById('settings-error').textContent = '';
         document.getElementById('settings-saved-msg').textContent = '';
       } else {
-        connCard.classList.add('hidden');
-        maskedCard.classList.remove('hidden');
-        pinMgmtEntry.classList.add('hidden');
+        connAdmin.classList.add('hidden');
+        connMasked.classList.remove('hidden');
       }
 
+      // Show/hide Administration tab for admins only
+      const adminTabBtn = document.getElementById('stab-admin-btn');
+      adminTabBtn.classList.toggle('hidden', !admin);
+      if (admin) loadManageUsersList();
+
+      // Reset My PIN fields
       document.getElementById('cp-current').value = '';
       document.getElementById('cp-new').value = '';
       document.getElementById('cp-new-confirm').value = '';
       document.getElementById('cp-error').textContent = '';
       document.getElementById('cp-saved-msg').textContent = '';
 
-      const muCard = document.getElementById('manage-users-card');
-      if (user && admin) {
-        muCard.classList.remove('hidden');
-        loadManageUsersList();
-      } else {
-        muCard.classList.add('hidden');
-      }
+      // Non-admins land on My PIN tab (Connection shows masked message only)
+      switchSettingsTab(admin ? 'connection' : 'mypin');
       show('settings-screen');
     });
-    document.getElementById('settings-back-btn').addEventListener('click', () => {
-      show('home-screen');
-    });
-    document.getElementById('settings-back-btn-2').addEventListener('click', () => {
-      show('home-screen');
-    });
+
+    document.getElementById('settings-back-btn').addEventListener('click', () => show('home-screen'));
     document.getElementById('open-pin-mgmt-btn').addEventListener('click', () => {
       show('pin-mgmt-screen');
       loadPinMgmtList();
     });
-    document.getElementById('pin-mgmt-back-btn').addEventListener('click', () => {
-      show('settings-screen');
-    });
+    document.getElementById('pin-mgmt-back-btn').addEventListener('click', () => show('settings-screen'));
     document.getElementById('settings-save-btn').addEventListener('click', () => {
       const sheetId = document.getElementById('settings-sheet-id').value.trim();
       const apiKey = document.getElementById('settings-api-key').value.trim();
