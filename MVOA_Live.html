@@ -342,6 +342,11 @@
     // ---- Settings — tab switching helper ----
     let activeSettingsTab = 'connection';
     function switchSettingsTab(tab) {
+      const user = MVOA.getUser();
+      const admin = MVOA.isAdmin(user);
+      // Hard gate — never allow switching to admin tab for non-admins,
+      // regardless of how the switch was triggered (e.g. hidden button tap).
+      if (tab === 'admin' && !admin) return;
       activeSettingsTab = tab;
       ['connection','mypin','admin'].forEach(t => {
         const content = document.getElementById('stab-' + t);
