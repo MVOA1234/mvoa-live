@@ -529,14 +529,68 @@ const MVOA = (function () {
       input.click();
     });
   }
-  // TODO: photo storage destination not yet decided (Google Drive upload
-  // via the same service account vs. some other host). PhotoURL columns
-  // across the schema assume a real URL once this is wired up.
+  // ───────────────────────────────────────────────────────────
+  // ATTACHMENT PICKER — picks photos OR documents.
+  // Photos are resized/compressed (same as capturePhoto).
+  // Documents (PDF, Word, Excel) are returned as-is, no compression.
+  // Accepted document types mirror common office files; camera capture
+  // is only offered for the photo-specific picker (useCamera=true).
+  // ───────────────────────────────────────────────────────────
+  const ACCEPTED_DOC_TYPES = [
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  ].join(',');
+  const ACCEPTED_ALL_TYPES = 'image/*,' + ACCEPTED_DOC_TYPES;
 
-  // ───────────────────────────────────────────────────────────
-  // LOGO — real finalized asset at assets/logo.png (relative to
-  // MVOA_Live.html). Returns an <img> tag, sized by the caller.
-  // ───────────────────────────────────────────────────────────
+  function pickAttachment({ photoOnly = false, useCamera = false } = {}) {
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = photoOnly ? 'image/*' : ACCEPTED_ALL_TYPES;
+      if (useCamera && photoOnly) input.capture = 'environment';
+      input.style.display = 'none';
+      document.body.appendChild(input);
+      input.onchange = () => {
+        const file = input.files[0];
+        document.body.removeChild(input);
+        if (!file) return resolve(null);
+        const isPhoto = file.type.startsWith('image/');
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const originalDataUrl = reader.result;
+          if (isPhoto) {
+            // Compress photos exactly like capturePhoto does
+            try {
+              const compressedBlob = await resizeAndCompressImage(originalDataUrl, PHOTO_MAX_EDGE, PHOTO_JPEG_QUALITY);
+              const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
+              const compressedFile = new File([compressedBlob], baseName + '.jpg', { type: 'image/jpeg' });
+              const cr = new FileReader();
+              cr.onload = () => resolve({
+                name: compressedFile.name, dataUrl: cr.result, file: compressedFile,
+                isPhoto: true, originalSizeBytes: file.size, compressedSizeBytes: compressedFile.size
+              });
+              cr.onerror = reject;
+              cr.readAsDataURL(compressedFile);
+            } catch (e) {
+              console.warn('[MVOA] photo compression failed, using original', e);
+              resolve({ name: file.name, dataUrl: originalDataUrl, file, isPhoto: true, originalSizeBytes: file.size, compressedSizeBytes: file.size });
+            }
+          } else {
+            // Documents: return as-is, no compression
+            resolve({ name: file.name, dataUrl: originalDataUrl, file, isPhoto: false, originalSizeBytes: file.size, compressedSizeBytes: file.size });
+          }
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      };
+      input.click();
+    });
+  }
+
+
   function logoSvg(size = 32) {
     return `<img src="assets/logo.png" alt="MVOA" style="height:${size}px;width:auto;display:block;">`;
   }
@@ -681,7 +735,7 @@ const MVOA = (function () {
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
     logAudit, nextId,
-    capturePhoto, uploadPhotoToDrive,
+    capturePhoto, pickAttachment, uploadPhotoToDrive,
     logoSvg,
     statusBadgeHtml, STATUS_STYLES,
     setAppBadge,
