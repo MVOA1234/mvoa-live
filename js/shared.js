@@ -44,6 +44,7 @@ const MVOA = (function () {
     opsTasks: 'OpsTasks',
     opsCategories: 'OpsCategories',
     technicians: 'Technicians',
+    opsTaskNotes: 'OpsTaskNotes',
     hsTemplates: 'HSChecklistTemplates',
     hsItems: 'HSChecklistItems',
     hsItemOptions: 'HSChecklistItemOptions',
@@ -345,7 +346,31 @@ const MVOA = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
-  // OPS CATEGORIES (sub-tiles within Daily Operations) + TECHNICIANS
+  // TASK NOTES — per-task comment thread in OpsTaskNotes tab.
+  // Columns: NoteID | TaskID | Author | Timestamp | Note
+  // Notes are loaded fresh each time (no persistent cache) since
+  // they're shown on demand when the user expands a thread.
+  // ───────────────────────────────────────────────────────────
+  async function loadNotesForTask(taskId) {
+    const rows = await sheetsRead(TABS.opsTaskNotes);
+    if (!rows.length) return [];
+    return rows.slice(1)
+      .map(r => ({ NoteID: r[0]||'', TaskID: r[1]||'', Author: r[2]||'', Timestamp: r[3]||'', Note: r[4]||'' }))
+      .filter(n => n.NoteID && n.TaskID === taskId);
+  }
+
+  async function appendNote(taskId, noteText) {
+    if (!currentUser) throw new Error('Not logged in.');
+    const allRows = await sheetsRead(TABS.opsTaskNotes);
+    const existing = allRows.slice(1).map(r => r[0] || '').filter(Boolean);
+    const noteId = nextId('NOTE', existing);
+    const now = new Date().toISOString();
+    await sheetsAppend(TABS.opsTaskNotes, [noteId, taskId, currentUser.name, now, noteText]);
+    await logAudit({ module: 'DailyOps', requestId: taskId, eventType: 'NoteAdded', comment: noteText.slice(0, 80), statusAfter: 'Open' });
+    return { NoteID: noteId, TaskID: taskId, Author: currentUser.name, Timestamp: now, Note: noteText };
+  }
+
+
   // Columns (OpsCategories): CategoryID | Name | Icon | Color |
   //   AllowedRoles | AllowedUsers | Active | SortOrder
   // Columns (Technicians): TechnicianID | Name | Contact | Active
@@ -734,6 +759,7 @@ const MVOA = (function () {
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
+    loadNotesForTask, appendNote,
     logAudit, nextId,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
     logoSvg,
