@@ -472,6 +472,8 @@ const OpsModule = (function () {
   }
 
   function renderTaskList(body, container, statusFilter) {
+    const user = MVOA.getUser();
+    const canEdit = MVOA.canEditCategory(currentCategory, user) || !!currentCategory._isUncategorized;
     const list = tasksCache.filter(t => t.CategoryID === currentCategory.CategoryID && t.Status === statusFilter)
       .sort((a, b) => (b.CreatedDate || '').localeCompare(a.CreatedDate || ''));
     if (!list.length) {
@@ -481,22 +483,97 @@ const OpsModule = (function () {
     body.innerHTML = list.map(t => `
       <div class="mvoa-list-item" data-task-id="${t.TaskID}">
         <div class="mvoa-row">
-          <strong>${t.Title}</strong>
+          <strong>${escapeHtml(t.Title)}</strong>
           ${MVOA.statusBadgeHtml(t.Status === 'Open' ? 'Open' : 'Closed')}
         </div>
-        ${t.Description ? `<p class="muted" style="margin:6px 0;">${t.Description}</p>` : ''}
-        ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${t.AssetName} (${t.AssetID})</p>` : ''}
-        <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${t.CreatedBy} · ${formatDate(t.CreatedDate)} · Priority: ${t.Priority}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
+        ${t.Description ? `<p class="muted" style="margin:6px 0;">${escapeHtml(t.Description)}</p>` : ''}
+        ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${escapeHtml(t.AssetName)} (${escapeHtml(t.AssetID)})</p>` : ''}
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(t.CreatedBy)} · ${formatDate(t.CreatedDate)} · Priority: ${escapeHtml(t.Priority)}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
         ${attachmentLinksHtml(t)}
         ${statusFilter === 'Open'
-          ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:10px;">Mark Compliant / Close</button>`
-          : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${t.ClosedBy} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
+          ? `<div style="margin-top:8px;">
+               <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">💬 Notes</button>
+             </div>
+             <div class="ops-notes-body hidden" data-task-id="${t.TaskID}"></div>
+             ${canEdit ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
+          : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
       </div>
     `).join('');
+
+    body.querySelectorAll('.ops-notes-toggle').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const taskId = btn.dataset.taskId;
+        const notesBody = body.querySelector(`.ops-notes-body[data-task-id="${taskId}"]`);
+        const isHidden = notesBody.classList.contains('hidden');
+        if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
+        notesBody.classList.remove('hidden');
+        await renderNotesThread(notesBody, taskId, btn, canEdit);
+      });
+    });
+
     body.querySelectorAll('.ops-comply-btn').forEach(btn => {
       btn.addEventListener('click', () => openComplyDialog(btn.dataset.taskId, container));
     });
   }
+
+  async function renderNotesThread(notesBody, taskId, toggleBtn, canEdit) {
+    notesBody.innerHTML = `<p class="muted" style="font-size:0.8rem;padding:8px 0;">Loading notes…</p>`;
+    let notes;
+    try {
+      notes = await MVOA.loadNotesForTask(taskId);
+    } catch (e) {
+      notesBody.innerHTML = `<p class="error-text">Could not load notes: ${escapeHtml(e.message)}</p>`;
+      return;
+    }
+    toggleBtn.textContent = `💬 Notes (${notes.length})`;
+    const notesHtml = notes.length
+      ? notes.map(n => `
+          <div style="border-left:3px solid var(--mvoa-blue);padding:6px 10px;margin-bottom:8px;background:var(--bg);border-radius:0 6px 6px 0;">
+            <div class="mvoa-row" style="margin-bottom:2px;">
+              <strong style="font-size:0.85rem;">${escapeHtml(n.Author)}</strong>
+              <span class="muted" style="font-size:0.75rem;">${formatDate(n.Timestamp)}</span>
+            </div>
+            <p style="margin:0;font-size:0.9rem;">${escapeHtml(n.Note)}</p>
+          </div>`).join('')
+      : `<p class="muted" style="font-size:0.8rem;padding:4px 0;">No notes yet — be the first to add one.</p>`;
+
+    const addNoteForm = canEdit ? `
+      <div style="margin-top:8px;">
+        <textarea id="ops-note-text-${taskId}" rows="2" placeholder="Type a note, question or update…" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:0.9rem;resize:vertical;box-sizing:border-box;"></textarea>
+        <button class="btn-primary ops-note-submit" data-task-id="${taskId}" style="margin-top:6px;width:100%;">Add Note</button>
+        <p class="error-text ops-note-error" style="min-height:1em;margin-top:4px;"></p>
+      </div>` : '';
+
+    notesBody.innerHTML = `
+      <div style="margin-top:8px;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
+        ${notesHtml}
+        ${addNoteForm}
+      </div>`;
+
+    if (canEdit) {
+      const submitBtn = notesBody.querySelector('.ops-note-submit');
+      const textarea = notesBody.querySelector(`#ops-note-text-${taskId}`);
+      const errEl = notesBody.querySelector('.ops-note-error');
+      submitBtn.addEventListener('click', async () => {
+        const text = textarea.value.trim();
+        errEl.textContent = '';
+        if (!text) { errEl.textContent = 'Note cannot be empty.'; return; }
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Saving…';
+        try {
+          await MVOA.appendNote(taskId, text);
+          textarea.value = '';
+          await renderNotesThread(notesBody, taskId, toggleBtn, canEdit);
+        } catch (e) {
+          errEl.textContent = 'Could not save note: ' + escapeHtml(e.message);
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Add Note';
+        }
+      });
+    }
+  }
+
+
 
   // ───────────────────────────────────────────────────────────
   // HISTORY — date-range view across ALL tasks (open + closed),
