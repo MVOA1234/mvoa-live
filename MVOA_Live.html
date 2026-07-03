@@ -5,14 +5,189 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>MVOA</title>
 <script>
-  // ─── CACHE-BUSTING LOADER ───────────────────────────────────
-  // Appends a timestamp (?v=...) to every shared CSS/JS file URL so
-  // the browser always fetches the current version from GitHub Pages
-  // on each page load, instead of serving a stale cached copy after
-  // a deploy. No manual version bump needed — this runs automatically.
   window.MVOA_CACHE_BUST = Date.now();
-  document.write('<link rel="stylesheet" href="css/shared.css?v=' + window.MVOA_CACHE_BUST + '">');
 </script>
+<style>
+:root {
+  --mvoa-blue: #1d4e6b;
+  --mvoa-blue-dark: #14374b;
+  --bg: #f5f6f8;
+  --card-bg: #ffffff;
+  --border: #dde1e6;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.hidden { display: none !important; pointer-events: none !important; }
+
+.screen {
+  min-height: 100vh;
+  padding: 20px;
+}
+
+#login-screen, #setup-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 420px;
+  width: 100%;
+}
+
+.login-card { text-align: center; }
+.logo-area h1 { color: var(--mvoa-blue); margin-bottom: 4px; }
+
+label {
+  display: block;
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 14px 0 4px;
+}
+
+input, textarea, select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+.btn-primary, .btn-secondary {
+  margin-top: 16px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  border: none;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary { background: var(--mvoa-blue); color: white; width: 100%; }
+.btn-primary:hover { background: var(--mvoa-blue-dark); }
+.btn-secondary { background: var(--border); color: var(--text); }
+
+.error-text { color: #b3261e; font-size: 0.85rem; min-height: 1.2em; margin-top: 8px; }
+.muted { color: var(--muted); font-size: 0.85rem; }
+
+.home-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+.home-header-left { display: flex; align-items: center; gap: 12px; }
+.home-greeting { font-size: 1.2rem; font-weight: 700; }
+
+.tiles-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+@media (min-width: 700px) {
+  .tiles-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+.tile {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.tile:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.08); transform: translateY(-1px); }
+.tile-icon { font-size: 2rem; margin-bottom: 8px; }
+.tile-label { font-weight: 600; font-size: 0.95rem; }
+.tile-locked { opacity: 0.55; }
+.tile-locked:hover { box-shadow: none; transform: none; }
+
+.module-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+#module-title { font-size: 1.15rem; font-weight: 700; color: var(--mvoa-blue); }
+
+.mvoa-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+/* Generic list/table helpers reused by modules */
+.mvoa-list-item {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 10px;
+}
+.mvoa-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+
+table.mvoa-table { width: 100%; border-collapse: collapse; min-width: 480px; }
+table.mvoa-table th, table.mvoa-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+.report-row-overdue td { background: #f8d7da; }
+table.mvoa-table tbody tr[data-row-index]:hover td { background: #eef2f5; }
+
+/* Operations module */
+.ops-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+.ops-tab-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.ops-tab-btn.active { background: var(--mvoa-blue); color: white; border-color: var(--mvoa-blue); }
+
+.ops-qr-modal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+.ops-qr-box {
+  background: white;
+  border-radius: var(--radius);
+  padding: 20px;
+  max-width: 420px;
+  width: 100%;
+  text-align: center;
+}
+.ops-qr-box video { width: 100%; border-radius: 8px; background: #000; }
+.ops-qr-box h3 { margin-top: 0; color: var(--mvoa-blue); }
+
+
+</style>
 </head>
 <body>
 
