@@ -151,7 +151,7 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--mvoa-blue-tint);
+  background: var(--success-tint);
 }
 .tile-label { font-weight: 600; font-size: 0.95rem; }
 .tile-locked { opacity: 0.55; }
