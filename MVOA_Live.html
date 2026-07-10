@@ -223,11 +223,10 @@
 
   <!-- ═══════════════ SCRIPTS ═══════════════ -->
   <script>
-    // Scripts are inlined directly here so they always load fresh with
-    // MVOA_Live.html, bypassing any file-level caching issues on mobile.
-    // When GitHub Pages deployment is fully stable, these can be moved
-    // back to external files (js/shared.js etc.) and the loadScript
-    // loader below restored.
+    // Loads each script in order, with a cache-busting ?v= timestamp on
+    // the local MVOA files (jsQR is a versioned CDN URL already, left as-is).
+    // Order matters: shared.js must load before the module-*.js files,
+    // which register themselves against the MVOA object shared.js defines.
     function loadScript(src) {
       return new Promise((resolve, reject) => {
         const s = document.createElement('script');
@@ -243,6 +242,7 @@
       .then(() => loadScript('js/shared.js?v=' + v))
       .then(() => loadScript('js/module-ops.js?v=' + v))
       .then(() => loadScript('js/module-hs.js?v=' + v))
+      .then(() => loadScript('js/module-finance.js?v=' + v))
       // .then(() => loadScript('js/module-expense.js?v=' + v)) // add here later, no other changes needed
       .then(() => boot())
       .catch(err => {
