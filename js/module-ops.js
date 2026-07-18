@@ -36,7 +36,8 @@ const OpsModule = (function () {
     'CreatedBy','CreatedDate','PhotoURL_Initial','Status','ComplianceComment',
     'PhotoURL_Compliance','ClosedDate','ClosedBy','CategoryID','AssignedTo',
     'AttachmentURL_2','AttachmentURL_3',
-    'ComplianceAttachmentURL_2','ComplianceAttachmentURL_3'];
+    'ComplianceAttachmentURL_2','ComplianceAttachmentURL_3',
+    'NoteCount','LastNoteAt','LastNoteAuthor','CreatorLastSeenNotesAt','AssigneeLastSeenNotesAt'];
 
   function rowToObj(row, rowNumber) {
     const o = { rowNumber };
@@ -44,6 +45,34 @@ const OpsModule = (function () {
     return o;
   }
   function objToRow(o) { return COLS.map(c => o[c] !== undefined ? o[c] : ''); }
+
+  // ───────────────────────────────────────────────────────────
+  // Notes read-tracking — a task's two parties are its Assignor
+  // (CreatedBy) and its Assignee (AssignedTo). Each has their own
+  // "last seen notes" timestamp, so a note from one party shows as
+  // unread for the other until they open the thread.
+  // ───────────────────────────────────────────────────────────
+  function isCreatorOf(t, user) { return t.CreatedBy === user.name; }
+  function isAssigneeOf(t, user) {
+    return !!t.AssignedTo && t.AssignedTo.indexOf('user:') === 0 && t.AssignedTo.substring('user:'.length) === user.name;
+  }
+  function hasUnreadNote(t, user) {
+    if (!t.LastNoteAt || t.LastNoteAuthor === user.name) return false; // no notes yet, or your own latest note
+    if (isCreatorOf(t, user)) return !t.CreatorLastSeenNotesAt || t.LastNoteAt > t.CreatorLastSeenNotesAt;
+    if (isAssigneeOf(t, user)) return !t.AssigneeLastSeenNotesAt || t.LastNoteAt > t.AssigneeLastSeenNotesAt;
+    return false;
+  }
+  async function markNotesSeen(t, user) {
+    const field = isCreatorOf(t, user) ? 'CreatorLastSeenNotesAt' : (isAssigneeOf(t, user) ? 'AssigneeLastSeenNotesAt' : null);
+    if (!field) return; // viewer is neither party to this task — nothing to mark
+    const now = new Date().toISOString();
+    t[field] = now;
+    try {
+      await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
+    } catch (e) {
+      // Non-critical — worst case the unread dot reappears next reload. No need to surface an error to the user.
+    }
+  }
 
   async function loadTasks() {
     const rows = await MVOA.sheetsRead(TAB);
@@ -106,13 +135,15 @@ const OpsModule = (function () {
     const tilesEl = container.querySelector('#ops-cat-tiles');
     categories.forEach(cat => {
       const canEdit = MVOA.canEditCategory(cat, user);
-      const openCount = tasksCache.filter(t => t.CategoryID === cat.CategoryID && t.Status === 'Open').length;
+      const catTasks = tasksCache.filter(t => t.CategoryID === cat.CategoryID && t.Status === 'Open');
+      const openCount = catTasks.length;
+      const hasNewNote = catTasks.some(t => hasUnreadNote(t, user));
       const div = document.createElement('div');
       div.className = 'tile' + (canEdit ? '' : ' tile-locked');
       div.innerHTML = `
         <div class="tile-icon">${cat.Icon || '📋'}</div>
         <div class="tile-label">${cat.Name}</div>
-        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openCount} open${canEdit ? '' : ' · view only'}</div>
+        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openCount} open${canEdit ? '' : ' · view only'}${hasNewNote ? ' · <span style="color:var(--mvoa-blue);font-weight:700;">💬 new</span>' : ''}</div>
       `;
       div.addEventListener('click', () => {
         currentCategory = cat;
@@ -129,11 +160,13 @@ const OpsModule = (function () {
     if (uncategorizedCount > 0) {
       const div = document.createElement('div');
       div.className = 'tile';
-      const openUncat = tasksCache.filter(t => !t.CategoryID && t.Status === 'Open').length;
+      const uncatOpenTasks = tasksCache.filter(t => !t.CategoryID && t.Status === 'Open');
+      const openUncat = uncatOpenTasks.length;
+      const hasNewNote = uncatOpenTasks.some(t => hasUnreadNote(t, user));
       div.innerHTML = `
         <div class="tile-icon">📦</div>
         <div class="tile-label">Uncategorized</div>
-        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openUncat} open</div>
+        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openUncat} open${hasNewNote ? ' · <span style="color:var(--mvoa-blue);font-weight:700;">💬 new</span>' : ''}</div>
       `;
       div.addEventListener('click', () => {
         currentCategory = { CategoryID: '', Name: 'Uncategorized', Icon: '📦', _isUncategorized: true };
@@ -480,7 +513,10 @@ const OpsModule = (function () {
       body.innerHTML = `<p class="muted">No ${statusFilter.toLowerCase()} tasks.</p>`;
       return;
     }
-    body.innerHTML = list.map(t => `
+    body.innerHTML = list.map(t => {
+      const noteCount = Number(t.NoteCount) || 0;
+      const unread = statusFilter === 'Open' && hasUnreadNote(t, user);
+      return `
       <div class="mvoa-list-item" data-task-id="${t.TaskID}">
         <div class="mvoa-row">
           <strong>${escapeHtml(t.Title)}</strong>
@@ -492,22 +528,29 @@ const OpsModule = (function () {
         ${attachmentLinksHtml(t)}
         ${statusFilter === 'Open'
           ? `<div style="margin-top:8px;">
-               <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">💬 Notes</button>
+               <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;position:relative;">💬 Notes${noteCount ? ` (${noteCount})` : ''}${unread ? ` <span class="ops-unread-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d9534f;margin-left:4px;"></span>` : ''}</button>
              </div>
              <div class="ops-notes-body hidden" data-task-id="${t.TaskID}"></div>
              ${canEdit ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
           : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
       </div>
-    `).join('');
+    `;
+    }).join('');
 
     body.querySelectorAll('.ops-notes-toggle').forEach(btn => {
       btn.addEventListener('click', async () => {
         const taskId = btn.dataset.taskId;
         const notesBody = body.querySelector(`.ops-notes-body[data-task-id="${taskId}"]`);
         const isHidden = notesBody.classList.contains('hidden');
-        if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
+        if (!isHidden) { notesBody.classList.add('hidden'); return; }
         notesBody.classList.remove('hidden');
         await renderNotesThread(notesBody, taskId, btn, canEdit);
+        const task = tasksCache.find(x => x.TaskID === taskId);
+        if (task && hasUnreadNote(task, user)) {
+          await markNotesSeen(task, user);
+          const dot = btn.querySelector('.ops-unread-dot');
+          if (dot) dot.remove();
+        }
       });
     });
 
@@ -525,7 +568,8 @@ const OpsModule = (function () {
       notesBody.innerHTML = `<p class="error-text">Could not load notes: ${escapeHtml(e.message)}</p>`;
       return;
     }
-    toggleBtn.textContent = `💬 Notes (${notes.length})`;
+    const existingDot = toggleBtn.querySelector('.ops-unread-dot');
+    toggleBtn.innerHTML = `💬 Notes${notes.length ? ` (${notes.length})` : ''}` + (existingDot ? existingDot.outerHTML : '');
     const notesHtml = notes.length
       ? notes.map(n => `
           <div style="border-left:3px solid var(--mvoa-blue);padding:6px 10px;margin-bottom:8px;background:var(--bg);border-radius:0 6px 6px 0;">
@@ -563,6 +607,7 @@ const OpsModule = (function () {
         try {
           await MVOA.appendNote(taskId, text);
           textarea.value = '';
+          await stampNoteMetadata(taskId);
           await renderNotesThread(notesBody, taskId, toggleBtn, canEdit);
         } catch (e) {
           errEl.textContent = 'Could not save note: ' + escapeHtml(e.message);
@@ -570,6 +615,28 @@ const OpsModule = (function () {
           submitBtn.textContent = 'Add Note';
         }
       });
+    }
+  }
+
+  // Denormalizes the latest-note info onto the OpsTasks row itself (count,
+  // timestamp, author) so task cards and category tiles can show note
+  // counts/unread indicators without loading every task's full thread.
+  // Also stamps the author's own "last seen" field, since posting a note
+  // means they've implicitly seen everything up to that point.
+  async function stampNoteMetadata(taskId) {
+    const task = tasksCache.find(t => t.TaskID === taskId);
+    if (!task) return;
+    const user = MVOA.getUser();
+    task.NoteCount = (Number(task.NoteCount) || 0) + 1;
+    task.LastNoteAt = new Date().toISOString();
+    task.LastNoteAuthor = user.name;
+    if (isCreatorOf(task, user)) task.CreatorLastSeenNotesAt = task.LastNoteAt;
+    if (isAssigneeOf(task, user)) task.AssigneeLastSeenNotesAt = task.LastNoteAt;
+    try {
+      await MVOA.sheetsUpdateRow(TAB, task.rowNumber, objToRow(task));
+    } catch (e) {
+      // Non-critical — the notes thread itself already saved; worst case
+      // the count/unread badge is stale until next reload.
     }
   }
 
