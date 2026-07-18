@@ -878,23 +878,33 @@ const OpsModule = (function () {
     else renderReportOverdue(body);
   }
 
+  let reportStatusFilter = 'all'; // 'all' | 'Open' | 'Closed' — applies to By Category and By Assignee
+
   function renderReportByCategory(body) {
     const allCatIds = categories.map(c => c.CategoryID).concat(['']); // '' = Uncategorized bucket
     const rows = allCatIds.map(id => {
       const inCat = tasksCache.filter(t => t.CategoryID === id);
-      return {
-        Category: categoryName(id),
-        Open: inCat.filter(t => t.Status === 'Open').length,
-        Closed: inCat.filter(t => t.Status === 'Closed').length,
-        Total: inCat.length
-      };
+      const openCount = inCat.filter(t => t.Status === 'Open').length;
+      const closedCount = inCat.filter(t => t.Status === 'Closed').length;
+      const row = { Category: categoryName(id), Total: inCat.length };
+      if (reportStatusFilter === 'Open') row.Open = openCount;
+      else if (reportStatusFilter === 'Closed') row.Closed = closedCount;
+      else { row.Open = openCount; row.Closed = closedCount; }
+      return row;
     }).filter(r => r.Total > 0);
 
+    const columns = reportStatusFilter === 'Open' ? ['Category', 'Open', 'Total']
+      : reportStatusFilter === 'Closed' ? ['Category', 'Closed', 'Total']
+      : ['Category', 'Open', 'Closed', 'Total'];
+
+    body.innerHTML = '';
+    renderReportStatusSelector(body);
     renderReportTable(body, {
-      title: 'Tasks by Category',
-      columns: ['Category', 'Open', 'Closed', 'Total'],
+      title: 'Tasks by Category' + (reportStatusFilter !== 'all' ? ` (${reportStatusFilter} only)` : ''),
+      columns,
       rows,
-      filenameBase: 'ops-report-by-category'
+      filenameBase: 'ops-report-by-category' + (reportStatusFilter !== 'all' ? '-' + reportStatusFilter.toLowerCase() : ''),
+      append: true
     });
   }
 
@@ -908,39 +918,74 @@ const OpsModule = (function () {
     const rows = Object.keys(map).map(key => {
       const list = map[key];
       const openList = list.filter(t => t.Status === 'Open');
-      const closedWithDates = list.filter(t => t.Status === 'Closed' && t.CreatedDate && t.ClosedDate);
+      const closedList = list.filter(t => t.Status === 'Closed');
+      const closedWithDates = closedList.filter(t => t.CreatedDate && t.ClosedDate);
       const avgDaysToClose = closedWithDates.length
         ? Math.round(closedWithDates.reduce((sum, t) => sum + (new Date(t.ClosedDate) - new Date(t.CreatedDate)) / (1000*60*60*24), 0) / closedWithDates.length * 10) / 10
         : '';
       const avgDaysOpen = openList.length
         ? Math.round(openList.reduce((sum, t) => sum + daysOpen(t.CreatedDate), 0) / openList.length * 10) / 10
         : 0;
-      return {
+      const row = {
         Assignee: key ? MVOA.assigneeLabel(key, assigneeOptions) : 'Unassigned',
-        Open: openList.length ? `${openList.length} (avg ${avgDaysOpen}d open)` : '0',
-        Closed: list.filter(t => t.Status === 'Closed').length,
-        'Avg Days to Close': avgDaysToClose,
-        _key: key,
-        _openCount: openList.length
+        _key: key, _openCount: openList.length, _closedCount: closedList.length
       };
-    }).sort((a, b) => b._openCount - a._openCount);
+      if (reportStatusFilter === 'Open') {
+        row.Open = openList.length ? `${openList.length} (avg ${avgDaysOpen}d open)` : '0';
+      } else if (reportStatusFilter === 'Closed') {
+        row.Closed = closedList.length;
+        row['Avg Days to Close'] = avgDaysToClose;
+      } else {
+        row.Open = openList.length ? `${openList.length} (avg ${avgDaysOpen}d open)` : '0';
+        row.Closed = closedList.length;
+        row['Avg Days to Close'] = avgDaysToClose;
+      }
+      return row;
+    }).sort((a, b) => reportStatusFilter === 'Closed' ? b._closedCount - a._closedCount : b._openCount - a._openCount);
 
+    const columns = reportStatusFilter === 'Open' ? ['Assignee', 'Open']
+      : reportStatusFilter === 'Closed' ? ['Assignee', 'Closed', 'Avg Days to Close']
+      : ['Assignee', 'Open', 'Closed', 'Avg Days to Close'];
+
+    body.innerHTML = '';
+    renderReportStatusSelector(body);
     renderAssigneeSelector(body, rows);
 
     renderReportTable(body, {
-      title: 'Tasks by Assignee',
-      columns: ['Assignee', 'Open', 'Closed', 'Avg Days to Close'],
+      title: 'Tasks by Assignee' + (reportStatusFilter !== 'all' ? ` (${reportStatusFilter} only)` : ''),
+      columns,
       rows,
-      filenameBase: 'ops-report-by-assignee',
+      filenameBase: 'ops-report-by-assignee' + (reportStatusFilter !== 'all' ? '-' + reportStatusFilter.toLowerCase() : ''),
       append: true,
       onRowClick: row => renderAssigneeDrillDown(body, row)
+    });
+  }
+
+  // Status filter shared by By Category and By Assignee — re-renders
+  // whichever of those two reports is currently active on change.
+  function renderReportStatusSelector(body) {
+    body.insertAdjacentHTML('beforeend', `
+      <div class="card" style="max-width:320px;margin:0 0 14px 0;">
+        <label style="margin:0;">Status
+          <select id="ops-report-status-filter">
+            <option value="all" ${reportStatusFilter==='all'?'selected':''}>All (Open + Closed)</option>
+            <option value="Open" ${reportStatusFilter==='Open'?'selected':''}>Open only</option>
+            <option value="Closed" ${reportStatusFilter==='Closed'?'selected':''}>Closed only</option>
+          </select>
+        </label>
+      </div>
+    `);
+    body.querySelector('#ops-report-status-filter').addEventListener('change', e => {
+      reportStatusFilter = e.target.value;
+      if (reportView === 'byCategory') renderReportByCategory(body);
+      else if (reportView === 'byAssignee') renderReportByAssignee(body);
     });
   }
 
   // Dropdown alternative to tapping a table row — jumps straight to one
   // assignee's drill-down. Placed above the table.
   function renderAssigneeSelector(body, rows) {
-    body.innerHTML = `
+    body.insertAdjacentHTML('beforeend', `
       <div class="card" style="max-width:520px;margin:0 0 14px 0;">
         <label style="margin:0;">Jump to a specific assignee
           <select id="ops-assignee-select">
@@ -949,7 +994,7 @@ const OpsModule = (function () {
           </select>
         </label>
       </div>
-    `;
+    `);
     body.querySelector('#ops-assignee-select').addEventListener('change', e => {
       if (e.target.value === '') return;
       const row = rows[parseInt(e.target.value, 10)];
