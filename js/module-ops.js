@@ -1002,9 +1002,9 @@ const OpsModule = (function () {
     });
   }
 
-  // Shows the actual task list for one assignee, right below the table,
-  // when their row is tapped in the By Assignee report (or selected via
-  // the dropdown above it).
+  // Shows a summary + open-tasks list for one assignee, right below the
+  // table, when their row is tapped in the By Assignee report (or
+  // selected via the dropdown above it).
   function renderAssigneeDrillDown(body, row) {
     let panel = body.querySelector('#ops-assignee-drilldown');
     if (!panel) {
@@ -1014,30 +1014,85 @@ const OpsModule = (function () {
       panel.style.marginTop = '14px';
       body.appendChild(panel);
     }
-    const list = tasksCache.filter(t => (t.AssignedTo || '') === row._key)
-      .sort((a, b) => (b.CreatedDate || '').localeCompare(a.CreatedDate || ''));
+    const list = tasksCache.filter(t => (t.AssignedTo || '') === row._key);
+    const openList = list.filter(t => t.Status === 'Open')
+      .sort((a, b) => daysOpen(b.CreatedDate) - daysOpen(a.CreatedDate));
+    const closedCount = list.filter(t => t.Status === 'Closed').length;
 
     panel.innerHTML = `
       <div class="mvoa-row">
         <h3 style="margin:0;color:var(--mvoa-blue);">${escapeHtml(row.Assignee)}'s Tasks</h3>
-        <button class="btn-secondary" id="ops-drilldown-close">✕ Close</button>
+        <div>
+          <button class="btn-secondary" id="ops-drilldown-pdf">🖨 Print to PDF</button>
+          <button class="btn-secondary" id="ops-drilldown-close">✕ Close</button>
+        </div>
       </div>
+      <p class="muted" style="margin:6px 0;"><strong style="color:var(--mvoa-blue);">Open:</strong> ${openList.length} &nbsp;&nbsp; <strong style="color:var(--mvoa-blue);">Closed:</strong> ${closedCount}</p>
       <div style="margin-top:10px;">
-        ${list.length ? list.map(t => `
-          <div class="mvoa-list-item">
-            <div class="mvoa-row">
-              <strong>${escapeHtml(t.Title)}</strong>
-              ${MVOA.statusBadgeHtml(t.Status === 'Open' ? 'Open' : 'Closed')}
-            </div>
-            <p class="muted" style="margin:4px 0;font-size:0.8rem;">${escapeHtml(categoryName(t.CategoryID))} · Priority: ${escapeHtml(t.Priority)} · Created ${formatDate(t.CreatedDate)}</p>
-            ${t.Status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>` : ''}
+        <p class="muted" style="margin:0 0 6px;font-weight:600;">Open Tasks</p>
+        ${openList.length ? openList.map(t => `
+          <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
+            <span>${escapeHtml(t.Title)}</span>
+            <span class="muted" style="font-size:0.85rem;white-space:nowrap;">${daysOpen(t.CreatedDate)}d open</span>
           </div>
-        `).join('') : '<p class="muted">No tasks found.</p>'}
+        `).join('') : '<p class="muted">No open tasks.</p>'}
       </div>
     `;
     panel.querySelector('#ops-drilldown-close').addEventListener('click', () => panel.remove());
+    panel.querySelector('#ops-drilldown-pdf').addEventListener('click', () => printAssigneeDrillDownPdf(row.Assignee, openList, closedCount));
     panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
+
+  // Dedicated PDF export for the assignee drill-down: Open/Closed summary
+  // plus a title + days-open list of that assignee's open tasks only —
+  // mirrors what's shown on screen.
+  function printAssigneeDrillDownPdf(assigneeName, openList, closedCount) {
+    const win = window.open('', '_blank');
+    const rowsHtml = openList.map(t => `<tr><td>${escapeHtml(t.Title)}</td><td>${daysOpen(t.CreatedDate)}</td></tr>`).join('');
+    win.document.write(`
+      <html>
+      <head>
+        <title>${escapeHtml(assigneeName)} — Tasks</title>
+        <style>
+          body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
+          h1 { color: #1d4e6b; font-size: 1.3rem; margin-bottom: 4px; }
+          .muted { color: #6b7280; font-size: 0.85rem; margin-top: 0; }
+          .summary { font-size: 0.95rem; margin: 14px 0; }
+          table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+          th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.85rem; }
+          th { background: #f5f6f8; }
+          .back-btn {
+            display: inline-block; margin-bottom: 16px; padding: 10px 18px;
+            border-radius: 8px; border: none; background: #1d4e6b; color: white;
+            font-size: 0.95rem; font-weight: 600; cursor: pointer;
+          }
+          @media print { .back-btn { display: none; } }
+        </style>
+      </head>
+      <body>
+        <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
+        <h1>MVOA — ${escapeHtml(assigneeName)}'s Tasks</h1>
+        <p class="muted">Generated ${new Date().toLocaleString()}</p>
+        <p class="summary"><strong>Open:</strong> ${openList.length} &nbsp;&nbsp; <strong>Closed:</strong> ${closedCount}</p>
+        <table>
+          <thead><tr><th>Open Task</th><th>Days Open</th></tr></thead>
+          <tbody>${rowsHtml || `<tr><td colspan="2">No open tasks.</td></tr>`}</tbody>
+        </table>
+        <script>
+          window.onload = () => { window.print(); };
+          document.getElementById('back-to-app-btn').addEventListener('click', () => {
+            window.close();
+            setTimeout(() => {
+              document.body.innerHTML = '<p style="padding:20px;">You can close this tab/window now and return to the MVOA app in your other tab.</p>';
+            }, 300);
+          });
+        </script>
+      </body>
+      </html>
+    `);
+    win.document.close();
+  }
+
 
   function renderReportOverdue(body) {
     const rows = tasksCache.filter(t => t.Status === 'Open')
