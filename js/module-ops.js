@@ -37,7 +37,8 @@ const OpsModule = (function () {
     'PhotoURL_Compliance','ClosedDate','ClosedBy','CategoryID','AssignedTo',
     'AttachmentURL_2','AttachmentURL_3',
     'ComplianceAttachmentURL_2','ComplianceAttachmentURL_3',
-    'NoteCount','LastNoteAt','LastNoteAuthor','CreatorLastSeenNotesAt','AssigneeLastSeenNotesAt'];
+    'NoteCount','LastNoteAt','LastNoteAuthor','CreatorLastSeenNotesAt','AssigneeLastSeenNotesAt',
+    'AssigneeSeenAt'];
 
   function rowToObj(row, rowNumber) {
     const o = { rowNumber };
@@ -71,6 +72,26 @@ const OpsModule = (function () {
       await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
     } catch (e) {
       // Non-critical — worst case the unread dot reappears next reload. No need to surface an error to the user.
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // New-task indicator — a single shared flag per task (not per-viewer
+  // like notes). Any viewer sees the 🆕 marker on the tile/card as long
+  // as the assignee hasn't opened the task card yet. Only opening the
+  // task card itself (not the category list) clears it, and only the
+  // assignee's own open counts — other viewers opening it does nothing.
+  // ───────────────────────────────────────────────────────────
+  function isNewTask(t) {
+    return !!t.AssignedTo && !t.AssigneeSeenAt;
+  }
+  async function markTaskSeen(t, user) {
+    if (!isAssigneeOf(t, user) || !isNewTask(t)) return; // only the assignee's own open clears it
+    t.AssigneeSeenAt = new Date().toISOString();
+    try {
+      await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
+    } catch (e) {
+      // Non-critical — worst case the 🆕 badge reappears next reload.
     }
   }
 
@@ -117,8 +138,7 @@ const OpsModule = (function () {
 
   function renderCategoryGrid(container) {
     const user = MVOA.getUser();
-    const uncategorizedCount = tasksCache.filter(t => !t.CategoryID).length;
-    if (!categories.length && !uncategorizedCount) {
+    if (!categories.length) {
       container.innerHTML = `<p class="muted">No categories set up yet. Ask a Developer to add some in Settings.</p>`;
       return;
     }
@@ -138,12 +158,13 @@ const OpsModule = (function () {
       const catTasks = tasksCache.filter(t => t.CategoryID === cat.CategoryID && t.Status === 'Open');
       const openCount = catTasks.length;
       const hasNewNote = catTasks.some(t => hasUnreadNote(t, user));
+      const hasNewTask = catTasks.some(t => isNewTask(t));
       const div = document.createElement('div');
       div.className = 'tile' + (canEdit ? '' : ' tile-locked');
       div.innerHTML = `
         <div class="tile-icon">${cat.Icon || '📋'}</div>
         <div class="tile-label">${cat.Name}</div>
-        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openCount} open${canEdit ? '' : ' · view only'}${hasNewNote ? ' · <span style="color:var(--mvoa-blue);font-weight:700;">💬 new</span>' : ''}</div>
+        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openCount} open${canEdit ? '' : ' · view only'}${hasNewTask ? ' · <span style="color:var(--mvoa-blue);font-weight:700;">🆕 new task</span>' : ''}${hasNewNote ? ' · <span style="color:var(--mvoa-blue);font-weight:700;">💬 new</span>' : ''}</div>
       `;
       div.addEventListener('click', () => {
         currentCategory = cat;
@@ -152,29 +173,6 @@ const OpsModule = (function () {
       });
       tilesEl.appendChild(div);
     });
-    // Synthesized fallback tile for legacy tasks with no CategoryID — only
-    // appears if such tasks exist. Everyone who can open this module can
-    // edit/close these (they predate the category system, no AllowedRoles
-    // list applies), but there's no "+ New Task" here — new tasks should
-    // always pick a real category going forward.
-    if (uncategorizedCount > 0) {
-      const div = document.createElement('div');
-      div.className = 'tile';
-      const uncatOpenTasks = tasksCache.filter(t => !t.CategoryID && t.Status === 'Open');
-      const openUncat = uncatOpenTasks.length;
-      const hasNewNote = uncatOpenTasks.some(t => hasUnreadNote(t, user));
-      div.innerHTML = `
-        <div class="tile-icon">📦</div>
-        <div class="tile-label">Uncategorized</div>
-        <div class="muted" style="font-size:0.75rem;margin-top:4px;">${openUncat} open${hasNewNote ? ' · <span style="color:var(--mvoa-blue);font-weight:700;">💬 new</span>' : ''}</div>
-      `;
-      div.addEventListener('click', () => {
-        currentCategory = { CategoryID: '', Name: 'Uncategorized', Icon: '📦', _isUncategorized: true };
-        currentView = 'open';
-        render(container);
-      });
-      tilesEl.appendChild(div);
-    }
     container.querySelector('#ops-reports-btn').addEventListener('click', () => renderReports(container));
     container.querySelector('#ops-cat-refresh-btn').addEventListener('click', async () => {
       const btn = container.querySelector('#ops-cat-refresh-btn');
@@ -266,9 +264,9 @@ const OpsModule = (function () {
             <option value="Low">Low</option>
           </select>
         </label>
-        <label>Assigned To (optional)
+        <label>Assigned To
           <select id="ops-assignee">
-            <option value="">— Unassigned —</option>
+            <option value="">— Select someone —</option>
             ${assigneeOptions.map(o => `<option value="${o.value}" ${pendingAssignee===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
           </select>
         </label>
@@ -383,6 +381,12 @@ const OpsModule = (function () {
     errEl.textContent = ''; savedEl.textContent = '';
     if (!title) {
       errEl.textContent = 'Title is required.';
+      if (submitBtn) submitBtn.disabled = false;
+      if (submitAnotherBtn) submitAnotherBtn.disabled = false;
+      return;
+    }
+    if (!assignedTo) {
+      errEl.textContent = 'Please assign this task to someone — every task needs an assignee.';
       if (submitBtn) submitBtn.disabled = false;
       if (submitAnotherBtn) submitAnotherBtn.disabled = false;
       return;
@@ -516,11 +520,12 @@ const OpsModule = (function () {
     body.innerHTML = list.map(t => {
       const noteCount = Number(t.NoteCount) || 0;
       const unread = statusFilter === 'Open' && hasUnreadNote(t, user);
+      const isNew = statusFilter === 'Open' && isNewTask(t);
       return `
       <div class="mvoa-list-item" data-task-id="${t.TaskID}">
         <div class="mvoa-row">
           <strong>${escapeHtml(t.Title)}</strong>
-          ${MVOA.statusBadgeHtml(t.Status === 'Open' ? 'Open' : 'Closed')}
+          <span>${isNew ? `<span class="ops-new-task-badge" style="color:var(--mvoa-blue);font-weight:700;font-size:0.8rem;margin-right:8px;">🆕 New</span>` : ''}${MVOA.statusBadgeHtml(t.Status === 'Open' ? 'Open' : 'Closed')}</span>
         </div>
         ${t.Description ? `<p class="muted" style="margin:6px 0;">${escapeHtml(t.Description)}</p>` : ''}
         ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${escapeHtml(t.AssetName)} (${escapeHtml(t.AssetID)})</p>` : ''}
@@ -536,6 +541,20 @@ const OpsModule = (function () {
       </div>
     `;
     }).join('');
+
+    if (statusFilter === 'Open') {
+      body.querySelectorAll('.mvoa-list-item').forEach(card => {
+        card.addEventListener('click', async () => {
+          const taskId = card.dataset.taskId;
+          const task = tasksCache.find(x => x.TaskID === taskId);
+          if (task && isAssigneeOf(task, user) && isNewTask(task)) {
+            await markTaskSeen(task, user);
+            const badge = card.querySelector('.ops-new-task-badge');
+            if (badge) badge.remove();
+          }
+        });
+      });
+    }
 
     body.querySelectorAll('.ops-notes-toggle').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -888,30 +907,59 @@ const OpsModule = (function () {
     });
     const rows = Object.keys(map).map(key => {
       const list = map[key];
+      const openList = list.filter(t => t.Status === 'Open');
       const closedWithDates = list.filter(t => t.Status === 'Closed' && t.CreatedDate && t.ClosedDate);
-      const avgDays = closedWithDates.length
+      const avgDaysToClose = closedWithDates.length
         ? Math.round(closedWithDates.reduce((sum, t) => sum + (new Date(t.ClosedDate) - new Date(t.CreatedDate)) / (1000*60*60*24), 0) / closedWithDates.length * 10) / 10
         : '';
+      const avgDaysOpen = openList.length
+        ? Math.round(openList.reduce((sum, t) => sum + daysOpen(t.CreatedDate), 0) / openList.length * 10) / 10
+        : 0;
       return {
         Assignee: key ? MVOA.assigneeLabel(key, assigneeOptions) : 'Unassigned',
-        Open: list.filter(t => t.Status === 'Open').length,
+        Open: openList.length ? `${openList.length} (avg ${avgDaysOpen}d open)` : '0',
         Closed: list.filter(t => t.Status === 'Closed').length,
-        'Avg Days to Close': avgDays,
-        _key: key // not rendered as a column — used only to drive the drill-down
+        'Avg Days to Close': avgDaysToClose,
+        _key: key,
+        _openCount: openList.length
       };
-    }).sort((a, b) => b.Open - a.Open);
+    }).sort((a, b) => b._openCount - a._openCount);
+
+    renderAssigneeSelector(body, rows);
 
     renderReportTable(body, {
       title: 'Tasks by Assignee',
       columns: ['Assignee', 'Open', 'Closed', 'Avg Days to Close'],
       rows,
       filenameBase: 'ops-report-by-assignee',
+      append: true,
       onRowClick: row => renderAssigneeDrillDown(body, row)
     });
   }
 
+  // Dropdown alternative to tapping a table row — jumps straight to one
+  // assignee's drill-down. Placed above the table.
+  function renderAssigneeSelector(body, rows) {
+    body.innerHTML = `
+      <div class="card" style="max-width:520px;margin:0 0 14px 0;">
+        <label style="margin:0;">Jump to a specific assignee
+          <select id="ops-assignee-select">
+            <option value="">— Select —</option>
+            ${rows.map((r, i) => `<option value="${i}">${escapeHtml(r.Assignee)}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+    `;
+    body.querySelector('#ops-assignee-select').addEventListener('change', e => {
+      if (e.target.value === '') return;
+      const row = rows[parseInt(e.target.value, 10)];
+      if (row) renderAssigneeDrillDown(body, row);
+    });
+  }
+
   // Shows the actual task list for one assignee, right below the table,
-  // when their row is tapped in the By Assignee report.
+  // when their row is tapped in the By Assignee report (or selected via
+  // the dropdown above it).
   function renderAssigneeDrillDown(body, row) {
     let panel = body.querySelector('#ops-assignee-drilldown');
     if (!panel) {
