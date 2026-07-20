@@ -440,20 +440,34 @@ const MVOA = (function () {
   // category at a time without breaking the ones not yet migrated.
   // ───────────────────────────────────────────────────────────
   let dailyOpsPermMatrixCache = null;
+  let dailyOpsPermMatrixRowsCache = null; // raw rows incl. rowNumber, for the editable grid — separate from
+                                           // the lookup map above since canEditCategory/canViewCategory only
+                                           // ever need the resolved level, never a row to write back to.
   async function loadDailyOpsPermissionsMatrix(force) {
     if (dailyOpsPermMatrixCache && !force) return dailyOpsPermMatrixCache;
     const rows = await sheetsRead(TABS.permissionsMatrixDailyOps);
     const map = {}; // map[Section][Title] = 'Edit' | 'ReadOnly'
-    rows.slice(1).forEach(r => {
+    const rawRows = [];
+    rows.slice(1).forEach((r, i) => {
       const section = (r[0] || '').trim();
       const title = (r[1] || '').trim();
       const level = (r[2] || '').trim();
-      if (!section || !title || !level) return;
+      if (!section || !title) return; // truly blank/junk row — nothing to track
+      rawRows.push({ rowNumber: i + 2, Section: section, Title: title, AccessLevel: level });
+      if (!level) return; // row exists but was blanked back to "No access" — keep in rawRows, skip in map
       if (!map[section]) map[section] = {};
       map[section][title] = level;
     });
     dailyOpsPermMatrixCache = map;
+    dailyOpsPermMatrixRowsCache = rawRows;
     return dailyOpsPermMatrixCache;
+  }
+
+  // Raw rows (with sheet rowNumber) for the editable grid — must call
+  // loadDailyOpsPermissionsMatrix at least once first (mirrors the
+  // pattern other cached loaders use).
+  function getDailyOpsPermissionsMatrixRows() {
+    return dailyOpsPermMatrixRowsCache || [];
   }
 
   // DEV role always has full access. Otherwise: if the category's Name
@@ -831,7 +845,7 @@ const MVOA = (function () {
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
-    loadCategories, loadTechnicians, canEditCategory, canViewCategory, loadDailyOpsPermissionsMatrix, loadAssigneeOptions, assigneeLabel,
+    loadCategories, loadTechnicians, canEditCategory, canViewCategory, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
     loadNotesForTask, appendNote,
     logAudit, nextId,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
