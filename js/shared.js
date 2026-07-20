@@ -785,11 +785,14 @@ const MVOA = (function () {
 
   // ───────────────────────────────────────────────────────────
   // ASSET QR PARSING — Inventory's label format has been observed
-  // in two shapes so far:
-  //   Old:  MVOA|AssetID|AssetName|Category|Location
-  //   New:  Code: X Name: Y Category: Z Sub-Category: W Location: V
-  // This parses either; extend the regex list below if a third
-  // format shows up from a different label batch.
+  // in three shapes so far:
+  //   Old:      MVOA|AssetID|AssetName|Category|Location
+  //   Labeled:  Code: X Name: Y Category: Z Sub-Category: W Location: V
+  //   ID-prefixed pipe: <MVOA-...AssetID> | AssetName | Category [| Location]
+  //     (AssetID itself starts with "MVOA-" rather than "MVOA" being its
+  //     own token; segment count varies 2-4 depending on the label batch)
+  // This parses any of the three; extend below if a fourth format shows
+  // up from a different label batch.
   // ───────────────────────────────────────────────────────────
   function parseAssetQR(text) {
     if (typeof text !== 'string') return null;
@@ -811,10 +814,22 @@ const MVOA = (function () {
       }
     }
 
-    // Old pipe-delimited format
+    // Old pipe-delimited format — literal leading "MVOA" token
     const parts = text.split('|');
     if (parts[0] === 'MVOA' && parts.length >= 5) {
       return { assetId: parts[1], assetName: parts[2], category: parts[3], location: parts[4] };
+    }
+
+    // ID-prefixed pipe format — the AssetID itself starts with "MVOA-"
+    // (e.g. "MVOA-EL-SL-001-02 | LED Street Lights | Street Lights"),
+    // so there's no separate leading "MVOA" token to match against.
+    // Segment count varies: 2 (ID + Name), 3 (+ Category), or 4 (+ Location).
+    const idPrefixedParts = text.split('|').map(s => s.trim());
+    if (/^MVOA-/.test(idPrefixedParts[0] || '') && idPrefixedParts.length >= 2) {
+      const [assetId, assetName, category, location] = idPrefixedParts;
+      if (assetId && assetName) {
+        return { assetId, assetName, category: category || '', location: location || '' };
+      }
     }
 
     return null;
