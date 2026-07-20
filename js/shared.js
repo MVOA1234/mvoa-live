@@ -59,6 +59,28 @@ const MVOA = (function () {
   // ───────────────────────────────────────────────────────────
   // GOOGLE SHEETS API (read via API key, write via service-account JWT)
   // ───────────────────────────────────────────────────────────
+  const NETWORK_TIMEOUT_MS = 15000;
+
+  // A stalled connection on some networks doesn't reject a fetch() —
+  // it just never resolves, leaving screens stuck on "Loading…"
+  // forever with no error to show. This wraps fetch with an
+  // AbortController so a stuck request fails visibly within 15s
+  // instead of hanging indefinitely.
+  async function fetchWithTimeout(url, options, timeoutMs = NETWORK_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        throw new Error(`Request timed out after ${timeoutMs / 1000}s — check your connection: ${url}`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function sheetsRead(sheetName) {
     // Uses the service-account token, not the plain API key — a bare API key
     // can only read spreadsheets that are public ("anyone with the link"),
@@ -66,7 +88,7 @@ const MVOA = (function () {
     // already has Editor access, so reuse that for reads too.
     const token = await getServiceAccountToken();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}`;
-    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    const r = await fetchWithTimeout(url, { headers: { 'Authorization': 'Bearer ' + token } });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
       throw new Error(`Sheets read error (${sheetName}): ${r.status} ${body}`);
@@ -78,7 +100,7 @@ const MVOA = (function () {
   async function sheetsWrite(sheetName, data) {
     const token = await getServiceAccountToken();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}?valueInputOption=RAW&key=${CFG.apiKey}`;
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: data })
@@ -90,7 +112,7 @@ const MVOA = (function () {
   async function sheetsAppend(sheetName, row) {
     const token = await getServiceAccountToken();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: [row] })
@@ -104,7 +126,7 @@ const MVOA = (function () {
     if (!rows.length) return;
     const token = await getServiceAccountToken();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: rows })
@@ -119,7 +141,7 @@ const MVOA = (function () {
     const token = await getServiceAccountToken();
     const range = `${sheetName}!A${rowNumber}`;
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({ range, majorDimension: 'ROWS', values: [rowValues] })
@@ -149,7 +171,7 @@ const MVOA = (function () {
     const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(sigInput));
     const sigB64 = b64url(btoa(String.fromCharCode(...new Uint8Array(sig))));
     const jwt = sigInput + '.' + sigB64;
-    const resp = await fetch('https://oauth2.googleapis.com/token', {
+    const resp = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
     });
@@ -685,7 +707,7 @@ const MVOA = (function () {
     if (!CFG.driveFolderId) throw new Error('No Drive folder configured for photo storage');
 
     const base64 = await fileToBase64(file);
-    const r = await fetch(CFG.photoUploadUrl, {
+    const r = await fetchWithTimeout(CFG.photoUploadUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight against Apps Script
       body: JSON.stringify({
@@ -695,7 +717,7 @@ const MVOA = (function () {
         mimeType: file.type || 'image/jpeg',
         folderId: CFG.driveFolderId
       })
-    });
+    }, 30000); // longer timeout — uploading a compressed photo can take longer than a metadata read
     if (!r.ok) throw new Error('Photo upload proxy error: ' + r.status);
     const d = await r.json();
     if (d.error) throw new Error('Photo upload failed: ' + d.error);
