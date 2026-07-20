@@ -151,6 +151,12 @@
         <p class="muted">Reset a forgotten PIN, suspend/activate a login, or correct someone's display name.</p>
         <button id="open-pin-mgmt-btn" class="btn-primary">🔑 Open PIN Management</button>
       </div>
+      <!-- Permissions Matrix entry -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Daily Ops Permissions</h2>
+        <p class="muted">Edit the full Title × Category access grid directly — changes save in place.</p>
+        <button id="open-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
+      </div>
       <!-- Manage Users -->
       <div class="card" id="manage-users-card">
         <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
@@ -186,6 +192,12 @@
         <label>Title (optional override, e.g. "Secretary", "President")
           <input id="mu-title" type="text" placeholder="leave blank to use the role's default label">
         </label>
+        <p class="muted" id="mu-title-warning" style="margin-top:-8px;"></p>
+        <div style="margin:14px 0;">
+          <p style="margin:0 0 4px;font-weight:600;">Daily Ops Category Access</p>
+          <p class="muted" style="margin:0 0 8px;">Access is tied to this person's Title above — anyone else who already has the exact same Title shares whatever you set here.</p>
+          <div id="mu-category-access"><p class="muted">Loading categories…</p></div>
+        </div>
         <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
           <input id="mu-ec" type="checkbox" style="width:auto;"> EC Member
         </label>
@@ -208,6 +220,27 @@
       </div>
       <p class="muted">Reset a forgotten PIN to the default (1111), suspend/activate a login, or correct a display name.</p>
       <div id="pin-mgmt-list" style="margin-top:14px;"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ PERMISSIONS MATRIX SCREEN (admin only) ═══════════════ -->
+  <div id="perm-matrix-screen" class="screen hidden">
+    <div class="card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">Daily Ops Permissions Matrix</h1>
+        <button id="perm-matrix-back-btn" class="btn-secondary">&larr; Settings</button>
+      </div>
+      <p class="muted">Edit access directly. Changes update the existing row in place — no duplicate rows are created. A cell set back to "No access" is blanked, not deleted.</p>
+      <div class="mvoa-row" style="gap:8px;flex-wrap:wrap;margin:10px 0;">
+        <input id="pm-new-title" type="text" placeholder="New title name (e.g. Pool Lead)" style="flex:1;min-width:180px;">
+        <button id="pm-add-title-btn" class="btn-secondary">+ Add Title Column</button>
+      </div>
+      <div id="pm-grid-wrap" style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <p class="muted">Loading…</p>
+      </div>
+      <button id="pm-save-btn" class="btn-primary" style="margin-top:14px;">Save Changes</button>
+      <p class="error-text" id="pm-error"></p>
+      <p class="muted" id="pm-saved-msg"></p>
     </div>
   </div>
 
@@ -386,7 +419,7 @@
       // Show/hide Administration tab for admins only
       const adminTabBtn = document.getElementById('stab-admin-btn');
       adminTabBtn.classList.toggle('hidden', !admin);
-      if (admin) loadManageUsersList();
+      if (admin) { loadManageUsersList(); renderCategoryAccessInputs(); }
 
       // Reset My PIN fields
       document.getElementById('cp-current').value = '';
@@ -406,6 +439,11 @@
       loadPinMgmtList();
     });
     document.getElementById('pin-mgmt-back-btn').addEventListener('click', () => show('settings-screen'));
+    document.getElementById('open-perm-matrix-btn').addEventListener('click', () => {
+      show('perm-matrix-screen');
+      renderPermMatrixGrid();
+    });
+    document.getElementById('perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
     document.getElementById('settings-save-btn').addEventListener('click', () => {
       const sheetId = document.getElementById('settings-sheet-id').value.trim();
       const apiKey = document.getElementById('settings-api-key').value.trim();
@@ -473,6 +511,223 @@
       }
     }
 
+    // ---- Daily Ops category access picker (inside Add New User) ----
+    // Renders one Edit/ReadOnly/No-access select per active category.
+    // Reads current matrix state so re-typing an EXISTING Title shows
+    // what that title already has, instead of a misleading blank slate.
+    let muCategoriesCache = [];
+    async function renderCategoryAccessInputs() {
+      const wrap = document.getElementById('mu-category-access');
+      wrap.innerHTML = '<p class="muted">Loading categories…</p>';
+      try {
+        muCategoriesCache = (await MVOA.loadCategories()).filter(c => c.Active);
+      } catch (e) {
+        wrap.innerHTML = '<p class="error-text">Could not load categories: ' + e.message + '</p>';
+        return;
+      }
+      if (!muCategoriesCache.length) {
+        wrap.innerHTML = '<p class="muted">No categories set up yet.</p>';
+        return;
+      }
+      wrap.innerHTML = muCategoriesCache.map(cat => `
+        <div class="mvoa-row" style="padding:4px 0;">
+          <span>${cat.Icon || ''} ${cat.Name}</span>
+          <select class="mu-cat-access" data-category="${cat.Name}" style="width:auto;max-width:160px;">
+            <option value="">No access</option>
+            <option value="ReadOnly">Read Only</option>
+            <option value="Edit">Edit</option>
+          </select>
+        </div>
+      `).join('');
+      applyExistingTitleAccessToInputs();
+    }
+
+    // Pre-fills the category selects (and shows a warning banner) if the
+    // currently-typed Title already has rows in the Daily Ops matrix —
+    // since access is shared by Title, not by person, this makes that
+    // sharing visible instead of silent.
+    async function applyExistingTitleAccessToInputs() {
+      const title = document.getElementById('mu-title').value.trim();
+      const role = document.getElementById('mu-role').value;
+      const warnEl = document.getElementById('mu-title-warning');
+      const effectiveTitle = title || MVOA.roleLabel(role);
+      let matrix;
+      try {
+        matrix = await MVOA.loadDailyOpsPermissionsMatrix();
+      } catch (e) {
+        return; // non-critical — selects just stay at "No access"
+      }
+      let usedByOthers = [];
+      try {
+        const users = await MVOA.loadRoles();
+        usedByOthers = users.filter(u => MVOA.displayTitle(u) === effectiveTitle).map(u => u.name);
+      } catch (e) { /* non-critical */ }
+
+      document.querySelectorAll('.mu-cat-access').forEach(sel => {
+        const catName = sel.dataset.category;
+        const existing = matrix[catName] && matrix[catName][effectiveTitle];
+        sel.value = existing || '';
+      });
+
+      if (usedByOthers.length) {
+        warnEl.textContent = `⚠️ "${effectiveTitle}" is already used by: ${usedByOthers.join(', ')}. The category access below is shared with them — changing it here changes theirs too.`;
+      } else {
+        warnEl.textContent = '';
+      }
+    }
+    document.getElementById('mu-title').addEventListener('input', applyExistingTitleAccessToInputs);
+    document.getElementById('mu-role').addEventListener('change', applyExistingTitleAccessToInputs);
+
+    // ---- Permissions Matrix grid editor (DEV/admin only) ----
+    // Titles × Categories grid. Edits write back to the EXISTING sheet
+    // row when one exists (sheetsUpdateRow) rather than always appending,
+    // so repeated edits don't pile up duplicate rows the way the Add New
+    // User picker does. A cell set back to "No access" blanks the
+    // AccessLevel cell in place rather than deleting the row (deleting
+    // rows needs a heavier API call; a blank AccessLevel already reads
+    // as "no access" everywhere else in the app).
+    let pmCategories = [];
+    let pmTitles = [];
+    let pmRowNumberByKey = {};   // "Section||Title" -> sheet rowNumber (if a row already exists)
+    let pmOriginalByKey = {};    // "Section||Title" -> current AccessLevel ('' if none)
+    let pmExtraTitles = [];      // titles added via "+ Add Title Column" this session, not yet saved
+
+    function pmKey(section, title) { return section + '||' + title; }
+
+    async function renderPermMatrixGrid() {
+      const wrap = document.getElementById('pm-grid-wrap');
+      const errEl = document.getElementById('pm-error');
+      const savedEl = document.getElementById('pm-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+      wrap.innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        pmCategories = (await MVOA.loadCategories()).filter(c => c.Active);
+        await MVOA.loadDailyOpsPermissionsMatrix();
+        const rawRows = MVOA.getDailyOpsPermissionsMatrixRows();
+        const users = await MVOA.loadRoles();
+
+        // Title columns = every title currently in use by an active user,
+        // plus any title that has matrix rows at all (even from an
+        // inactive/renamed user), plus any added this session. Keeps a
+        // configured-but-currently-unassigned title (e.g. "Vice President"
+        // with nobody in it yet) visible rather than disappearing.
+        const titleSet = new Set();
+        users.filter(u => u.active).forEach(u => titleSet.add(MVOA.displayTitle(u)));
+        rawRows.forEach(r => titleSet.add(r.Title));
+        pmExtraTitles.forEach(t => titleSet.add(t));
+        pmTitles = [...titleSet].filter(Boolean).sort((a, b) => a.localeCompare(b));
+
+        // Index existing rows: last one wins per Section+Title, matching
+        // the same precedence loadDailyOpsPermissionsMatrix() already
+        // uses — so edits target whichever row is actually authoritative.
+        pmRowNumberByKey = {};
+        pmOriginalByKey = {};
+        rawRows.forEach(r => {
+          const key = pmKey(r.Section, r.Title);
+          pmRowNumberByKey[key] = r.rowNumber;
+          pmOriginalByKey[key] = r.AccessLevel || '';
+        });
+      } catch (e) {
+        wrap.innerHTML = '<p class="error-text">Could not load permissions matrix: ' + e.message + '</p>';
+        return;
+      }
+
+      if (!pmCategories.length) {
+        wrap.innerHTML = '<p class="muted">No active categories to show.</p>';
+        return;
+      }
+      if (!pmTitles.length) {
+        wrap.innerHTML = '<p class="muted">No titles yet — add one above, or create a user with a Title set.</p>';
+        return;
+      }
+
+      const headerCells = pmTitles.map(t => `<th style="padding:6px 8px;white-space:nowrap;">${t}</th>`).join('');
+      const bodyRows = pmCategories.map(cat => {
+        const cells = pmTitles.map(title => {
+          const key = pmKey(cat.Name, title);
+          const current = pmOriginalByKey[key] || '';
+          return `
+            <td style="padding:4px 6px;">
+              <select class="pm-cell" data-section="${cat.Name}" data-title="${title}" style="width:auto;min-width:110px;">
+                <option value="" ${current===''?'selected':''}>No access</option>
+                <option value="ReadOnly" ${current==='ReadOnly'?'selected':''}>Read Only</option>
+                <option value="Edit" ${current==='Edit'?'selected':''}>Edit</option>
+              </select>
+            </td>`;
+        }).join('');
+        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;">${cat.Icon || ''} ${cat.Name}</td>${cells}</tr>`;
+      }).join('');
+
+      wrap.innerHTML = `
+        <table class="mvoa-table" style="border-collapse:collapse;">
+          <thead><tr><th style="padding:6px 8px;">Category</th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      `;
+    }
+
+    document.getElementById('pm-add-title-btn').addEventListener('click', () => {
+      const input = document.getElementById('pm-new-title');
+      const title = input.value.trim();
+      const errEl = document.getElementById('pm-error');
+      errEl.textContent = '';
+      if (!title) { errEl.textContent = 'Enter a title name first.'; return; }
+      if (pmTitles.includes(title)) { errEl.textContent = 'That title column already exists.'; return; }
+      pmExtraTitles.push(title);
+      input.value = '';
+      renderPermMatrixGrid();
+    });
+
+    document.getElementById('pm-save-btn').addEventListener('click', async () => {
+      const errEl = document.getElementById('pm-error');
+      const savedEl = document.getElementById('pm-saved-msg');
+      const btn = document.getElementById('pm-save-btn');
+      errEl.textContent = ''; savedEl.textContent = '';
+
+      const toUpdate = [];  // { rowNumber, row: [Section, Title, AccessLevel] }
+      const toAppend = [];  // [Section, Title, AccessLevel]
+      document.querySelectorAll('.pm-cell').forEach(sel => {
+        const section = sel.dataset.section;
+        const title = sel.dataset.title;
+        const newVal = sel.value;
+        const key = pmKey(section, title);
+        const original = pmOriginalByKey[key] || '';
+        if (newVal === original) return; // unchanged — skip
+        const rowNumber = pmRowNumberByKey[key];
+        if (rowNumber) {
+          toUpdate.push({ rowNumber, row: [section, title, newVal] });
+        } else if (newVal) {
+          // No existing row and nothing to blank — only worth writing
+          // a new row if the new value is an actual access level.
+          toAppend.push([section, title, newVal]);
+        }
+      });
+
+      if (!toUpdate.length && !toAppend.length) {
+        savedEl.textContent = 'No changes to save.';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        for (const u of toUpdate) {
+          await MVOA.sheetsUpdateRow(MVOA.TABS.permissionsMatrixDailyOps, u.rowNumber, u.row);
+        }
+        if (toAppend.length) {
+          await MVOA.sheetsAppendMany(MVOA.TABS.permissionsMatrixDailyOps, toAppend);
+        }
+        await MVOA.loadDailyOpsPermissionsMatrix(true);
+        pmExtraTitles = [];
+        savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
+        await renderPermMatrixGrid();
+      } catch (e) {
+        errEl.textContent = 'Could not save changes: ' + e.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+    });
+
     document.getElementById('mu-add-btn').addEventListener('click', async () => {
       const name = document.getElementById('mu-name').value.trim();
       const role = document.getElementById('mu-role').value;
@@ -504,6 +759,18 @@
         const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE', title, adminAccess ? 'TRUE' : 'FALSE'];
         await MVOA.sheetsAppend(MVOA.TABS.roles, row);
         await MVOA.logAudit({ module: 'Settings', requestId: name, eventType: 'UserCreated', comment: 'Role: ' + role, statusAfter: 'Active' });
+
+        // Write Daily Ops category access, tied to this person's Title —
+        // any category left on "No access" gets no row (matrix already
+        // treats a missing row as no access, so nothing to write there).
+        const effectiveTitle = title || MVOA.roleLabel(role);
+        const matrixRows = [...document.querySelectorAll('.mu-cat-access')]
+          .filter(sel => sel.value)
+          .map(sel => [sel.dataset.category, effectiveTitle, sel.value]);
+        if (matrixRows.length) {
+          await MVOA.sheetsAppendMany(MVOA.TABS.permissionsMatrixDailyOps, matrixRows);
+          await MVOA.loadDailyOpsPermissionsMatrix(true); // refresh cache so it's live immediately
+        }
       } catch (e) {
         errEl.textContent = 'Could not save user: ' + e.message;
         addBtn.disabled = false;
@@ -519,6 +786,8 @@
       document.getElementById('mu-title').value = '';
       document.getElementById('mu-ec').checked = false;
       document.getElementById('mu-admin').checked = false;
+      document.getElementById('mu-title-warning').textContent = '';
+      document.querySelectorAll('.mu-cat-access').forEach(sel => sel.value = '');
       savedEl.textContent = `✓ ${name} (${title || role}) created.`;
       loadManageUsersList(true);
     });
