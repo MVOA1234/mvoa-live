@@ -52,7 +52,8 @@ const MVOA = (function () {
     hsItemResults: 'HSChecklistItemResults',
     expenseRequests: 'Expense_Requests',
     expenseVotes: 'Expense_Votes',
-    approvalMatrix: 'ApprovalMatrix'
+    approvalMatrix: 'ApprovalMatrix',
+    permissionsMatrixDailyOps: 'PermissionsMatrix_DailyOps'
   };
 
   // ───────────────────────────────────────────────────────────
@@ -405,14 +406,48 @@ const MVOA = (function () {
     return techniciansCache;
   }
 
-  // DEV role always has full access. Otherwise: a user can EDIT a category
-  // if their role is in AllowedRoles OR their name is in AllowedUsers.
-  // Anyone who can see the parent module (role-gated at module level) can
-  // at least VIEW every category — categories without edit access render
-  // grayed out / read-only rather than being hidden.
+  // ───────────────────────────────────────────────────────────
+  // PERMISSIONS MATRIX (Daily Ops) — Section | Title | AccessLevel.
+  // "Section" is a category Name (must match OpsCategories.Name exactly),
+  // "Title" is a person's displayTitle() (their Roles.Title override, or
+  // the role-code label if blank), "AccessLevel" is Edit or ReadOnly.
+  // This is the authoritative source for category edit rights once a
+  // category has ANY rows here — canEditCategory() only falls back to
+  // the legacy AllowedRoles/AllowedUsers columns for categories that
+  // have no matrix rows at all yet, so migration can happen one
+  // category at a time without breaking the ones not yet migrated.
+  // ───────────────────────────────────────────────────────────
+  let dailyOpsPermMatrixCache = null;
+  async function loadDailyOpsPermissionsMatrix(force) {
+    if (dailyOpsPermMatrixCache && !force) return dailyOpsPermMatrixCache;
+    const rows = await sheetsRead(TABS.permissionsMatrixDailyOps);
+    const map = {}; // map[Section][Title] = 'Edit' | 'ReadOnly'
+    rows.slice(1).forEach(r => {
+      const section = (r[0] || '').trim();
+      const title = (r[1] || '').trim();
+      const level = (r[2] || '').trim();
+      if (!section || !title || !level) return;
+      if (!map[section]) map[section] = {};
+      map[section][title] = level;
+    });
+    dailyOpsPermMatrixCache = map;
+    return dailyOpsPermMatrixCache;
+  }
+
+  // DEV role always has full access. Otherwise: if the category's Name
+  // has any rows in the Daily Ops permissions matrix, that matrix is
+  // authoritative — the user's displayTitle() must have an explicit
+  // Edit row, or they don't get edit access (a ReadOnly or missing row
+  // both mean no edit, even if their old Role code would have qualified).
+  // Only categories with NO matrix rows at all fall back to the legacy
+  // AllowedRoles/AllowedUsers columns.
   function canEditCategory(category, user) {
     if (!user) return false;
     if (user.role === 'DEV') return true;
+    const sectionMatrix = dailyOpsPermMatrixCache && dailyOpsPermMatrixCache[category.Name];
+    if (sectionMatrix) {
+      return sectionMatrix[displayTitle(user)] === 'Edit';
+    }
     if (category.AllowedRoles.includes(user.role)) return true;
     if (category.AllowedUsers.includes(user.name)) return true;
     return false;
@@ -758,7 +793,7 @@ const MVOA = (function () {
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
-    loadCategories, loadTechnicians, canEditCategory, loadAssigneeOptions, assigneeLabel,
+    loadCategories, loadTechnicians, canEditCategory, loadDailyOpsPermissionsMatrix, loadAssigneeOptions, assigneeLabel,
     loadNotesForTask, appendNote,
     logAudit, nextId,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
