@@ -139,8 +139,13 @@ const OpsModule = (function () {
 
   function renderCategoryGrid(container) {
     const user = MVOA.getUser();
+    const visibleCategories = categories.filter(cat => MVOA.canViewCategory(cat, user));
     if (!categories.length) {
       container.innerHTML = `<p class="muted">No categories set up yet. Ask a Developer to add some in Settings.</p>`;
+      return;
+    }
+    if (!visibleCategories.length) {
+      container.innerHTML = `<p class="muted">You don't have access to any Daily Operations categories yet. Ask a Developer to check your permissions.</p>`;
       return;
     }
     container.innerHTML = `
@@ -154,7 +159,7 @@ const OpsModule = (function () {
       <div class="tiles-grid" id="ops-cat-tiles"></div>
     `;
     const tilesEl = container.querySelector('#ops-cat-tiles');
-    categories.forEach(cat => {
+    visibleCategories.forEach(cat => {
       const canEdit = MVOA.canEditCategory(cat, user);
       const catTasks = tasksCache.filter(t => t.CategoryID === cat.CategoryID && t.Status === 'Open');
       const openCount = catTasks.length;
