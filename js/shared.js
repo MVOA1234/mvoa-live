@@ -453,6 +453,22 @@ const MVOA = (function () {
     return false;
   }
 
+  // Whether a category should even be SHOWN to this user at all. Once a
+  // category has matrix rows, a title with no row there (neither Edit
+  // nor ReadOnly) has no business seeing it, so the tile is hidden
+  // entirely — not just rendered view-only. Categories with no matrix
+  // rows keep the old behavior: visible to everyone, edit gated
+  // separately by AllowedRoles/AllowedUsers.
+  function canViewCategory(category, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = dailyOpsPermMatrixCache && dailyOpsPermMatrixCache[category.Name];
+    if (sectionMatrix) {
+      return !!sectionMatrix[displayTitle(user)];
+    }
+    return true;
+  }
+
   // Combined Assigned-To options: app Users (from Roles, active only) +
   // external Technicians. Stored/returned as {value, label} where value
   // is "user:<name>" or "tech:<TechnicianID>" so the two namespaces never collide.
@@ -793,7 +809,7 @@ const MVOA = (function () {
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
-    loadCategories, loadTechnicians, canEditCategory, loadDailyOpsPermissionsMatrix, loadAssigneeOptions, assigneeLabel,
+    loadCategories, loadTechnicians, canEditCategory, canViewCategory, loadDailyOpsPermissionsMatrix, loadAssigneeOptions, assigneeLabel,
     loadNotesForTask, appendNote,
     logAudit, nextId,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
