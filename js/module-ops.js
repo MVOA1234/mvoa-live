@@ -122,6 +122,7 @@ const OpsModule = (function () {
   async function loadCategoriesAndAssignees(force) {
     categories = (await MVOA.loadCategories(force)).filter(c => c.Active);
     assigneeOptions = await MVOA.loadAssigneeOptions();
+    await MVOA.loadDailyOpsPermissionsMatrix(force);
   }
 
   // ───────────────────────────────────────────────────────────
