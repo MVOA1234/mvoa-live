@@ -38,7 +38,7 @@ const OpsModule = (function () {
     'AttachmentURL_2','AttachmentURL_3',
     'ComplianceAttachmentURL_2','ComplianceAttachmentURL_3',
     'NoteCount','LastNoteAt','LastNoteAuthor','CreatorLastSeenNotesAt','AssigneeLastSeenNotesAt',
-    'AssigneeSeenAt'];
+    'AssigneeSeenAt','DelegatedTo'];
 
   function rowToObj(row, rowNumber) {
     const o = { rowNumber };
@@ -92,6 +92,32 @@ const OpsModule = (function () {
       await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
     } catch (e) {
       // Non-critical — worst case the 🆕 badge reappears next reload.
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Delegation — a second, informational level of assignment. The
+  // assignee (AssignedTo) always stays the assignee of record for
+  // notifications, notes read-tracking, and the By Assignee report;
+  // DelegatedTo is just a visible "who's actually doing this" note
+  // that only the assignee themself can set or clear. Only settable
+  // as a later step on an existing task, never at task creation.
+  // ───────────────────────────────────────────────────────────
+  function isDelegateOf(t, user) {
+    return !!t.DelegatedTo && t.DelegatedTo.indexOf('user:') === 0 && t.DelegatedTo.substring('user:'.length) === user.name;
+  }
+  async function setDelegate(t, delegateValue) {
+    t.DelegatedTo = delegateValue; // '' clears it
+    try {
+      await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
+      await MVOA.logAudit({
+        module: 'DailyOps', requestId: t.TaskID,
+        eventType: delegateValue ? 'Delegated' : 'DelegationCleared',
+        comment: delegateValue ? ('To: ' + MVOA.assigneeLabel(delegateValue, assigneeOptions)) : '',
+        statusAfter: t.Status
+      });
+    } catch (e) {
+      throw e; // caller shows the error — this one shouldn't fail silently, unlike the "seen" stamps
     }
   }
 
@@ -536,12 +562,15 @@ const OpsModule = (function () {
         ${t.Description ? `<p class="muted" style="margin:6px 0;">${escapeHtml(t.Description)}</p>` : ''}
         ${t.AssetName ? `<p class="muted" style="margin:4px 0;">📍 ${escapeHtml(t.AssetName)} (${escapeHtml(t.AssetID)})</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(t.CreatedBy)} · ${formatDate(t.CreatedDate)} · Priority: ${escapeHtml(t.Priority)}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
+        ${t.DelegatedTo ? `<p class="muted" style="margin:-2px 0 4px;font-size:0.8rem;">↳ Delegated to: 👤 ${escapeHtml(MVOA.assigneeLabel(t.DelegatedTo, assigneeOptions))}</p>` : ''}
         ${attachmentLinksHtml(t)}
         ${statusFilter === 'Open'
-          ? `<div style="margin-top:8px;">
+          ? `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
                <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;position:relative;">💬 Notes${noteCount ? ` (${noteCount})` : ''}${unread ? ` <span class="ops-unread-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d9534f;margin-left:4px;"></span>` : ''}</button>
+               ${isAssigneeOf(t, user) ? `<button class="ops-delegate-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">🔀 ${t.DelegatedTo ? 'Change Delegate' : 'Delegate'}</button>` : ''}
              </div>
              <div class="ops-notes-body hidden" data-task-id="${t.TaskID}"></div>
+             <div class="ops-delegate-body hidden" data-task-id="${t.TaskID}"></div>
              ${canEdit ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
           : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
       </div>
@@ -579,10 +608,59 @@ const OpsModule = (function () {
       });
     });
 
+    body.querySelectorAll('.ops-delegate-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const taskId = btn.dataset.taskId;
+        const formBody = body.querySelector(`.ops-delegate-body[data-task-id="${taskId}"]`);
+        const isHidden = formBody.classList.contains('hidden');
+        if (!isHidden) { formBody.classList.add('hidden'); return; }
+        formBody.classList.remove('hidden');
+        renderDelegateForm(formBody, taskId, btn, container);
+      });
+    });
+
     body.querySelectorAll('.ops-comply-btn').forEach(btn => {
       btn.addEventListener('click', () => openComplyDialog(btn.dataset.taskId, container));
     });
   }
+
+  // Inline picker shown when the assignee taps "Delegate" / "Change
+  // Delegate" on their own task. Only the assignee ever sees this
+  // control (gated in renderTaskList), so no separate canEdit check
+  // is needed here.
+  function renderDelegateForm(formBody, taskId, toggleBtn, container) {
+    const task = tasksCache.find(t => t.TaskID === taskId);
+    if (!task) return;
+    formBody.innerHTML = `
+      <div style="margin-top:8px;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
+        <label style="margin:0;">Delegate this task to
+          <select id="ops-delegate-select-${taskId}">
+            <option value="">— No delegate —</option>
+            ${assigneeOptions.map(o => `<option value="${o.value}" ${task.DelegatedTo===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
+          </select>
+        </label>
+        <button class="btn-primary ops-delegate-save" data-task-id="${taskId}" style="margin-top:8px;width:100%;">Save</button>
+        <p class="error-text ops-delegate-error" style="min-height:1em;margin-top:4px;"></p>
+      </div>
+    `;
+    const errEl = formBody.querySelector('.ops-delegate-error');
+    formBody.querySelector('.ops-delegate-save').addEventListener('click', async () => {
+      const select = formBody.querySelector(`#ops-delegate-select-${taskId}`);
+      const btn = formBody.querySelector('.ops-delegate-save');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        await setDelegate(task, select.value);
+        formBody.classList.add('hidden');
+        render(container); // full re-render — picks up the new delegation line and updated button label
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      }
+    });
+  }
+
 
   async function renderNotesThread(notesBody, taskId, toggleBtn, canEdit) {
     notesBody.innerHTML = `<p class="muted" style="font-size:0.8rem;padding:8px 0;">Loading notes…</p>`;
