@@ -505,6 +505,21 @@ const MVOA = (function () {
     return true;
   }
 
+  // Checks whether a given AssignedTo value ("user:Name" or "tech:ID") —
+  // not necessarily the currently logged-in user — would have Edit
+  // rights on a category. Used to warn at assignment time (New Task /
+  // Reassign) if the chosen person wouldn't actually be able to close
+  // their own task. Technicians never get edit access here since they
+  // have no login/Title in the permissions system at all.
+  async function assigneeEditAccess(category, assignedToValue) {
+    if (!assignedToValue || assignedToValue.indexOf('user:') !== 0) return false;
+    const name = assignedToValue.substring('user:'.length);
+    const users = await loadRoles();
+    const person = users.find(u => u.name === name);
+    if (!person) return false;
+    return canEditCategory(category, person);
+  }
+
   // Combined Assigned-To options: app Users (from Roles, active only) +
   // external Technicians. Stored/returned as {value, label} where value
   // is "user:<name>" or "tech:<TechnicianID>" so the two namespaces never collide.
@@ -860,7 +875,7 @@ const MVOA = (function () {
     sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
-    loadCategories, loadTechnicians, canEditCategory, canViewCategory, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
+    loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
     loadNotesForTask, appendNote,
     logAudit, nextId,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
