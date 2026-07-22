@@ -564,13 +564,16 @@ const OpsModule = (function () {
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(t.CreatedBy)} · ${formatDate(t.CreatedDate)} · Priority: ${escapeHtml(t.Priority)}${t.AssignedTo ? ' · 👤 ' + escapeHtml(MVOA.assigneeLabel(t.AssignedTo, assigneeOptions)) : ''}</p>
         ${t.DelegatedTo ? `<p class="muted" style="margin:-2px 0 4px;font-size:0.8rem;">↳ Delegated to: 👤 ${escapeHtml(MVOA.assigneeLabel(t.DelegatedTo, assigneeOptions))}</p>` : ''}
         ${attachmentLinksHtml(t)}
+        ${statusFilter === 'Open' && complianceAttachmentCount(t) > 0 ? `<p class="muted" style="font-size:0.8rem;">📎 Completion evidence: ${attachmentLinksInline(t, true)}</p>` : ''}
         ${statusFilter === 'Open'
           ? `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
                <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;position:relative;">💬 Notes${noteCount ? ` (${noteCount})` : ''}${unread ? ` <span class="ops-unread-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d9534f;margin-left:4px;"></span>` : ''}</button>
                ${isAssigneeOf(t, user) ? `<button class="ops-delegate-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">🔀 ${t.DelegatedTo ? 'Change Delegate' : 'Delegate'}</button>` : ''}
+               ${isDelegateOf(t, user) && complianceAttachmentCount(t) < 3 ? `<button class="ops-evidence-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">📎 Add Completion Evidence</button>` : ''}
              </div>
              <div class="ops-notes-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-delegate-body hidden" data-task-id="${t.TaskID}"></div>
+             <div class="ops-evidence-body hidden" data-task-id="${t.TaskID}"></div>
              ${canEdit ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
           : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
       </div>
@@ -619,6 +622,17 @@ const OpsModule = (function () {
       });
     });
 
+    body.querySelectorAll('.ops-evidence-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const taskId = btn.dataset.taskId;
+        const formBody = body.querySelector(`.ops-evidence-body[data-task-id="${taskId}"]`);
+        const isHidden = formBody.classList.contains('hidden');
+        if (!isHidden) { formBody.classList.add('hidden'); return; }
+        formBody.classList.remove('hidden');
+        renderEvidenceForm(formBody, taskId, container);
+      });
+    });
+
     body.querySelectorAll('.ops-comply-btn').forEach(btn => {
       btn.addEventListener('click', () => openComplyDialog(btn.dataset.taskId, container));
     });
@@ -658,6 +672,65 @@ const OpsModule = (function () {
         btn.disabled = false;
         btn.textContent = 'Save';
       }
+    });
+  }
+
+  // Lets the delegate (only) attach photos/documents proving the work
+  // is done, WITHOUT closing the task themselves — these go straight
+  // into the same PhotoURL_Compliance/ComplianceAttachmentURL_2/3 slots
+  // the closing dialog uses, so when the assignee later closes the
+  // task, this evidence is already there waiting for them rather than
+  // needing to be re-collected or re-uploaded.
+  function renderEvidenceForm(formBody, taskId, container) {
+    const task = tasksCache.find(t => t.TaskID === taskId);
+    if (!task) return;
+    const remainingSlots = 3 - complianceAttachmentCount(task);
+    const newAttachments = [];
+    formBody.innerHTML = `
+      <div style="margin-top:8px;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
+        <p class="muted" style="margin:0 0 6px;">Add up to ${remainingSlots} more photo(s)/document(s) as proof of completion. These will be available to ${escapeHtml(MVOA.assigneeLabel(task.AssignedTo, assigneeOptions))} when they close this task.</p>
+        <div class="ops-evidence-chips"></div>
+        <div class="ops-evidence-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"></div>
+        <button class="btn-primary ops-evidence-save" data-task-id="${taskId}" style="margin-top:8px;width:100%;">Save Evidence</button>
+        <p class="error-text ops-evidence-error" style="min-height:1em;margin-top:4px;"></p>
+      </div>
+    `;
+    renderAttachmentChips(formBody, '.ops-evidence-chips', '.ops-evidence-btns', newAttachments, remainingSlots);
+
+    const errEl = formBody.querySelector('.ops-evidence-error');
+    formBody.querySelector('.ops-evidence-save').addEventListener('click', async () => {
+      if (!newAttachments.length) { errEl.textContent = 'Add at least one photo or document first.'; return; }
+      const btn = formBody.querySelector('.ops-evidence-save');
+      btn.disabled = true;
+      const slots = complianceAttachmentSlots(task); // current state, may have been added-to concurrently — re-check against tasksCache copy
+      const emptySlotIndexes = [0, 1, 2].filter(i => !slots[i]);
+      for (let i = 0; i < newAttachments.length && i < emptySlotIndexes.length; i++) {
+        btn.textContent = `Uploading ${i + 1} of ${newAttachments.length}…`;
+        const att = newAttachments[i];
+        const slotIdx = emptySlotIndexes[i];
+        try {
+          const url = await MVOA.uploadPhotoToDrive(att.file, `${taskId}_evidence${slotIdx + 1}_${att.name}`);
+          if (slotIdx === 0) task.PhotoURL_Compliance = url;
+          else if (slotIdx === 1) task.ComplianceAttachmentURL_2 = url;
+          else task.ComplianceAttachmentURL_3 = url;
+        } catch (e) {
+          errEl.textContent = `Upload failed: ${e.message}`;
+          btn.disabled = false;
+          btn.textContent = 'Save Evidence';
+          return;
+        }
+      }
+      try {
+        await MVOA.sheetsUpdateRow(TAB, task.rowNumber, objToRow(task));
+        await MVOA.logAudit({ module: 'DailyOps', requestId: taskId, eventType: 'EvidenceAdded', comment: `${newAttachments.length} file(s) by delegate`, statusAfter: 'Open' });
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Save Evidence';
+        return;
+      }
+      formBody.classList.add('hidden');
+      render(container); // full re-render — shows the new evidence line, hides the button once all 3 slots are full
     });
   }
 
@@ -823,19 +896,31 @@ const OpsModule = (function () {
   }
 
   // Returns HTML showing all attachment links for a task card.
-  function attachmentLinksHtml(t, forCompliance) {
+  function attachmentLinksInline(t, forCompliance) {
     const urls = forCompliance
       ? [t.PhotoURL_Compliance, t.ComplianceAttachmentURL_2, t.ComplianceAttachmentURL_3]
       : [t.PhotoURL_Initial, t.AttachmentURL_2, t.AttachmentURL_3];
-    const links = urls.filter(Boolean).map((url, i) =>
+    return urls.filter(Boolean).map((url, i) =>
       `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>`
     ).join(' · ');
+  }
+  function attachmentLinksHtml(t, forCompliance) {
+    const links = attachmentLinksInline(t, forCompliance);
     return links ? `<p class="muted" style="font-size:0.8rem;">${links}</p>` : '';
+  }
+  function complianceAttachmentSlots(t) {
+    return [t.PhotoURL_Compliance, t.ComplianceAttachmentURL_2, t.ComplianceAttachmentURL_3];
+  }
+  function complianceAttachmentCount(t) {
+    return complianceAttachmentSlots(t).filter(Boolean).length;
   }
 
   function openComplyDialog(taskId, container) {
     const task = tasksCache.find(t => t.TaskID === taskId);
     if (!task) return;
+    const existingSlots = complianceAttachmentSlots(task);
+    const existingCount = complianceAttachmentCount(task);
+    const remainingSlots = 3 - existingCount;
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
@@ -845,11 +930,15 @@ const OpsModule = (function () {
           <textarea id="ops-comply-comment" rows="3" placeholder="What was done? (required)"></textarea>
         </label>
         <p class="muted" style="margin-top:-4px;font-size:0.8rem;">Required — cannot close without a comment.</p>
-        <div style="margin-top:12px;">
-          <p class="muted" style="margin:0 0 6px;">Attachments (optional — up to 3)</p>
+        ${existingCount ? `<div style="margin-top:12px;">
+          <p class="muted" style="margin:0 0 6px;">Already attached (added earlier${task.DelegatedTo ? ' by the delegate' : ''}):</p>
+          <p class="muted" style="font-size:0.85rem;">${attachmentLinksInline(task, true)}</p>
+        </div>` : ''}
+        ${remainingSlots > 0 ? `<div style="margin-top:12px;">
+          <p class="muted" style="margin:0 0 6px;">Add more attachments (optional — up to ${remainingSlots} more)</p>
           <div id="ops-comply-chips"></div>
           <div id="ops-comply-att-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"></div>
-        </div>
+        </div>` : `<p class="muted" style="margin-top:12px;">All 3 attachment slots are already used.</p>`}
         <button id="ops-comply-submit" class="btn-primary">Confirm Close</button>
         <button id="ops-comply-cancel" class="btn-secondary">Cancel</button>
         <p class="error-text" id="ops-comply-error"></p>
@@ -858,7 +947,9 @@ const OpsModule = (function () {
     document.body.appendChild(modal);
 
     const closeAttachments = [];
-    renderAttachmentChips(modal, '#ops-comply-chips', '#ops-comply-att-btns', closeAttachments, 3);
+    if (remainingSlots > 0) {
+      renderAttachmentChips(modal, '#ops-comply-chips', '#ops-comply-att-btns', closeAttachments, remainingSlots);
+    }
 
     modal.querySelector('#ops-comply-cancel').addEventListener('click', () => modal.remove());
     modal.querySelector('#ops-comply-submit').addEventListener('click', async () => {
@@ -877,15 +968,19 @@ const OpsModule = (function () {
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Closing…';
 
-      const complianceUrls = ['', '', ''];
+      // Start from whatever's already in the slots (e.g. delegate-added
+      // evidence) and only fill the ones that are still empty.
+      const complianceUrls = existingSlots.slice();
+      const emptySlotIndexes = [0, 1, 2].filter(i => !complianceUrls[i]);
       if (closeAttachments.length) {
         confirmBtn.textContent = `Uploading ${closeAttachments.length} attachment(s)…`;
-        for (let i = 0; i < Math.min(closeAttachments.length, 3); i++) {
+        for (let i = 0; i < closeAttachments.length && i < emptySlotIndexes.length; i++) {
           const att = closeAttachments[i];
+          const slotIdx = emptySlotIndexes[i];
           try {
-            complianceUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${taskId}_compliance${i+1}_${att.name}`);
+            complianceUrls[slotIdx] = await MVOA.uploadPhotoToDrive(att.file, `${taskId}_compliance${slotIdx+1}_${att.name}`);
           } catch (e) {
-            errEl.textContent = `Attachment ${i+1} upload failed: ${e.message}`;
+            errEl.textContent = `Attachment upload failed: ${e.message}`;
             confirmBtn.disabled = false;
             confirmBtn.textContent = 'Confirm Close';
             return;
