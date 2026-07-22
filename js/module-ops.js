@@ -315,11 +315,12 @@ const OpsModule = (function () {
     }
   }
 
-  // Shared by the New Task and Reassign forms: warns (non-blocking) if
-  // the selected assignee's Title wouldn't actually have Edit rights on
-  // the current category — meaning they could never close this task
-  // themselves. Doesn't prevent submission; just flags it so the
-  // person assigning can pick someone else if that wasn't intended.
+  // Shared by the New Task and Reassign forms: flags live (as the person
+  // types) if the selected assignee's Title wouldn't actually have Edit
+  // rights on the current category. This is just the live indicator —
+  // the actual block happens again, authoritatively, at submit time in
+  // doSubmitNewTask/renderReassignForm's save handler, since this
+  // live check can lose a race if someone submits before it resolves.
   async function checkAssigneeEditAccess(scope, selectSelector, warningSelector) {
     const select = scope.querySelector(selectSelector);
     const warnEl = scope.querySelector(warningSelector);
@@ -329,7 +330,7 @@ const OpsModule = (function () {
     const label = select.options[select.selectedIndex].textContent;
     try {
       const hasEdit = await MVOA.assigneeEditAccess(currentCategory, value);
-      warnEl.textContent = hasEdit ? '' : `⚠️ ${label} doesn't have edit rights on ${currentCategory.Name} — they'll be able to view and delegate, but won't be able to close this task themselves.`;
+      warnEl.textContent = hasEdit ? '' : `❌ ${label} doesn't have edit rights on ${currentCategory.Name} — please reassign to someone else.`;
     } catch (e) {
       warnEl.textContent = ''; // non-critical — don't block the form over a warning check failing
     }
@@ -479,6 +480,16 @@ const OpsModule = (function () {
       if (submitBtn) submitBtn.disabled = false;
       if (submitAnotherBtn) submitAnotherBtn.disabled = false;
       return;
+    }
+    if (assignedTo.indexOf('user:') === 0) {
+      const hasEdit = await MVOA.assigneeEditAccess(currentCategory, assignedTo);
+      if (!hasEdit) {
+        const label = MVOA.assigneeLabel(assignedTo, assigneeOptions);
+        errEl.textContent = `❌ ${label} doesn't have edit rights on ${currentCategory.Name} — please reassign to someone else.`;
+        if (submitBtn) submitBtn.disabled = false;
+        if (submitAnotherBtn) submitAnotherBtn.disabled = false;
+        return;
+      }
     }
 
     const user = MVOA.getUser();
@@ -776,6 +787,14 @@ const OpsModule = (function () {
     formBody.querySelector('.ops-reassign-save').addEventListener('click', async () => {
       const select = formBody.querySelector(`#ops-reassign-select-${taskId}`);
       if (!select.value) { errEl.textContent = 'Please select someone to reassign this task to.'; return; }
+      if (select.value.indexOf('user:') === 0) {
+        const hasEdit = await MVOA.assigneeEditAccess(currentCategory, select.value);
+        if (!hasEdit) {
+          const label = MVOA.assigneeLabel(select.value, assigneeOptions);
+          errEl.textContent = `❌ ${label} doesn't have edit rights on ${currentCategory.Name} — please reassign to someone else.`;
+          return;
+        }
+      }
       const btn = formBody.querySelector('.ops-reassign-save');
       btn.disabled = true;
       btn.textContent = 'Saving…';
