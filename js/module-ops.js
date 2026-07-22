@@ -121,6 +121,39 @@ const OpsModule = (function () {
     }
   }
 
+  // ───────────────────────────────────────────────────────────
+  // Reassignment — an actual handoff of AssignedTo, unlike delegation
+  // which never changes the assignee of record. For when the current
+  // assignee genuinely can't do the task (e.g. on leave) and someone
+  // else needs to take over as assignee. Restricted to the task's
+  // ORIGINATOR (whoever created it) or DEV — not the current assignee,
+  // not the delegate, not general category editors — since handing a
+  // task off to someone new is the originator's call, same spirit as
+  // how the task was theirs to assign in the first place.
+  // Clears DelegatedTo and AssigneeSeenAt: the previous assignee's
+  // delegate choice doesn't carry over to someone new, and the new
+  // assignee hasn't seen this task yet, so it correctly shows 🆕 New
+  // for them. Any completion evidence already attached is left intact.
+  // ───────────────────────────────────────────────────────────
+  function canReassign(t, user) {
+    return user.role === 'DEV' || isCreatorOf(t, user);
+  }
+  async function reassignTask(t, newAssignee) {
+    t.AssignedTo = newAssignee;
+    t.DelegatedTo = '';
+    t.AssigneeSeenAt = '';
+    try {
+      await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
+      await MVOA.logAudit({
+        module: 'DailyOps', requestId: t.TaskID, eventType: 'Reassigned',
+        comment: 'To: ' + (newAssignee ? MVOA.assigneeLabel(newAssignee, assigneeOptions) : 'Unassigned'),
+        statusAfter: t.Status
+      });
+    } catch (e) {
+      throw e;
+    }
+  }
+
   async function loadTasks() {
     const rows = await MVOA.sheetsRead(TAB);
     tasksCache = rows.slice(1).map((r, i) => rowToObj(r, i + 2)).filter(t => t.TaskID);
@@ -553,6 +586,12 @@ const OpsModule = (function () {
       const noteCount = Number(t.NoteCount) || 0;
       const unread = statusFilter === 'Open' && hasUnreadNote(t, user);
       const isNew = statusFilter === 'Open' && isNewTask(t);
+      // Closing is restricted to the assignee of record (or DEV, which
+      // always overrides) — NOT anyone with general category edit
+      // rights, and NOT the delegate. Category edit access still gates
+      // whether the assignee themself can close it, in case their
+      // Title lost access to this category after the task was assigned.
+      const canClose = user.role === 'DEV' || (canEdit && isAssigneeOf(t, user));
       return `
       <div class="mvoa-list-item" data-task-id="${t.TaskID}">
         <div class="mvoa-row">
@@ -569,12 +608,14 @@ const OpsModule = (function () {
           ? `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
                <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;position:relative;">💬 Notes${noteCount ? ` (${noteCount})` : ''}${unread ? ` <span class="ops-unread-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d9534f;margin-left:4px;"></span>` : ''}</button>
                ${isAssigneeOf(t, user) ? `<button class="ops-delegate-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">🔀 ${t.DelegatedTo ? 'Change Delegate' : 'Delegate'}</button>` : ''}
+               ${canReassign(t, user) ? `<button class="ops-reassign-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">🔁 Reassign</button>` : ''}
                ${isDelegateOf(t, user) && complianceAttachmentCount(t) < 3 ? `<button class="ops-evidence-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">📎 Add Completion Evidence</button>` : ''}
              </div>
              <div class="ops-notes-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-delegate-body hidden" data-task-id="${t.TaskID}"></div>
+             <div class="ops-reassign-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-evidence-body hidden" data-task-id="${t.TaskID}"></div>
-             ${canEdit ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
+             ${canClose ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
           : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
       </div>
     `;
@@ -619,6 +660,17 @@ const OpsModule = (function () {
         if (!isHidden) { formBody.classList.add('hidden'); return; }
         formBody.classList.remove('hidden');
         renderDelegateForm(formBody, taskId, btn, container);
+      });
+    });
+
+    body.querySelectorAll('.ops-reassign-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const taskId = btn.dataset.taskId;
+        const formBody = body.querySelector(`.ops-reassign-body[data-task-id="${taskId}"]`);
+        const isHidden = formBody.classList.contains('hidden');
+        if (!isHidden) { formBody.classList.add('hidden'); return; }
+        formBody.classList.remove('hidden');
+        renderReassignForm(formBody, taskId, container);
       });
     });
 
@@ -675,7 +727,45 @@ const OpsModule = (function () {
     });
   }
 
-  // Lets the delegate (only) attach photos/documents proving the work
+  // Reassignment picker — unlike delegation, a blank selection isn't
+  // valid here (every task must always have a real assignee, same rule
+  // as task creation), so this validates a choice was made.
+  function renderReassignForm(formBody, taskId, container) {
+    const task = tasksCache.find(t => t.TaskID === taskId);
+    if (!task) return;
+    formBody.innerHTML = `
+      <div style="margin-top:8px;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
+        <p class="muted" style="margin:0 0 6px;">Currently assigned to ${t.AssignedTo ? escapeHtml(MVOA.assigneeLabel(task.AssignedTo, assigneeOptions)) : 'nobody'}. Reassigning clears any delegate on this task — new assignee starts fresh.</p>
+        <label style="margin:0;">Reassign to
+          <select id="ops-reassign-select-${taskId}">
+            <option value="">— Select someone —</option>
+            ${assigneeOptions.map(o => `<option value="${o.value}" ${task.AssignedTo===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
+          </select>
+        </label>
+        <button class="btn-primary ops-reassign-save" data-task-id="${taskId}" style="margin-top:8px;width:100%;">Save</button>
+        <p class="error-text ops-reassign-error" style="min-height:1em;margin-top:4px;"></p>
+      </div>
+    `;
+    const errEl = formBody.querySelector('.ops-reassign-error');
+    formBody.querySelector('.ops-reassign-save').addEventListener('click', async () => {
+      const select = formBody.querySelector(`#ops-reassign-select-${taskId}`);
+      if (!select.value) { errEl.textContent = 'Please select someone to reassign this task to.'; return; }
+      const btn = formBody.querySelector('.ops-reassign-save');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        await reassignTask(task, select.value);
+        formBody.classList.add('hidden');
+        render(container); // full re-render — picks up the new assignee, cleared delegate, and 🆕 New badge
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      }
+    });
+  }
+
+
   // is done, WITHOUT closing the task themselves — these go straight
   // into the same PhotoURL_Compliance/ComplianceAttachmentURL_2/3 slots
   // the closing dialog uses, so when the assignee later closes the
