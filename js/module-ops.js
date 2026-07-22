@@ -208,6 +208,7 @@ const OpsModule = (function () {
       return;
     }
     container.innerHTML = `
+      <p class="muted" style="font-size:0.75rem;margin:0 0 6px;">Logged in as: ${escapeHtml(user.name)} (${escapeHtml(MVOA.displayTitle(user))})</p>
       <div class="mvoa-row" style="margin-bottom:14px;">
         <p class="muted" style="margin:0;">Choose a category</p>
         <div>
@@ -260,6 +261,7 @@ const OpsModule = (function () {
     if (currentView === 'new' && !showNewTab) currentView = 'open';
 
     container.innerHTML = `
+      <p class="muted" style="font-size:0.75rem;margin:0 0 6px;">Logged in as: ${escapeHtml(user.name)} (${escapeHtml(MVOA.displayTitle(user))})</p>
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="ops-back-to-cats" class="btn-secondary">← Categories</button>
         <strong>${currentCategory.Icon || '📋'} ${currentCategory.Name}</strong>
@@ -313,6 +315,26 @@ const OpsModule = (function () {
     }
   }
 
+  // Shared by the New Task and Reassign forms: warns (non-blocking) if
+  // the selected assignee's Title wouldn't actually have Edit rights on
+  // the current category — meaning they could never close this task
+  // themselves. Doesn't prevent submission; just flags it so the
+  // person assigning can pick someone else if that wasn't intended.
+  async function checkAssigneeEditAccess(scope, selectSelector, warningSelector) {
+    const select = scope.querySelector(selectSelector);
+    const warnEl = scope.querySelector(warningSelector);
+    if (!select || !warnEl) return;
+    const value = select.value;
+    if (!value || value.indexOf('user:') !== 0) { warnEl.textContent = ''; return; } // blank or a technician — technicians are covered by assigneeEditAccess itself, but nothing to warn against mid-typing here
+    const label = select.options[select.selectedIndex].textContent;
+    try {
+      const hasEdit = await MVOA.assigneeEditAccess(currentCategory, value);
+      warnEl.textContent = hasEdit ? '' : `⚠️ ${label} doesn't have edit rights on ${currentCategory.Name} — they'll be able to view and delegate, but won't be able to close this task themselves.`;
+    } catch (e) {
+      warnEl.textContent = ''; // non-critical — don't block the form over a warning check failing
+    }
+  }
+
   function renderNewTaskForm(body, container) {
     body.innerHTML = `
       <div class="card" style="max-width:520px;margin:0;">
@@ -335,6 +357,7 @@ const OpsModule = (function () {
             ${assigneeOptions.map(o => `<option value="${o.value}" ${pendingAssignee===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
           </select>
         </label>
+        <p class="muted" id="ops-assignee-warning" style="margin-top:-8px;color:#b3261e;"></p>
 
         <div id="ops-asset-chip"></div>
         <button id="ops-scan-btn" class="btn-secondary" style="width:100%;margin-top:10px;">📷 Scan Asset QR (optional)</button>
@@ -354,6 +377,7 @@ const OpsModule = (function () {
     renderAssetChip(body);
     renderAttachmentChips(body, '#ops-attachment-chips', '#ops-attachment-btns', pendingAttachments, 3);
     body.querySelector('#ops-scan-btn').addEventListener('click', () => openQrScanner(body));
+    body.querySelector('#ops-assignee').addEventListener('change', () => checkAssigneeEditAccess(body, '#ops-assignee', '#ops-assignee-warning'));
     body.querySelector('#ops-submit-btn').addEventListener('click', () => submitNewTask(body, container, { stayOnForm: false }));
     body.querySelector('#ops-submit-another-btn').addEventListener('click', () => submitNewTask(body, container, { stayOnForm: true }));
   }
@@ -742,10 +766,12 @@ const OpsModule = (function () {
             ${assigneeOptions.map(o => `<option value="${o.value}" ${task.AssignedTo===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
           </select>
         </label>
+        <p class="muted ops-reassign-warning" style="margin-top:-4px;color:#b3261e;"></p>
         <button class="btn-primary ops-reassign-save" data-task-id="${taskId}" style="margin-top:8px;width:100%;">Save</button>
         <p class="error-text ops-reassign-error" style="min-height:1em;margin-top:4px;"></p>
       </div>
     `;
+    formBody.querySelector(`#ops-reassign-select-${taskId}`).addEventListener('change', () => checkAssigneeEditAccess(formBody, `#ops-reassign-select-${taskId}`, '.ops-reassign-warning'));
     const errEl = formBody.querySelector('.ops-reassign-error');
     formBody.querySelector('.ops-reassign-save').addEventListener('click', async () => {
       const select = formBody.querySelector(`#ops-reassign-select-${taskId}`);
