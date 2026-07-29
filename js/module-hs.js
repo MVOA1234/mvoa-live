@@ -53,7 +53,7 @@ const HSModule = (function () {
 
   let currentScan = null;    // { assetId, assetName, category, qrTarget }
   let currentTemplate = null;
-  let currentShift = '';     // '1st' | '2nd3rd' — Daily only
+  let currentShift = '';     // '1st' | '2nd' | '3rd' — Daily only
   let pendingResults = {};   // ItemID -> { result, remarks }
   let historyFilter = 'all'; // 'all' | 'DGSet' | 'PanelRoom'
 
@@ -129,7 +129,7 @@ const HSModule = (function () {
     `;
   }
 
-  function shiftLabel(s) { return s === '1st' ? '1st' : s === '2nd3rd' ? '2nd & 3rd' : s; }
+  function shiftLabel(s) { return s === '2nd3rd' ? '2nd & 3rd' : s; } // '2nd3rd' kept for reading old log entries only — no longer written
 
   // ───────────────────────────────────────────────────────────
   // QR SCANNER — same jsQR-based approach as Daily Ops, decoded via
@@ -276,7 +276,8 @@ const HSModule = (function () {
         <div class="card" style="max-width:420px;margin:0;">
           <p class="muted" style="margin:0 0 10px;">Which shift is this for?</p>
           <button class="btn-primary hs-shift-btn" data-shift="1st" style="width:100%;margin-bottom:8px;">1st Shift</button>
-          <button class="btn-secondary hs-shift-btn" data-shift="2nd3rd" style="width:100%;">2nd &amp; 3rd Shift</button>
+          <button class="btn-secondary hs-shift-btn" data-shift="2nd" style="width:100%;margin-bottom:8px;">2nd Shift</button>
+          <button class="btn-secondary hs-shift-btn" data-shift="3rd" style="width:100%;">3rd Shift</button>
         </div>
       `;
       container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
@@ -288,7 +289,8 @@ const HSModule = (function () {
 
     const items = itemsCache
       .filter(i => i.TemplateID === currentTemplate.TemplateID)
-      .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift)
+      .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
+        (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
     container.innerHTML = `
@@ -349,34 +351,43 @@ const HSModule = (function () {
     `;
   }
 
+  // Event delegation on the container itself, wired ONCE — not one
+  // listener per button re-attached after every re-render. The
+  // previous approach re-queried and re-attached listeners to EVERY
+  // button each time any single one was clicked, so a few taps left
+  // buttons with several stacked listeners firing per click, which is
+  // what caused Pass/Fail to stop responding correctly. Delegation
+  // survives a row's outerHTML being replaced, since the listener
+  // lives on the parent, not the child being swapped out.
   function wireItemInputs(listEl, items) {
-    listEl.querySelectorAll('.hs-pf-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const itemId = btn.dataset.itemId;
-        const value = btn.dataset.value;
-        pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { result: value });
-        // Re-render just this row so the remarks box shows/hides correctly
-        const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
-        const item = items.find(i => i.ItemID === itemId);
-        row.outerHTML = renderItemRow(item);
-        wireItemInputs(listEl, items); // re-wire after outerHTML replace
-      });
+    if (listEl._hsWired) return; // guard: never wire the same container twice
+    listEl._hsWired = true;
+
+    listEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('.hs-pf-btn');
+      if (!btn) return;
+      const itemId = btn.dataset.itemId;
+      const value = btn.dataset.value;
+      pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { result: value });
+      const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+      const item = items.find(i => i.ItemID === itemId);
+      if (row && item) row.outerHTML = renderItemRow(item);
     });
-    listEl.querySelectorAll('.hs-remarks-input').forEach(el => {
-      el.addEventListener('input', () => {
-        const itemId = el.dataset.itemId;
-        pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { remarks: el.value });
-      });
+
+    listEl.addEventListener('input', (e) => {
+      const itemId = e.target.dataset.itemId;
+      if (!itemId) return;
+      if (e.target.classList.contains('hs-remarks-input')) {
+        pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { remarks: e.target.value });
+      } else if (e.target.classList.contains('hs-text-input')) {
+        pendingResults[itemId] = { result: e.target.value };
+      }
     });
-    listEl.querySelectorAll('.hs-dropdown-input').forEach(el => {
-      el.addEventListener('change', () => {
-        pendingResults[el.dataset.itemId] = { result: el.value };
-      });
-    });
-    listEl.querySelectorAll('.hs-text-input').forEach(el => {
-      el.addEventListener('input', () => {
-        pendingResults[el.dataset.itemId] = { result: el.value };
-      });
+
+    listEl.addEventListener('change', (e) => {
+      if (e.target.classList.contains('hs-dropdown-input')) {
+        pendingResults[e.target.dataset.itemId] = { result: e.target.value };
+      }
     });
   }
 
