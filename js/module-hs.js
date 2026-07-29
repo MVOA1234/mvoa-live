@@ -36,7 +36,6 @@ MVOA.registerModule('hs', {
 const HSModule = (function () {
   const QR_TARGET_LABEL = { DGSet: 'DG Set', PanelRoom: 'DG Panel Room' };
   const FAIL_TASK_CATEGORY = { DGSet: 'Maintenance', PanelRoom: 'Electrical' };
-  const DUE_THRESHOLD_DAYS = { Daily: 1, Weekly: 7, Monthly: 30, BiMonthly: 60 };
   const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
@@ -55,6 +54,8 @@ const HSModule = (function () {
   let currentTemplate = null;
   let currentShift = '';     // '1st' | '2nd' | '3rd' — Daily only
   let pendingResults = {};   // ItemID -> { result, remarks }
+  let pendingPerformedBy = ''; // editable "who's filling this in" — defaults to logged-in user, but
+                                // editable since a technician sometimes enters on behalf of the AMC vendor
   let historyFilter = 'all'; // 'all' | 'DGSet' | 'PanelRoom'
 
   function rowsToObjs(rows, cols) {
@@ -202,22 +203,84 @@ const HSModule = (function () {
   // ───────────────────────────────────────────────────────────
   // SCAN RESULT — shows the 4 frequency templates for whichever
   // equipment was scanned, each with a due/last-completed indicator.
+  //
+  // Due logic is calendar-anchored, not a simple day-count:
+  //   Daily    — due if nothing logged yet today.
+  //   Weekly   — done every Monday; shows overdue from Tuesday onward
+  //              if that week's Monday has no log yet.
+  //   Monthly  — done in the last week of the month; overdue starts
+  //              showing from the 1st week of the FOLLOWING month if
+  //              that window closed with nothing logged. While still
+  //              inside the current month's own last week, it shows
+  //              as "Due this week" rather than overdue — there's
+  //              still time left in the window.
+  //   BiMonthly— same shape as Monthly, but the cycle only lands on
+  //              odd months starting from July (Jul/Sep/Nov/Jan/Mar/May),
+  //              matching the AMC vendor's actual visit schedule.
   // ───────────────────────────────────────────────────────────
-  function daysSince(dateStr) {
-    const t = new Date(dateStr).getTime();
-    if (isNaN(t)) return Infinity;
-    return Math.floor((Date.now() - t) / (1000 * 60 * 60 * 24));
+  function daysInMonth(y, m0) { return new Date(y, m0 + 1, 0).getDate(); }
+  function lastWeekStart(y, m0) { return new Date(y, m0, daysInMonth(y, m0) - 6, 0, 0, 0, 0); }
+  function isCycleMonth(m0, interval, anchor0) {
+    const diff = m0 - anchor0;
+    return (((diff % interval) + interval) % interval) === 0;
+  }
+  // Walks back from now to find the most recent cycle-month whose
+  // last-week window has started (interval=1 for Monthly, every month
+  // qualifies; interval=2/anchor0=6(July) for BiMonthly, only
+  // odd months qualify).
+  function currentOrLastCycleWindow(now, interval, anchor0) {
+    let y = now.getFullYear(), m0 = now.getMonth();
+    for (let i = 0; i < interval * 14; i++) {
+      if (isCycleMonth(m0, interval, anchor0)) {
+        const lw = lastWeekStart(y, m0);
+        if (lw <= now) return { start: lw, isCurrentMonth: (y === now.getFullYear() && m0 === now.getMonth()) };
+      }
+      m0--; if (m0 < 0) { m0 = 11; y--; }
+    }
+    return null;
+  }
+  function mostRecentMonday(now) {
+    const d = new Date(now);
+    const day = d.getDay(); // 0=Sun..6=Sat
+    d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+    d.setHours(0, 0, 0, 0);
+    return d;
   }
   function lastLogForTemplate(templateId) {
     const matches = logsCache.filter(l => l.TemplateID === templateId).sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
     return matches[0] || null;
   }
+  function hasLogSince(templateId, sinceDate) {
+    return logsCache.some(l => l.TemplateID === templateId && new Date(l.Timestamp) >= sinceDate);
+  }
+
   function dueInfo(template) {
     const last = lastLogForTemplate(template.TemplateID);
-    if (!last) return { text: 'Never logged', overdue: true };
-    const days = daysSince(last.Timestamp);
-    const threshold = DUE_THRESHOLD_DAYS[template.Frequency] || 999;
-    return { text: `Last: ${formatDate(last.Timestamp)}`, overdue: days >= threshold };
+    const lastText = last ? `Last: ${formatDate(last.Timestamp)}` : 'Never logged';
+    const now = new Date();
+
+    if (template.Frequency === 'Daily') {
+      const doneToday = last && new Date(last.Timestamp).toDateString() === now.toDateString();
+      return { text: lastText, overdue: !doneToday };
+    }
+
+    if (template.Frequency === 'Weekly') {
+      const monday = mostRecentMonday(now);
+      const done = hasLogSince(template.TemplateID, monday);
+      if (done) return { text: lastText, overdue: false };
+      const isMonday = now.getDay() === 1;
+      return isMonday ? { text: 'Due today (Monday)', overdue: false } : { text: `Not done since ${formatDate(monday)}`, overdue: true };
+    }
+
+    // Monthly and BiMonthly share the same "last week of a cycle month" shape
+    const interval = template.Frequency === 'BiMonthly' ? 2 : 1;
+    const anchor0 = 6; // July, 0-based — only relevant when interval=2
+    const win = currentOrLastCycleWindow(now, interval, anchor0);
+    if (!win) return { text: lastText, overdue: true };
+    const done = hasLogSince(template.TemplateID, win.start);
+    if (done) return { text: lastText, overdue: false };
+    if (win.isCurrentMonth) return { text: 'Due this week', overdue: false };
+    return { text: `Overdue since ${formatDate(win.start)}`, overdue: true };
   }
 
   function renderScanResult(container) {
@@ -257,6 +320,7 @@ const HSModule = (function () {
         currentTemplate = templateById(card.dataset.templateId);
         currentShift = '';
         pendingResults = {};
+        pendingPerformedBy = MVOA.getUser().name;
         renderChecklistForm(container);
       });
     });
@@ -273,6 +337,11 @@ const HSModule = (function () {
           <button id="hs-back-scan" class="btn-secondary">← Back</button>
           <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}</strong>
         </div>
+        <div class="card" style="max-width:420px;margin:0 0 12px 0;">
+          <label>Performed By
+            <input type="text" id="hs-performed-by" value="${escapeHtml(pendingPerformedBy)}">
+          </label>
+        </div>
         <div class="card" style="max-width:420px;margin:0;">
           <p class="muted" style="margin:0 0 10px;">Which shift is this for?</p>
           <button class="btn-primary hs-shift-btn" data-shift="1st" style="width:100%;margin-bottom:8px;">1st Shift</button>
@@ -280,6 +349,7 @@ const HSModule = (function () {
           <button class="btn-secondary hs-shift-btn" data-shift="3rd" style="width:100%;">3rd Shift</button>
         </div>
       `;
+      container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; });
       container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
       container.querySelectorAll('.hs-shift-btn').forEach(btn => {
         btn.addEventListener('click', () => { currentShift = btn.dataset.shift; renderChecklistForm(container); });
@@ -298,6 +368,11 @@ const HSModule = (function () {
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
         <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isDaily ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}</strong>
       </div>
+      <div class="card" style="max-width:600px;margin:0 0 12px 0;">
+        <label>Performed By
+          <input type="text" id="hs-performed-by" value="${escapeHtml(pendingPerformedBy)}">
+        </label>
+      </div>
       <div id="hs-items-list"></div>
       <div class="card" style="max-width:600px;margin:12px 0;">
         <label>Overall Notes (optional)
@@ -307,6 +382,7 @@ const HSModule = (function () {
         <p class="error-text" id="hs-form-error"></p>
       </div>
     `;
+    container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; });
     container.querySelector('#hs-back-scan').addEventListener('click', () => { currentShift = ''; renderScanResult(container); });
 
     const listEl = container.querySelector('#hs-items-list');
@@ -399,6 +475,10 @@ const HSModule = (function () {
   async function submitChecklist(container, items) {
     if (isSubmittingChecklist) return;
     const errEl = container.querySelector('#hs-form-error');
+    if (!pendingPerformedBy || !pendingPerformedBy.trim()) {
+      errEl.textContent = 'Please enter who performed this checklist.';
+      return;
+    }
     const missing = items.filter(i => i.InputType === 'PassFail' && !pendingResults[i.ItemID]?.result);
     if (missing.length) {
       errEl.textContent = `Please mark Pass or Fail for: ${missing.map(i => i.CheckItem).join(', ')}`;
@@ -416,7 +496,7 @@ const HSModule = (function () {
     submitBtn.textContent = 'Submitting…';
 
     try {
-      const user = MVOA.getUser();
+      const performedBy = pendingPerformedBy.trim();
       const notes = container.querySelector('#hs-overall-notes').value.trim();
       const now = new Date().toISOString();
 
@@ -426,7 +506,7 @@ const HSModule = (function () {
 
       const anyFail = items.some(i => pendingResults[i.ItemID]?.result === 'Fail');
       const logRow = LOG_COLS.map(c => ({
-        LogID: logId, TemplateID: currentTemplate.TemplateID, PerformedBy: user.name,
+        LogID: logId, TemplateID: currentTemplate.TemplateID, PerformedBy: performedBy,
         Timestamp: now, Shift: currentShift || '', Status: anyFail ? 'Flagged' : 'Submitted', Notes: notes
       })[c]);
       await MVOA.sheetsAppend(MVOA.TABS.hsLog, logRow);
@@ -452,10 +532,10 @@ const HSModule = (function () {
           await MVOA.createOpsTask({
             categoryName: FAIL_TASK_CATEGORY[currentScan.qrTarget],
             title: `Plant Rounds: ${item.CheckItem} failed — ${QR_TARGET_LABEL[currentScan.qrTarget]}`,
-            description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nLogged by ${user.name} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
+            description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nLogged by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
             assigneeTitle: 'Facility Manager',
             priority: 'Urgent',
-            createdBy: user.name
+            createdBy: performedBy
           });
         } catch (e) {
           // Non-critical to the checklist submission itself, but surface it —
