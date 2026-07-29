@@ -103,7 +103,10 @@ const HSModule = (function () {
       </div>
       <div class="mvoa-row" style="margin-bottom:10px;">
         <p class="muted" style="margin:0;">Recent activity</p>
-        <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
+        <div>
+          <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
+          <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
+        </div>
       </div>
       <div id="hs-recent"></div>
     `;
@@ -111,6 +114,53 @@ const HSModule = (function () {
     recentEl.innerHTML = recent.length ? recent.map(l => logCardHtml(l)).join('') : '<p class="muted">No checklist rounds logged yet.</p>';
     container.querySelector('#hs-scan-btn').addEventListener('click', () => openQrScanner(container));
     container.querySelector('#hs-history-btn').addEventListener('click', () => renderHistory(container));
+    container.querySelector('#hs-due-dashboard-btn').addEventListener('click', () => renderDueDashboard(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // DUE STATUS DASHBOARD — every template's status at a glance,
+  // without needing to scan first. Informational only: tapping a
+  // card here does NOT open the entry form, since actual logging is
+  // meant to happen at the equipment (verified via QR scan) — this
+  // is just for checking what needs attention from anywhere.
+  // ───────────────────────────────────────────────────────────
+  function renderDueDashboard(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <strong>📊 Due Status</strong>
+      </div>
+      <p class="muted" style="margin:0 0 12px;">Overdue items are listed first. Scan the equipment QR to actually log a checklist.</p>
+      <div id="hs-due-groups"></div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+
+    const groupsEl = container.querySelector('#hs-due-groups');
+    const groups = ['DGSet', 'PanelRoom'].map(target => {
+      const rows = templatesCache
+        .filter(t => t.QRTarget === target)
+        .map(t => ({ template: t, due: dueInfo(t) }))
+        .sort((a, b) => {
+          if (a.due.overdue !== b.due.overdue) return a.due.overdue ? -1 : 1;
+          return FREQUENCY_ORDER.indexOf(a.template.Frequency) - FREQUENCY_ORDER.indexOf(b.template.Frequency);
+        });
+      return { target, rows };
+    });
+
+    groupsEl.innerHTML = groups.map(g => `
+      <div class="card" style="max-width:600px;margin:0 0 16px 0;">
+        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(QR_TARGET_LABEL[g.target])}</h3>
+        ${g.rows.map(r => `
+          <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
+            <span>${FREQUENCY_LABEL[r.template.Frequency]}</span>
+            <span style="text-align:right;">
+              ${r.due.overdue ? '<span style="color:#b3261e;font-weight:700;font-size:0.85rem;">⚠️ Due</span>' : '<span class="muted" style="font-size:0.85rem;">Up to date</span>'}
+              <br><span class="muted" style="font-size:0.75rem;">${escapeHtml(r.due.text)}</span>
+            </span>
+          </div>
+        `).join('')}
+      </div>
+    `).join('');
   }
 
   function templateById(id) { return templatesCache.find(t => t.TemplateID === id); }
