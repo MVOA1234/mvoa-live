@@ -575,6 +575,57 @@ const MVOA = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
+  // Single source of truth for the OpsTasks column order — module-ops.js
+  // has its own copy for its normal read/write flow, but any OTHER
+  // module creating a task (e.g. Plant Rounds auto-flagging a failed
+  // checklist item) must match this exactly, so it's centralized here
+  // rather than duplicated blindly. If Daily Ops' schema changes, both
+  // copies need updating together.
+  const OPS_TASK_COLS = ['TaskID','Title','Description','Priority','AssetID','AssetName',
+    'CreatedBy','CreatedDate','PhotoURL_Initial','Status','ComplianceComment',
+    'PhotoURL_Compliance','ClosedDate','ClosedBy','CategoryID','AssignedTo',
+    'AttachmentURL_2','AttachmentURL_3',
+    'ComplianceAttachmentURL_2','ComplianceAttachmentURL_3',
+    'NoteCount','LastNoteAt','LastNoteAuthor','CreatorLastSeenNotesAt','AssigneeLastSeenNotesAt',
+    'AssigneeSeenAt','DelegatedTo'];
+
+  // Creates a Daily Ops task from another module (currently: Plant
+  // Rounds auto-flagging a failed checklist item). categoryName must
+  // match an OpsCategories.Name exactly; assigneeTitle is resolved to
+  // the first active user whose displayTitle() matches (e.g.
+  // "Facility Manager") — if nobody matches, the task is created
+  // unassigned rather than failing outright, since a system-generated
+  // task with no valid target title still shouldn't silently vanish.
+  // Returns the new TaskID.
+  async function createOpsTask({ categoryName, title, description, assigneeTitle, priority, createdBy }) {
+    const [categories, existingRows, users] = await Promise.all([
+      loadCategories(), sheetsRead(TABS.opsTasks), loadRoles()
+    ]);
+    const category = categories.find(c => c.Name === categoryName);
+    if (!category) throw new Error(`createOpsTask: no category named "${categoryName}"`);
+    const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+    const taskId = nextId('TASK', existingIds);
+    let assignedTo = '';
+    if (assigneeTitle) {
+      const person = users.find(u => u.active && displayTitle(u) === assigneeTitle);
+      if (person) assignedTo = 'user:' + person.name;
+    }
+    const now = new Date().toISOString();
+    const row = {
+      TaskID: taskId, Title: title, Description: description || '', Priority: priority || 'Medium',
+      AssetID: '', AssetName: '', CreatedBy: createdBy || 'System', CreatedDate: now,
+      PhotoURL_Initial: '', Status: 'Open', ComplianceComment: '', PhotoURL_Compliance: '',
+      ClosedDate: '', ClosedBy: '', CategoryID: category.CategoryID, AssignedTo: assignedTo,
+      AttachmentURL_2: '', AttachmentURL_3: '', ComplianceAttachmentURL_2: '', ComplianceAttachmentURL_3: '',
+      NoteCount: '', LastNoteAt: '', LastNoteAuthor: '', CreatorLastSeenNotesAt: '', AssigneeLastSeenNotesAt: '',
+      AssigneeSeenAt: '', DelegatedTo: ''
+    };
+    await sheetsAppend(TABS.opsTasks, OPS_TASK_COLS.map(c => row[c] !== undefined ? row[c] : ''));
+    await logAudit({ module: 'DailyOps', requestId: taskId, eventType: 'Created', comment: title + ' (auto-created by Plant Rounds)', statusAfter: 'Open' });
+    return taskId;
+  }
+
+  // ───────────────────────────────────────────────────────────
   // PHOTO CAPTURE (camera on phone via <input capture>, file picker
   // on desktop — same input element handles both automatically)
   // Captured photos are resized/compressed client-side before they're
@@ -877,7 +928,7 @@ const MVOA = (function () {
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
     loadNotesForTask, appendNote,
-    logAudit, nextId,
+    logAudit, nextId, createOpsTask,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
     logoSvg,
     statusBadgeHtml, STATUS_STYLES,
