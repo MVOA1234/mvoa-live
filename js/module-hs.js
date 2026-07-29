@@ -106,15 +106,36 @@ const HSModule = (function () {
         <div>
           <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
           <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
+          <button id="hs-reports-btn" class="btn-secondary">📈 More Reports</button>
         </div>
       </div>
       <div id="hs-recent"></div>
     `;
     const recentEl = container.querySelector('#hs-recent');
     recentEl.innerHTML = recent.length ? recent.map(l => logCardHtml(l)).join('') : '<p class="muted">No checklist rounds logged yet.</p>';
+    wireLogCardDrilldowns(recentEl);
     container.querySelector('#hs-scan-btn').addEventListener('click', () => openQrScanner(container));
     container.querySelector('#hs-history-btn').addEventListener('click', () => renderHistory(container));
     container.querySelector('#hs-due-dashboard-btn').addEventListener('click', () => renderDueDashboard(container));
+    container.querySelector('#hs-reports-btn').addEventListener('click', () => renderReportsMenu(container));
+  }
+
+  function renderReportsMenu(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <strong>📈 Reports</strong>
+      </div>
+      <div class="card" style="max-width:420px;margin:0;">
+        <button id="hs-report-failed" class="btn-secondary" style="width:100%;margin-bottom:8px;">❌ Failed Items Log</button>
+        <button id="hs-report-tasks" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔗 Auto-Flagged Task Resolution</button>
+        <button id="hs-report-shift" class="btn-secondary" style="width:100%;">🕐 Shift Coverage (Daily)</button>
+      </div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+    container.querySelector('#hs-report-failed').addEventListener('click', () => renderFailedItemsReport(container));
+    container.querySelector('#hs-report-tasks').addEventListener('click', () => renderTaskResolutionReport(container));
+    container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
   }
 
   // ───────────────────────────────────────────────────────────
@@ -169,15 +190,55 @@ const HSModule = (function () {
     const t = templateById(l.TemplateID);
     const flagged = l.Status === 'Flagged';
     return `
-      <div class="mvoa-list-item">
+      <div class="mvoa-list-item" data-log-id="${l.LogID}">
         <div class="mvoa-row">
           <strong>${escapeHtml(t ? QR_TARGET_LABEL[t.QRTarget] + ' — ' + FREQUENCY_LABEL[t.Frequency] : l.TemplateID)}</strong>
           ${flagged ? MVOA.statusBadgeHtml('Critical') : MVOA.statusBadgeHtml('Approved')}
         </div>
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(l.PerformedBy)} · ${formatDate(l.Timestamp)}${l.Shift ? ' · Shift: ' + shiftLabel(l.Shift) : ''}</p>
         ${l.Notes ? `<p class="muted" style="margin:4px 0;font-size:0.85rem;">${escapeHtml(l.Notes)}</p>` : ''}
+        <button class="hs-logcard-toggle btn-secondary" data-log-id="${l.LogID}" style="font-size:0.8rem;padding:4px 10px;margin-top:4px;">▸ View Details</button>
+        <div class="hs-logcard-details hidden" data-log-id="${l.LogID}"></div>
       </div>
     `;
+  }
+
+  async function renderLogDetails(detailsEl, logId) {
+    detailsEl.innerHTML = '<p class="muted" style="font-size:0.8rem;padding-top:6px;">Loading…</p>';
+    let results;
+    try {
+      results = await loadItemResults();
+    } catch (e) {
+      detailsEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const rows = results.filter(r => r.LogID === logId);
+    detailsEl.innerHTML = rows.length ? rows.map(r => {
+      const item = itemsCache.find(i => i.ItemID === r.ItemID);
+      const resultHtml = r.Result === 'Fail' ? '<span style="color:#b3261e;font-weight:700;">✕ Fail</span>'
+        : r.Result === 'Pass' ? '<span style="color:green;font-weight:700;">✓ Pass</span>'
+        : escapeHtml(r.Result);
+      return `
+        <div style="padding:5px 0;border-top:1px solid var(--border);">
+          <div class="mvoa-row"><span style="font-size:0.9rem;">${escapeHtml(item ? item.CheckItem : r.ItemID)}</span><span style="font-size:0.85rem;">${resultHtml}</span></div>
+          ${r.Remarks ? `<p class="muted" style="font-size:0.8rem;margin:2px 0;">${escapeHtml(r.Remarks)}</p>` : ''}
+        </div>
+      `;
+    }).join('') : '<p class="muted" style="font-size:0.8rem;padding-top:6px;">No item results found for this round.</p>';
+  }
+
+  function wireLogCardDrilldowns(scope) {
+    scope.querySelectorAll('.hs-logcard-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const logId = btn.dataset.logId;
+        const details = scope.querySelector(`.hs-logcard-details[data-log-id="${logId}"]`);
+        const isHidden = details.classList.contains('hidden');
+        if (!isHidden) { details.classList.add('hidden'); btn.textContent = '▸ View Details'; return; }
+        details.classList.remove('hidden');
+        btn.textContent = '▾ Hide Details';
+        renderLogDetails(details, logId);
+      });
+    });
   }
 
   function shiftLabel(s) { return s === '2nd3rd' ? '2nd & 3rd' : s; } // '2nd3rd' kept for reading old log entries only — no longer written
@@ -606,6 +667,176 @@ const HSModule = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
+  // Shared helpers for the reports below
+  // ───────────────────────────────────────────────────────────
+  async function loadItemResults() {
+    const rows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
+    return rowsToObjs(rows, RESULT_COLS);
+  }
+
+  // OpsTasks column indexes — must match OPS_TASK_COLS in shared.js.
+  // Read directly by index rather than pulling in module-ops.js's own
+  // column list, since modules don't share internals with each other.
+  const OPS_TASK_COL_IDX = { Title: 1, Description: 2, Status: 9, ClosedDate: 12, ClosedBy: 13 };
+  async function findAutoFlaggedTask(logId, checkItem) {
+    const rows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+    const marker = `(Plant Rounds log ${logId})`;
+    return rows.slice(1).find(r =>
+      (r[OPS_TASK_COL_IDX.Description] || '').indexOf(marker) !== -1 &&
+      (r[OPS_TASK_COL_IDX.Title] || '').indexOf(checkItem) !== -1
+    ) || null;
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // FAILED ITEMS LOG
+  // ───────────────────────────────────────────────────────────
+  let failedItemsFilter = 'all';
+  async function renderFailedItemsReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>❌ Failed Items Log</strong>
+      </div>
+      <div class="ops-tabs" style="margin-bottom:10px;">
+        <button data-filter="all" class="ops-tab-btn ${failedItemsFilter==='all'?'active':''}">All</button>
+        <button data-filter="DGSet" class="ops-tab-btn ${failedItemsFilter==='DGSet'?'active':''}">DG Set</button>
+        <button data-filter="PanelRoom" class="ops-tab-btn ${failedItemsFilter==='PanelRoom'?'active':''}">DG Panel Room</button>
+      </div>
+      <div id="hs-failed-list"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelectorAll('.ops-tab-btn[data-filter]').forEach(btn => {
+      btn.addEventListener('click', () => { failedItemsFilter = btn.dataset.filter; renderFailedItemsReport(container); });
+    });
+
+    const listEl = container.querySelector('#hs-failed-list');
+    let results;
+    try {
+      results = await loadItemResults();
+    } catch (e) {
+      listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const fails = results
+      .filter(r => r.Result === 'Fail')
+      .map(r => {
+        const log = logsCache.find(l => l.LogID === r.LogID);
+        const item = itemsCache.find(i => i.ItemID === r.ItemID);
+        const template = log ? templateById(log.TemplateID) : null;
+        return { r, log, item, template };
+      })
+      .filter(x => failedItemsFilter === 'all' || (x.template && x.template.QRTarget === failedItemsFilter))
+      .sort((a, b) => (b.log ? b.log.Timestamp : '').localeCompare(a.log ? a.log.Timestamp : ''));
+
+    listEl.innerHTML = fails.length ? fails.map(x => `
+      <div class="mvoa-list-item">
+        <div class="mvoa-row">
+          <strong>${escapeHtml(x.item ? x.item.CheckItem : x.r.ItemID)}</strong>
+          ${MVOA.statusBadgeHtml('Critical')}
+        </div>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.template ? escapeHtml(QR_TARGET_LABEL[x.template.QRTarget] + ' — ' + FREQUENCY_LABEL[x.template.Frequency]) : ''} · ${x.log ? escapeHtml(x.log.PerformedBy) + ' · ' + formatDate(x.log.Timestamp) : ''}</p>
+        ${x.r.Remarks ? `<p style="margin:4px 0;font-size:0.9rem;">${escapeHtml(x.r.Remarks)}</p>` : ''}
+      </div>
+    `).join('') : '<p class="muted">No failed items found.</p>';
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // AUTO-FLAGGED TASK RESOLUTION
+  // ───────────────────────────────────────────────────────────
+  async function renderTaskResolutionReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>🔗 Auto-Flagged Task Resolution</strong>
+      </div>
+      <div id="hs-task-res-list"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const listEl = container.querySelector('#hs-task-res-list');
+    let results, opsTaskRows;
+    try {
+      [results, opsTaskRows] = await Promise.all([loadItemResults(), MVOA.sheetsRead(MVOA.TABS.opsTasks)]);
+    } catch (e) {
+      listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const fails = results.filter(r => r.Result === 'Fail').map(r => {
+      const log = logsCache.find(l => l.LogID === r.LogID);
+      const item = itemsCache.find(i => i.ItemID === r.ItemID);
+      const marker = `(Plant Rounds log ${r.LogID})`;
+      const taskRow = opsTaskRows.slice(1).find(row =>
+        (row[OPS_TASK_COL_IDX.Description] || '').indexOf(marker) !== -1 &&
+        item && (row[OPS_TASK_COL_IDX.Title] || '').indexOf(item.CheckItem) !== -1
+      );
+      return { r, log, item, taskRow };
+    }).sort((a, b) => (b.log ? b.log.Timestamp : '').localeCompare(a.log ? a.log.Timestamp : ''));
+
+    listEl.innerHTML = fails.length ? fails.map(x => {
+      const status = x.taskRow ? x.taskRow[OPS_TASK_COL_IDX.Status] : null;
+      return `
+        <div class="mvoa-list-item">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(x.item ? x.item.CheckItem : x.r.ItemID)}</strong>
+            ${status === 'Closed' ? MVOA.statusBadgeHtml('Approved') : status === 'Open' ? MVOA.statusBadgeHtml('Critical') : '<span class="muted">No task found</span>'}
+          </div>
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.log ? formatDate(x.log.Timestamp) : ''}</p>
+          ${status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed by ${escapeHtml(x.taskRow[OPS_TASK_COL_IDX.ClosedBy])} · ${formatDate(x.taskRow[OPS_TASK_COL_IDX.ClosedDate])}</p>` : ''}
+        </div>
+      `;
+    }).join('') : '<p class="muted">No failed items found.</p>';
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SHIFT COVERAGE (Daily templates only)
+  // ───────────────────────────────────────────────────────────
+  function renderShiftCoverageReport(container) {
+    const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily');
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today); d.setDate(d.getDate() - i);
+      days.push(d);
+    }
+    function loggedShifts(templateId, day) {
+      const set = new Set();
+      logsCache.filter(l => l.TemplateID === templateId && new Date(l.Timestamp).toDateString() === day.toDateString())
+        .forEach(l => {
+          if (l.Shift === '2nd3rd') { set.add('2nd'); set.add('3rd'); }
+          else if (l.Shift) set.add(l.Shift);
+        });
+      return set;
+    }
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>🕐 Shift Coverage — Last 7 Days</strong>
+      </div>
+      <div id="hs-shift-tables"></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const tablesEl = container.querySelector('#hs-shift-tables');
+    tablesEl.innerHTML = dailyTemplates.map(t => `
+      <div class="card" style="max-width:600px;margin:0 0 16px 0;">
+        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(QR_TARGET_LABEL[t.QRTarget])}</h3>
+        <div style="overflow-x:auto;">
+          <table class="mvoa-table">
+            <thead><tr><th>Date</th><th>1st</th><th>2nd</th><th>3rd</th></tr></thead>
+            <tbody>
+              ${days.map(d => {
+                const shifts = loggedShifts(t.TemplateID, d);
+                const cell = (s) => shifts.has(s) ? '<span style="color:green;">✓</span>' : '<span style="color:#b3261e;">✕</span>';
+                return `<tr><td>${d.toLocaleDateString()}</td><td>${cell('1st')}</td><td>${cell('2nd')}</td><td>${cell('3rd')}</td></tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // ───────────────────────────────────────────────────────────
   // HISTORY
   // ───────────────────────────────────────────────────────────
   function renderHistory(container) {
@@ -613,6 +844,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-home" class="btn-secondary">← Home</button>
         <strong>📅 Checklist History</strong>
+
       </div>
       <div class="ops-tabs" style="margin-bottom:10px;">
         <button data-filter="all" class="ops-tab-btn ${historyFilter==='all'?'active':''}">All</button>
@@ -631,6 +863,7 @@ const HSModule = (function () {
       .filter(l => historyFilter === 'all' || (templateById(l.TemplateID) || {}).QRTarget === historyFilter)
       .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
     listEl.innerHTML = filtered.length ? filtered.map(l => logCardHtml(l)).join('') : '<p class="muted">No checklist rounds found.</p>';
+    wireLogCardDrilldowns(listEl);
   }
 
   function escapeHtml(s) {
