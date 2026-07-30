@@ -53,7 +53,8 @@ const MVOA = (function () {
     expenseRequests: 'Expense_Requests',
     expenseVotes: 'Expense_Votes',
     approvalMatrix: 'ApprovalMatrix',
-    permissionsMatrixDailyOps: 'PermissionsMatrix_DailyOps'
+    permissionsMatrixDailyOps: 'PermissionsMatrix_DailyOps',
+    permissionsMatrixPlantRounds: 'PermissionsMatrix_PlantRounds'
   };
 
   // ───────────────────────────────────────────────────────────
@@ -505,6 +506,48 @@ const MVOA = (function () {
     return true;
   }
 
+  // ───────────────────────────────────────────────────────────
+  // PLANT ROUNDS & COMPLIANCE — its own separate Title-based matrix,
+  // same Section|Title|AccessLevel shape as Daily Ops but a distinct
+  // sheet tab, since access rules differ per module. Unlike Daily Ops,
+  // this module never had a legacy AllowedRoles/AllowedUsers system to
+  // fall back to, so a section with NO matrix rows yet defaults to
+  // fully open (matches the module's current unrestricted state) —
+  // this only matters for a brand-new category added before its rows
+  // are populated; once a section has any rows, only listed Titles
+  // have access, unlisted Titles have none.
+  // ───────────────────────────────────────────────────────────
+  let plantRoundsPermMatrixCache = null;
+  async function loadPlantRoundsPermissionsMatrix(force) {
+    if (plantRoundsPermMatrixCache && !force) return plantRoundsPermMatrixCache;
+    const rows = await sheetsRead(TABS.permissionsMatrixPlantRounds);
+    const map = {};
+    rows.slice(1).forEach(r => {
+      const section = (r[0] || '').trim();
+      const title = (r[1] || '').trim();
+      const level = (r[2] || '').trim();
+      if (!section || !title || !level) return;
+      if (!map[section]) map[section] = {};
+      map[section][title] = level;
+    });
+    plantRoundsPermMatrixCache = map;
+    return plantRoundsPermMatrixCache;
+  }
+  function canEditPlantRoundsSection(sectionName, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = plantRoundsPermMatrixCache && plantRoundsPermMatrixCache[sectionName];
+    if (!sectionMatrix) return true; // no rows for this section yet — stays open until populated
+    return sectionMatrix[displayTitle(user)] === 'Edit';
+  }
+  function canViewPlantRoundsSection(sectionName, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = plantRoundsPermMatrixCache && plantRoundsPermMatrixCache[sectionName];
+    if (!sectionMatrix) return true;
+    return !!sectionMatrix[displayTitle(user)];
+  }
+
   // Checks whether a given AssignedTo value ("user:Name" or "tech:ID") —
   // not necessarily the currently logged-in user — would have Edit
   // rights on a category. Used to warn at assignment time (New Task /
@@ -927,6 +970,7 @@ const MVOA = (function () {
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
+    loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection,
     loadNotesForTask, appendNote,
     logAudit, nextId, createOpsTask,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
