@@ -40,7 +40,7 @@ const HSModule = (function () {
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
   const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active'];
-  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active'];
+  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
@@ -543,6 +543,26 @@ const HSModule = (function () {
         </div>
         <textarea class="hs-remarks-input ${current.result === 'Fail' ? '' : 'hidden'}" data-item-id="${item.ItemID}" rows="2" placeholder="Remarks (required for Fail)" style="width:100%;margin-top:6px;box-sizing:border-box;">${escapeHtml(current.remarks || '')}</textarea>
       `;
+    } else if (item.InputType === 'Numeric') {
+      // If FailThreshold is set, auto-evaluates Pass/Fail as the
+      // technician types (e.g. Battery Voltage, Fuel Level). If blank,
+      // this is a plain data-capture field with no pass/fail meaning
+      // (e.g. Running Hours in Shift) — just records the number.
+      // Deliberately does NOT replace the row's outerHTML on every
+      // keystroke (unlike PassFail/Dropdown) — that would recreate the
+      // <input> and steal focus mid-typing. Status updates in place.
+      const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
+      const statusText = current.remarks
+        ? (hasThreshold ? (current.result === 'Fail' ? '✕ Fail — ' : '✓ Pass — ') + current.remarks : current.remarks)
+        : '';
+      const statusColor = hasThreshold ? (current.result === 'Fail' ? '#b3261e' : current.result === 'Pass' ? 'green' : 'inherit') : 'inherit';
+      inputHtml = `
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+          <input type="number" step="any" inputmode="decimal" class="hs-numeric-input" data-item-id="${item.ItemID}" value="${current.numericValue !== undefined ? escapeHtml(String(current.numericValue)) : ''}" placeholder="Enter value" style="flex:1;">
+          <span class="muted">${escapeHtml(item.Unit || '')}</span>
+        </div>
+        <p class="hs-numeric-status" data-item-id="${item.ItemID}" style="margin:4px 0 0;font-size:0.85rem;font-weight:700;color:${statusColor};">${escapeHtml(statusText)}</p>
+      `;
     } else if (item.InputType === 'Dropdown') {
       const opts = itemOptionsCache.filter(o => o.ItemID === item.ItemID).sort((a, b) => (parseInt(a.OptionOrder, 10) || 0) - (parseInt(b.OptionOrder, 10) || 0));
       inputHtml = `
@@ -593,6 +613,33 @@ const HSModule = (function () {
         pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { remarks: e.target.value });
       } else if (e.target.classList.contains('hs-text-input')) {
         pendingResults[itemId] = { result: e.target.value };
+      } else if (e.target.classList.contains('hs-numeric-input')) {
+        const item = items.find(i => i.ItemID === itemId);
+        const statusEl = listEl.querySelector(`.hs-numeric-status[data-item-id="${itemId}"]`);
+        const val = parseFloat(e.target.value);
+        if (!item || isNaN(val)) {
+          pendingResults[itemId] = {};
+          if (statusEl) { statusEl.textContent = ''; }
+          return;
+        }
+        const unit = item.Unit || '';
+        const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
+        if (!hasThreshold) {
+          // Plain data-capture field (e.g. Running Hours in Shift) —
+          // no pass/fail meaning, just record the number as-is.
+          pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val };
+          if (statusEl) { statusEl.textContent = `Recorded: ${val}${unit}`; statusEl.style.color = 'inherit'; }
+          return;
+        }
+        const threshold = parseFloat(item.FailThreshold);
+        const isFail = item.FailDirection === 'above' ? val > threshold : val < threshold;
+        const result = isFail ? 'Fail' : 'Pass';
+        const remarks = `Entered: ${val}${unit} (fails if ${item.FailDirection === 'above' ? 'above' : 'below'} ${threshold}${unit})`;
+        pendingResults[itemId] = { result, remarks, numericValue: val };
+        if (statusEl) {
+          statusEl.textContent = (isFail ? '✕ Fail — ' : '✓ Pass — ') + remarks;
+          statusEl.style.color = isFail ? '#b3261e' : 'green';
+        }
       }
     });
 
@@ -615,7 +662,7 @@ const HSModule = (function () {
       errEl.textContent = 'Please enter who performed this checklist.';
       return;
     }
-    const missing = items.filter(i => i.InputType === 'PassFail' && !pendingResults[i.ItemID]?.result);
+    const missing = items.filter(i => (i.InputType === 'PassFail' || i.InputType === 'Numeric') && !pendingResults[i.ItemID]?.result);
     if (missing.length) {
       errEl.textContent = `Please mark Pass or Fail for: ${missing.map(i => i.CheckItem).join(', ')}`;
       return;
