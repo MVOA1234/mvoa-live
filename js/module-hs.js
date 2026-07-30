@@ -78,12 +78,13 @@ const HSModule = (function () {
     renderHome(container);
   }
 
-  async function loadAll() {
+  async function loadAll(force) {
     const [templates, items, options, logs] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.hsTemplates),
       MVOA.sheetsRead(MVOA.TABS.hsItems),
       MVOA.sheetsRead(MVOA.TABS.hsItemOptions),
-      MVOA.sheetsRead(MVOA.TABS.hsLog)
+      MVOA.sheetsRead(MVOA.TABS.hsLog),
+      MVOA.loadPlantRoundsPermissionsMatrix(force)
     ]);
     templatesCache = rowsToObjs(templates, TEMPLATE_COLS).filter(t => t.Active === 'TRUE' || t.Active === 'true' || t.Active === true || t.Active === '1');
     itemsCache = rowsToObjs(items, ITEM_COLS).filter(i => i.Active === 'TRUE' || i.Active === 'true' || i.Active === true || i.Active === '1');
@@ -157,16 +158,23 @@ const HSModule = (function () {
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
 
     const groupsEl = container.querySelector('#hs-due-groups');
-    const groups = ['DGSet', 'PanelRoom'].map(target => {
-      const rows = templatesCache
-        .filter(t => t.QRTarget === target)
-        .map(t => ({ template: t, due: dueInfo(t) }))
-        .sort((a, b) => {
-          if (a.due.overdue !== b.due.overdue) return a.due.overdue ? -1 : 1;
-          return FREQUENCY_ORDER.indexOf(a.template.Frequency) - FREQUENCY_ORDER.indexOf(b.template.Frequency);
-        });
-      return { target, rows };
-    });
+    const user = MVOA.getUser();
+    const groups = ['DGSet', 'PanelRoom']
+      .filter(target => MVOA.canViewPlantRoundsSection(target, user))
+      .map(target => {
+        const rows = templatesCache
+          .filter(t => t.QRTarget === target)
+          .map(t => ({ template: t, due: dueInfo(t) }))
+          .sort((a, b) => {
+            if (a.due.overdue !== b.due.overdue) return a.due.overdue ? -1 : 1;
+            return FREQUENCY_ORDER.indexOf(a.template.Frequency) - FREQUENCY_ORDER.indexOf(b.template.Frequency);
+          });
+        return { target, rows };
+      });
+    if (!groups.length) {
+      groupsEl.innerHTML = '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
+      return;
+    }
 
     groupsEl.innerHTML = groups.map(g => `
       <div class="card" style="max-width:600px;margin:0 0 16px 0;">
@@ -395,6 +403,22 @@ const HSModule = (function () {
   }
 
   function renderScanResult(container) {
+    const user = MVOA.getUser();
+    const canView = MVOA.canViewPlantRoundsSection(currentScan.qrTarget, user);
+    const canEdit = MVOA.canEditPlantRoundsSection(currentScan.qrTarget, user);
+
+    if (!canView) {
+      container.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="hs-back-home" class="btn-secondary">← Home</button>
+          <strong>${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}</strong>
+        </div>
+        <p class="muted">You don't have access to ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}.</p>
+      `;
+      container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+      return;
+    }
+
     const targetTemplates = templatesCache
       .filter(t => t.QRTarget === currentScan.qrTarget)
       .sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
@@ -404,7 +428,7 @@ const HSModule = (function () {
         <button id="hs-back-home" class="btn-secondary">← Home</button>
         <strong>${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}${currentScan.assetName ? ' — ' + escapeHtml(currentScan.assetName) : ''}</strong>
       </div>
-      <p class="muted" style="margin:0 0 12px;">Choose which checklist to log.</p>
+      <p class="muted" style="margin:0 0 12px;">${canEdit ? 'Choose which checklist to log.' : "View only — you don't have edit access here."}</p>
       <div id="hs-template-cards"></div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
@@ -417,7 +441,7 @@ const HSModule = (function () {
     cardsEl.innerHTML = targetTemplates.map(t => {
       const due = dueInfo(t);
       return `
-        <div class="mvoa-list-item hs-template-card" data-template-id="${t.TemplateID}" style="cursor:pointer;">
+        <div class="mvoa-list-item ${canEdit ? 'hs-template-card' : ''}" data-template-id="${t.TemplateID}" style="${canEdit ? 'cursor:pointer;' : ''}">
           <div class="mvoa-row">
             <strong>${FREQUENCY_LABEL[t.Frequency]}</strong>
             ${due.overdue ? '<span style="color:#b3261e;font-weight:700;font-size:0.85rem;">⚠️ Due</span>' : '<span class="muted" style="font-size:0.85rem;">Up to date</span>'}
@@ -426,6 +450,7 @@ const HSModule = (function () {
         </div>
       `;
     }).join('');
+    if (!canEdit) return; // view-only — nothing further to wire up
     cardsEl.querySelectorAll('.hs-template-card').forEach(card => {
       card.addEventListener('click', () => {
         currentTemplate = templateById(card.dataset.templateId);
