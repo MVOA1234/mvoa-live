@@ -1,27 +1,37 @@
 // ═══════════════════════════════════════════════════════════════
 // MODULE: Plant Rounds & Compliance
 // Columns:
+//   HSCategories: CategoryKey | Label | QRMatchKeyword | FailTaskCategory | Icon | Active
+//     CategoryKey is the internal key used as HSChecklistTemplates.QRTarget
+//     (kept that column name for backward compat even though it's now a
+//     general category key, not just "which QR target"). QRMatchKeyword
+//     is matched case-insensitively against the scanned asset's
+//     Category/AssetName/AssetID to figure out which category a scan
+//     belongs to. FailTaskCategory is which Daily Ops category an
+//     auto-flagged Fail task should land in.
 //   HSChecklistTemplates: TemplateID | Name | QRTarget | Frequency | Active
-//     QRTarget: 'DGSet' | 'PanelRoom'  Frequency: 'Daily'|'Weekly'|'Monthly'|'BiMonthly'
+//     QRTarget: a CategoryKey from HSCategories. Frequency: 'Daily'|'Weekly'|'Monthly'|'BiMonthly'
 //   HSChecklistItems: ItemID | TemplateID | SeqNo | CheckItem | Requirement |
-//     InputType | ShiftApplicability | Active
-//     InputType: 'PassFail' | 'Text' | 'Dropdown'
-//     ShiftApplicability (Daily only): '1st' | '2nd3rd' | 'Both'
+//     InputType | ShiftApplicability | Active | Unit | FailThreshold | FailDirection
+//     InputType: 'PassFail' | 'Text' | 'Dropdown' | 'Numeric'
+//     ShiftApplicability (Daily only): '1st' | '2nd' | '3rd' | 'Both' (legacy '2nd3rd' still read)
+//     Numeric: if FailThreshold is set, auto-evaluates Pass/Fail against
+//     it (FailDirection 'above'/'below'); if blank, just records the
+//     value with no pass/fail meaning (e.g. a running-hours meter).
 //   HSChecklistItemOptions: ItemID | OptionValue | OptionOrder   (Dropdown items only)
 //   HSChecklistLog: LogID | TemplateID | PerformedBy | Timestamp | Shift | Status | Notes
 //     Status: 'Submitted' | 'Flagged'
 //   HSChecklistItemResults: ResultID | LogID | ItemID | Result | Remarks
 //
 // QR SCANNING: reuses the same MVOA.parseAssetQR() format/scanner as
-// Daily Ops asset scanning. QRTarget is inferred from the scanned
-// asset's Category/AssetName — anything containing "panel" maps to
-// PanelRoom, everything else maps to DGSet. If Inventory's actual
-// label text for these two assets doesn't contain "panel" clearly,
-// this heuristic will need adjusting — check on first real scan.
+// Daily Ops asset scanning. Which category a scan belongs to is looked
+// up from HSCategories' QRMatchKeyword — adding a new category is a
+// pure data change (a new HSCategories row + templates/items), no code
+// change needed.
 //
-// AUTO-FLAGGING: a PassFail item marked "Fail" automatically creates
-// a Daily Ops task assigned to Facility Manager — DGSet failures go
-// to the "Maintenance" category, PanelRoom failures go to "Electrical".
+// AUTO-FLAGGING: a Fail (PassFail, or Numeric crossing its threshold)
+// automatically creates a Daily Ops task assigned to Facility Manager,
+// in whichever Daily Ops category that HSCategories row specifies.
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('hs', {
@@ -34,17 +44,17 @@ MVOA.registerModule('hs', {
 });
 
 const HSModule = (function () {
-  const QR_TARGET_LABEL = { DGSet: 'DG Set', PanelRoom: 'DG Panel Room' };
-  const FAIL_TASK_CATEGORY = { DGSet: 'Maintenance', PanelRoom: 'Electrical' };
   const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
+  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active'];
   const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active'];
   const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
 
+  let categoriesCache = [];
   let templatesCache = [];
   let itemsCache = [];
   let itemOptionsCache = [];
@@ -56,7 +66,11 @@ const HSModule = (function () {
   let pendingResults = {};   // ItemID -> { result, remarks }
   let pendingPerformedBy = ''; // editable "who's filling this in" — defaults to logged-in user, but
                                 // editable since a technician sometimes enters on behalf of the AMC vendor
-  let historyFilter = 'all'; // 'all' | 'DGSet' | 'PanelRoom'
+  let historyFilter = 'all'; // 'all' | a CategoryKey
+
+  function categoryByKey(key) { return categoriesCache.find(c => c.CategoryKey === key); }
+  function categoryLabel(key) { const c = categoryByKey(key); return c ? c.Label : key; }
+  function failTaskCategoryFor(key) { const c = categoryByKey(key); return c ? c.FailTaskCategory : ''; }
 
   function rowsToObjs(rows, cols) {
     return rows.slice(1).map((r, i) => {
@@ -79,13 +93,15 @@ const HSModule = (function () {
   }
 
   async function loadAll(force) {
-    const [templates, items, options, logs] = await Promise.all([
+    const [categories, templates, items, options, logs] = await Promise.all([
+      MVOA.sheetsRead(MVOA.TABS.hsCategories),
       MVOA.sheetsRead(MVOA.TABS.hsTemplates),
       MVOA.sheetsRead(MVOA.TABS.hsItems),
       MVOA.sheetsRead(MVOA.TABS.hsItemOptions),
       MVOA.sheetsRead(MVOA.TABS.hsLog),
       MVOA.loadPlantRoundsPermissionsMatrix(force)
     ]);
+    categoriesCache = rowsToObjs(categories, CATEGORY_COLS).filter(c => c.Active === 'TRUE' || c.Active === 'true' || c.Active === true || c.Active === '1');
     templatesCache = rowsToObjs(templates, TEMPLATE_COLS).filter(t => t.Active === 'TRUE' || t.Active === 'true' || t.Active === true || t.Active === '1');
     itemsCache = rowsToObjs(items, ITEM_COLS).filter(i => i.Active === 'TRUE' || i.Active === 'true' || i.Active === true || i.Active === '1');
     itemOptionsCache = rowsToObjs(options, OPTION_COLS);
@@ -158,7 +174,7 @@ const HSModule = (function () {
     }
     listEl.innerHTML = rows.map((r, i) => `
       <div class="mvoa-list-item">
-        <strong>${escapeHtml(QR_TARGET_LABEL[r.template.QRTarget])} — ${shiftLabel(r.shift)} Shift</strong>
+        <strong>${escapeHtml(categoryLabel(r.template.QRTarget))} — ${shiftLabel(r.shift)} Shift</strong>
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted by ${escapeHtml(r.log.PerformedBy)} · ${formatDate(r.log.Timestamp)}</p>
         <textarea class="hs-eos-notes" data-idx="${i}" rows="3" placeholder="Report any event during this shift…" style="width:100%;box-sizing:border-box;">${escapeHtml(r.log.Notes || '')}</textarea>
         <button class="btn-primary hs-eos-save" data-idx="${i}" style="width:100%;margin-top:6px;">Save</button>
@@ -299,7 +315,7 @@ const HSModule = (function () {
 
     const groupsEl = container.querySelector('#hs-due-groups');
     const user = MVOA.getUser();
-    const groups = ['DGSet', 'PanelRoom']
+    const groups = categoriesCache.map(c => c.CategoryKey)
       .filter(target => MVOA.canViewPlantRoundsSection(target, user))
       .map(target => {
         const rows = templatesCache
@@ -318,7 +334,7 @@ const HSModule = (function () {
 
     groupsEl.innerHTML = groups.map(g => `
       <div class="card" style="max-width:600px;margin:0 0 16px 0;">
-        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(QR_TARGET_LABEL[g.target])}</h3>
+        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(categoryLabel(g.target))}</h3>
         ${g.rows.map(r => `
           <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
             <span>${FREQUENCY_LABEL[r.template.Frequency]}</span>
@@ -340,7 +356,7 @@ const HSModule = (function () {
     return `
       <div class="mvoa-list-item" data-log-id="${l.LogID}">
         <div class="mvoa-row">
-          <strong>${escapeHtml(t ? QR_TARGET_LABEL[t.QRTarget] + ' — ' + FREQUENCY_LABEL[t.Frequency] : l.TemplateID)}</strong>
+          <strong>${escapeHtml(t ? categoryLabel(t.QRTarget) + ' — ' + FREQUENCY_LABEL[t.Frequency] : l.TemplateID)}</strong>
           ${flagged ? MVOA.statusBadgeHtml('Critical') : MVOA.statusBadgeHtml('Approved')}
         </div>
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(l.PerformedBy)} · ${formatDate(l.Timestamp)}${l.Shift ? ' · Shift: ' + shiftLabel(l.Shift) : ''}</p>
@@ -393,17 +409,18 @@ const HSModule = (function () {
 
   // ───────────────────────────────────────────────────────────
   // QR SCANNER — same jsQR-based approach as Daily Ops, decoded via
-  // the shared MVOA.parseAssetQR(). QRTarget inferred from the result.
+  // the shared MVOA.parseAssetQR(). The category is looked up from
+  // HSCategories.QRMatchKeyword (case-insensitive substring match
+  // against the scanned Category/AssetName/AssetID) — adding a new
+  // category is a pure data change, no code change needed. Returns
+  // null if nothing matches, rather than guessing a default — an
+  // unrecognized scan should say so, not silently open the wrong
+  // equipment's checklist.
   // ───────────────────────────────────────────────────────────
-  // Matches your actual Inventory asset names: the Panel Room asset is
-  // literally named "DG Room" (no "panel" in it at all — the earlier
-  // "panel" keyword heuristic would have misclassified this), and the
-  // DG Set asset is "DG Set GMMCO 200 KVA". Checking for "dg room" or
-  // "panel" (kept as a fallback for any future differently-named panel
-  // asset) covers Panel Room; everything else defaults to DGSet.
   function inferQrTarget(parsed) {
     const haystack = ((parsed.category || '') + ' ' + (parsed.assetName || '') + ' ' + (parsed.assetId || '')).toLowerCase();
-    return (haystack.indexOf('dg room') !== -1 || haystack.indexOf('panel') !== -1) ? 'PanelRoom' : 'DGSet';
+    const match = categoriesCache.find(c => c.QRMatchKeyword && haystack.indexOf(c.QRMatchKeyword.toLowerCase()) !== -1);
+    return match ? match.CategoryKey : null;
   }
 
   function openQrScanner(container) {
@@ -446,10 +463,15 @@ const HSModule = (function () {
         if (code) {
           const parsed = MVOA.parseAssetQR(code.data);
           if (parsed) {
-            currentScan = Object.assign({}, parsed, { qrTarget: inferQrTarget(parsed) });
-            stop();
-            renderScanResult(container);
-            return;
+            const qrTarget = inferQrTarget(parsed);
+            if (!qrTarget) {
+              statusEl.innerHTML = `Scanned "${escapeHtml(parsed.assetName || parsed.assetId)}", but it's not set up for Plant Rounds yet.<br>Keep trying a different label or cancel.`;
+            } else {
+              currentScan = Object.assign({}, parsed, { qrTarget });
+              stop();
+              renderScanResult(container);
+              return;
+            }
           } else {
             statusEl.innerHTML = `Scanned, but not a recognised MVOA format.<br><span style="font-size:0.75rem;word-break:break-all;">Raw: ${escapeHtml(code.data)}</span><br>Keep trying or cancel.`;
           }
@@ -551,9 +573,9 @@ const HSModule = (function () {
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
           <button id="hs-back-home" class="btn-secondary">← Home</button>
-          <strong>${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}</strong>
+          <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
         </div>
-        <p class="muted">You don't have access to ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}.</p>
+        <p class="muted">You don't have access to ${escapeHtml(categoryLabel(currentScan.qrTarget))}.</p>
       `;
       container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
       return;
@@ -566,7 +588,7 @@ const HSModule = (function () {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-home" class="btn-secondary">← Home</button>
-        <strong>${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}${currentScan.assetName ? ' — ' + escapeHtml(currentScan.assetName) : ''}</strong>
+        <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}${currentScan.assetName ? ' — ' + escapeHtml(currentScan.assetName) : ''}</strong>
       </div>
       <p class="muted" style="margin:0 0 12px;">${canEdit ? 'Choose which checklist to log.' : "View only — you don't have edit access here."}</p>
       <div id="hs-template-cards"></div>
@@ -575,7 +597,7 @@ const HSModule = (function () {
 
     const cardsEl = container.querySelector('#hs-template-cards');
     if (!targetTemplates.length) {
-      cardsEl.innerHTML = `<p class="muted">No checklist templates set up yet for ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}.</p>`;
+      cardsEl.innerHTML = `<p class="muted">No checklist templates set up yet for ${escapeHtml(categoryLabel(currentScan.qrTarget))}.</p>`;
       return;
     }
     cardsEl.innerHTML = targetTemplates.map(t => {
@@ -635,7 +657,7 @@ const HSModule = (function () {
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
           <button id="hs-back-scan" class="btn-secondary">← Back</button>
-          <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}</strong>
+          <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
         </div>
         <div class="card" style="max-width:420px;margin:0 0 12px 0;">
           <label>Performed By
@@ -666,7 +688,7 @@ const HSModule = (function () {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
-        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isDaily ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(QR_TARGET_LABEL[currentScan.qrTarget])}</strong>
+        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isDaily ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
       <div class="card" style="max-width:600px;margin:0 0 12px 0;">
         <label>Performed By
@@ -889,8 +911,8 @@ const HSModule = (function () {
       for (const item of failedItems) {
         try {
           await MVOA.createOpsTask({
-            categoryName: FAIL_TASK_CATEGORY[currentScan.qrTarget],
-            title: `Plant Rounds: ${item.CheckItem} failed — ${QR_TARGET_LABEL[currentScan.qrTarget]}`,
+            categoryName: failTaskCategoryFor(currentScan.qrTarget),
+            title: `Plant Rounds: ${item.CheckItem} failed — ${categoryLabel(currentScan.qrTarget)}`,
             description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nLogged by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
             assigneeTitle: 'Facility Manager',
             priority: 'Urgent',
@@ -947,8 +969,7 @@ const HSModule = (function () {
       </div>
       <div class="ops-tabs" style="margin-bottom:10px;">
         <button data-filter="all" class="ops-tab-btn ${failedItemsFilter==='all'?'active':''}">All</button>
-        <button data-filter="DGSet" class="ops-tab-btn ${failedItemsFilter==='DGSet'?'active':''}">DG Set</button>
-        <button data-filter="PanelRoom" class="ops-tab-btn ${failedItemsFilter==='PanelRoom'?'active':''}">DG Panel Room</button>
+        ${categoriesCache.map(c => `<button data-filter="${c.CategoryKey}" class="ops-tab-btn ${failedItemsFilter===c.CategoryKey?'active':''}">${escapeHtml(c.Label)}</button>`).join('')}
       </div>
       <div id="hs-failed-list"><p class="muted">Loading…</p></div>
     `;
@@ -982,7 +1003,7 @@ const HSModule = (function () {
           <strong>${escapeHtml(x.item ? x.item.CheckItem : x.r.ItemID)}</strong>
           ${MVOA.statusBadgeHtml('Critical')}
         </div>
-        <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.template ? escapeHtml(QR_TARGET_LABEL[x.template.QRTarget] + ' — ' + FREQUENCY_LABEL[x.template.Frequency]) : ''} · ${x.log ? escapeHtml(x.log.PerformedBy) + ' · ' + formatDate(x.log.Timestamp) : ''}</p>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.template ? escapeHtml(categoryLabel(x.template.QRTarget) + ' — ' + FREQUENCY_LABEL[x.template.Frequency]) : ''} · ${x.log ? escapeHtml(x.log.PerformedBy) + ' · ' + formatDate(x.log.Timestamp) : ''}</p>
         ${x.r.Remarks ? `<p style="margin:4px 0;font-size:0.9rem;">${escapeHtml(x.r.Remarks)}</p>` : ''}
       </div>
     `).join('') : '<p class="muted">No failed items found.</p>';
@@ -1067,7 +1088,7 @@ const HSModule = (function () {
     const tablesEl = container.querySelector('#hs-shift-tables');
     tablesEl.innerHTML = dailyTemplates.map(t => `
       <div class="card" style="max-width:600px;margin:0 0 16px 0;">
-        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(QR_TARGET_LABEL[t.QRTarget])}</h3>
+        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(categoryLabel(t.QRTarget))}</h3>
         <div style="overflow-x:auto;">
           <table class="mvoa-table">
             <thead><tr><th>Date</th><th>1st</th><th>2nd</th><th>3rd</th></tr></thead>
@@ -1096,8 +1117,7 @@ const HSModule = (function () {
       </div>
       <div class="ops-tabs" style="margin-bottom:10px;">
         <button data-filter="all" class="ops-tab-btn ${historyFilter==='all'?'active':''}">All</button>
-        <button data-filter="DGSet" class="ops-tab-btn ${historyFilter==='DGSet'?'active':''}">DG Set</button>
-        <button data-filter="PanelRoom" class="ops-tab-btn ${historyFilter==='PanelRoom'?'active':''}">DG Panel Room</button>
+        ${categoriesCache.map(c => `<button data-filter="${c.CategoryKey}" class="ops-tab-btn ${historyFilter===c.CategoryKey?'active':''}">${escapeHtml(c.Label)}</button>`).join('')}
       </div>
       <div id="hs-history-list"></div>
     `;
