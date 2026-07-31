@@ -50,6 +50,7 @@ const MVOA = (function () {
     hsItemOptions: 'HSChecklistItemOptions',
     hsLog: 'HSChecklistLog',
     hsItemResults: 'HSChecklistItemResults',
+    hsCategories: 'HSCategories',
     expenseRequests: 'Expense_Requests',
     expenseVotes: 'Expense_Votes',
     approvalMatrix: 'ApprovalMatrix',
