@@ -108,6 +108,7 @@ const HSModule = (function () {
           <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
           <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
           <button id="hs-reports-btn" class="btn-secondary">📈 More Reports</button>
+          <button id="hs-eos-btn" class="btn-secondary">📝 End of Shift Report</button>
         </div>
       </div>
       <div id="hs-recent"></div>
@@ -119,6 +120,73 @@ const HSModule = (function () {
     container.querySelector('#hs-history-btn').addEventListener('click', () => renderHistory(container));
     container.querySelector('#hs-due-dashboard-btn').addEventListener('click', () => renderDueDashboard(container));
     container.querySelector('#hs-reports-btn').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelector('#hs-eos-btn').addEventListener('click', () => renderEndOfShiftPicker(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // END OF SHIFT REPORT — a separate, later step from the checklist
+  // itself. The checklist is filled at the START of a shift; this
+  // lets the technician come back at the END of their shift to note
+  // any event, on whichever of TODAY's already-submitted shifts they
+  // pick. Only shows shifts that actually have a log today — you
+  // can't report on a shift that was never submitted.
+  // ───────────────────────────────────────────────────────────
+  function renderEndOfShiftPicker(container) {
+    const user = MVOA.getUser();
+    const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily' && MVOA.canEditPlantRoundsSection(t.QRTarget, user));
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <strong>📝 End of Shift Report</strong>
+      </div>
+      <p class="muted" style="margin:0 0 12px;">Pick which of today's submitted shifts you're reporting on.</p>
+      <div id="hs-eos-list"></div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+
+    const listEl = container.querySelector('#hs-eos-list');
+    const rows = [];
+    dailyTemplates.forEach(t => {
+      ['1st', '2nd', '3rd'].forEach(shift => {
+        const log = todaysLogFor(t.TemplateID, shift);
+        if (log) rows.push({ template: t, shift, log });
+      });
+    });
+    if (!rows.length) {
+      listEl.innerHTML = '<p class="muted">No shifts have been submitted yet today.</p>';
+      return;
+    }
+    listEl.innerHTML = rows.map((r, i) => `
+      <div class="mvoa-list-item">
+        <strong>${escapeHtml(QR_TARGET_LABEL[r.template.QRTarget])} — ${shiftLabel(r.shift)} Shift</strong>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted by ${escapeHtml(r.log.PerformedBy)} · ${formatDate(r.log.Timestamp)}</p>
+        <textarea class="hs-eos-notes" data-idx="${i}" rows="3" placeholder="Report any event during this shift…" style="width:100%;box-sizing:border-box;">${escapeHtml(r.log.Notes || '')}</textarea>
+        <button class="btn-primary hs-eos-save" data-idx="${i}" style="width:100%;margin-top:6px;">Save</button>
+        <p class="error-text hs-eos-error" data-idx="${i}" style="min-height:1em;margin-top:4px;"></p>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.hs-eos-save').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = btn.dataset.idx;
+        const row = rows[idx];
+        const textarea = listEl.querySelector(`.hs-eos-notes[data-idx="${idx}"]`);
+        const errEl = listEl.querySelector(`.hs-eos-error[data-idx="${idx}"]`);
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        try {
+          const updated = Object.assign({}, row.log, { Notes: textarea.value.trim() });
+          await MVOA.sheetsUpdateRow(MVOA.TABS.hsLog, row.log.rowNumber, LOG_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
+          row.log.Notes = updated.Notes; // keep local cache in sync
+          errEl.textContent = '';
+          btn.textContent = '✓ Saved';
+          setTimeout(() => { btn.disabled = false; btn.textContent = 'Save'; }, 1500);
+        } catch (e) {
+          errEl.textContent = 'Could not save: ' + e.message;
+          btn.disabled = false;
+          btn.textContent = 'Save';
+        }
+      });
+    });
   }
 
   function renderReportsMenu(container) {
@@ -130,13 +198,85 @@ const HSModule = (function () {
       <div class="card" style="max-width:420px;margin:0;">
         <button id="hs-report-failed" class="btn-secondary" style="width:100%;margin-bottom:8px;">❌ Failed Items Log</button>
         <button id="hs-report-tasks" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔗 Auto-Flagged Task Resolution</button>
-        <button id="hs-report-shift" class="btn-secondary" style="width:100%;">🕐 Shift Coverage (Daily)</button>
+        <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
+        <button id="hs-report-hours" class="btn-secondary" style="width:100%;">⏱️ DG Running Hours</button>
       </div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
     container.querySelector('#hs-report-failed').addEventListener('click', () => renderFailedItemsReport(container));
     container.querySelector('#hs-report-tasks').addEventListener('click', () => renderTaskResolutionReport(container));
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
+    container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // DG RUNNING HOURS — the meter reading logged each shift is
+  // cumulative, not "hours run this shift". This computes actual
+  // hours run per shift as the difference to the NEXT chronological
+  // reading (so Shift 1's hours = Shift 2's reading minus Shift 1's;
+  // Shift 3's hours = the following day's Shift 1 reading minus
+  // today's Shift 3 reading) — same logic regardless of which shift,
+  // since it's just "next reading minus this one" in time order.
+  // ───────────────────────────────────────────────────────────
+  async function renderRunningHoursReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>⏱️ DG Running Hours</strong>
+      </div>
+      <div id="hs-hours-list"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const listEl = container.querySelector('#hs-hours-list');
+    const item = itemsCache.find(i => /running hours/i.test(i.CheckItem));
+    if (!item) {
+      listEl.innerHTML = '<p class="muted">No running-hours meter item is configured yet.</p>';
+      return;
+    }
+    let results;
+    try {
+      results = await loadItemResults();
+    } catch (e) {
+      listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const readings = results
+      .filter(r => r.ItemID === item.ItemID)
+      .map(r => {
+        const log = logsCache.find(l => l.LogID === r.LogID);
+        return log ? { value: parseFloat(r.Result), timestamp: log.Timestamp, shift: log.Shift, performedBy: log.PerformedBy } : null;
+      })
+      .filter(x => x && !isNaN(x.value))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    if (!readings.length) {
+      listEl.innerHTML = '<p class="muted">No readings logged yet.</p>';
+      return;
+    }
+    const rows = readings.map((r, i) => {
+      const next = readings[i + 1];
+      const hoursRun = next ? Math.round((next.value - r.value) * 100) / 100 : null;
+      return Object.assign({}, r, { hoursRun });
+    }).reverse(); // most recent first
+
+    listEl.innerHTML = `
+      <div class="card" style="max-width:600px;margin:0;overflow-x:auto;">
+        <table class="mvoa-table">
+          <thead><tr><th>Date</th><th>Shift</th><th>Reading</th><th>Hours Run</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${formatDate(r.timestamp)}</td>
+                <td>${shiftLabel(r.shift)}</td>
+                <td>${r.value}</td>
+                <td>${r.hoursRun !== null ? r.hoursRun : '<span class="muted">— (awaiting next reading)</span>'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
   }
 
   // ───────────────────────────────────────────────────────────
@@ -465,9 +605,33 @@ const HSModule = (function () {
   // ───────────────────────────────────────────────────────────
   // CHECKLIST FILL FORM
   // ───────────────────────────────────────────────────────────
+  function hasSubmittedToday(templateId, shift) {
+    const today = new Date().toDateString();
+    return logsCache.some(l => {
+      if (l.TemplateID !== templateId) return false;
+      if (new Date(l.Timestamp).toDateString() !== today) return false;
+      if (!shift) return true; // non-Daily: no shift concept, just "any log today"
+      return l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'));
+    });
+  }
+  function todaysLogFor(templateId, shift) {
+    const today = new Date().toDateString();
+    return logsCache.find(l =>
+      l.TemplateID === templateId &&
+      new Date(l.Timestamp).toDateString() === today &&
+      (l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd')))
+    ) || null;
+  }
+
   function renderChecklistForm(container) {
     const isDaily = currentTemplate.Frequency === 'Daily';
     if (isDaily && !currentShift) {
+      const shiftDone = { '1st': hasSubmittedToday(currentTemplate.TemplateID, '1st'),
+        '2nd': hasSubmittedToday(currentTemplate.TemplateID, '2nd'),
+        '3rd': hasSubmittedToday(currentTemplate.TemplateID, '3rd') };
+      const shiftBtn = (shift, label) => shiftDone[shift]
+        ? `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Already submitted today</button>`
+        : `<button class="btn-${shift === '1st' ? 'primary' : 'secondary'} hs-shift-btn" data-shift="${shift}" style="width:100%;margin-bottom:8px;">${label}</button>`;
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
           <button id="hs-back-scan" class="btn-secondary">← Back</button>
@@ -480,9 +644,9 @@ const HSModule = (function () {
         </div>
         <div class="card" style="max-width:420px;margin:0;">
           <p class="muted" style="margin:0 0 10px;">Which shift is this for?</p>
-          <button class="btn-primary hs-shift-btn" data-shift="1st" style="width:100%;margin-bottom:8px;">1st Shift</button>
-          <button class="btn-secondary hs-shift-btn" data-shift="2nd" style="width:100%;margin-bottom:8px;">2nd Shift</button>
-          <button class="btn-secondary hs-shift-btn" data-shift="3rd" style="width:100%;">3rd Shift</button>
+          ${shiftBtn('1st', '1st Shift')}
+          ${shiftBtn('2nd', '2nd Shift')}
+          ${shiftBtn('3rd', '3rd Shift')}
         </div>
       `;
       container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; });
@@ -511,10 +675,11 @@ const HSModule = (function () {
       </div>
       <div id="hs-items-list"></div>
       <div class="card" style="max-width:600px;margin:12px 0;">
+        ${isDaily ? `<p class="muted" style="margin:0;">Reporting an event during your shift? Use "📝 End of Shift Report" from Home after submitting this checklist.</p>` : `
         <label>Overall Notes (optional)
           <textarea id="hs-overall-notes" rows="2"></textarea>
-        </label>
-        <button id="hs-submit-btn" class="btn-primary" style="width:100%;">Submit Checklist</button>
+        </label>`}
+        <button id="hs-submit-btn" class="btn-primary" style="width:100%;margin-top:8px;">Submit Checklist</button>
         <p class="error-text" id="hs-form-error"></p>
       </div>
     `;
@@ -658,6 +823,16 @@ const HSModule = (function () {
   async function submitChecklist(container, items) {
     if (isSubmittingChecklist) return;
     const errEl = container.querySelector('#hs-form-error');
+    const isDaily = currentTemplate.Frequency === 'Daily';
+    // Authoritative re-check right before writing — the shift-selection
+    // screen already hides an already-done shift, but re-verify here in
+    // case of a stale cache or two tabs racing each other.
+    if (hasSubmittedToday(currentTemplate.TemplateID, isDaily ? currentShift : null)) {
+      errEl.textContent = isDaily
+        ? `${shiftLabel(currentShift)} shift has already been submitted today for this checklist.`
+        : 'This checklist has already been submitted today.';
+      return;
+    }
     if (!pendingPerformedBy || !pendingPerformedBy.trim()) {
       errEl.textContent = 'Please enter who performed this checklist.';
       return;
@@ -680,7 +855,8 @@ const HSModule = (function () {
 
     try {
       const performedBy = pendingPerformedBy.trim();
-      const notes = container.querySelector('#hs-overall-notes').value.trim();
+      const notesEl = container.querySelector('#hs-overall-notes'); // absent for Daily — see End of Shift Report instead
+      const notes = notesEl ? notesEl.value.trim() : '';
       const now = new Date().toISOString();
 
       const existingLogRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
