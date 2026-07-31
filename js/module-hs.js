@@ -48,8 +48,8 @@ const HSModule = (function () {
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active'];
-  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active'];
-  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection'];
+  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased'];
+  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
@@ -149,7 +149,7 @@ const HSModule = (function () {
   // ───────────────────────────────────────────────────────────
   function renderEndOfShiftPicker(container) {
     const user = MVOA.getUser();
-    const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily' && MVOA.canEditPlantRoundsSection(t.QRTarget, user));
+    const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily' && (t.ShiftBased === 'TRUE' || t.ShiftBased === 'true') && MVOA.canEditPlantRoundsSection(t.QRTarget, user));
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-home" class="btn-secondary">← Home</button>
@@ -215,7 +215,8 @@ const HSModule = (function () {
         <button id="hs-report-failed" class="btn-secondary" style="width:100%;margin-bottom:8px;">❌ Failed Items Log</button>
         <button id="hs-report-tasks" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔗 Auto-Flagged Task Resolution</button>
         <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
-        <button id="hs-report-hours" class="btn-secondary" style="width:100%;">⏱️ DG Running Hours</button>
+        <button id="hs-report-hours" class="btn-secondary" style="width:100%;margin-bottom:8px;">⏱️ DG Running Hours</button>
+        <button id="hs-report-monthly" class="btn-secondary" style="width:100%;">📅 Monthly Report</button>
       </div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
@@ -223,6 +224,7 @@ const HSModule = (function () {
     container.querySelector('#hs-report-tasks').addEventListener('click', () => renderTaskResolutionReport(container));
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
     container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
+    container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
   }
 
   // ───────────────────────────────────────────────────────────
@@ -290,6 +292,77 @@ const HSModule = (function () {
               </tr>
             `).join('')}
           </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // MONTHLY REPORT — a completion calendar for a chosen month: one
+  // row per date, one column per category that has a Daily template,
+  // showing whether that category's Daily checklist was submitted
+  // that date (any shift, for shift-based categories). Complements
+  // Shift Coverage (which is per-shift, one category, last 7 days)
+  // with a per-category, whole-month view across everything at once.
+  // ───────────────────────────────────────────────────────────
+  let monthlyReportMonth = ''; // 'YYYY-MM', defaults to current month on first render
+
+  function renderMonthlyReport(container) {
+    if (!monthlyReportMonth) {
+      const now = new Date();
+      monthlyReportMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+    }
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>📅 Monthly Report</strong>
+      </div>
+      <div class="card" style="max-width:320px;margin:0 0 12px 0;">
+        <label>Month
+          <input type="month" id="hs-monthly-picker" value="${monthlyReportMonth}">
+        </label>
+      </div>
+      <div id="hs-monthly-table"></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelector('#hs-monthly-picker').addEventListener('change', (e) => {
+      monthlyReportMonth = e.target.value;
+      renderMonthlyTable(container.querySelector('#hs-monthly-table'));
+    });
+    renderMonthlyTable(container.querySelector('#hs-monthly-table'));
+  }
+
+  function renderMonthlyTable(tableEl) {
+    const [year, month] = monthlyReportMonth.split('-').map(Number); // month is 1-based here
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const dailyCategories = categoriesCache.filter(c =>
+      templatesCache.some(t => t.QRTarget === c.CategoryKey && t.Frequency === 'Daily')
+    );
+    if (!dailyCategories.length) {
+      tableEl.innerHTML = '<p class="muted">No Daily-frequency categories set up yet.</p>';
+      return;
+    }
+    // For each category, which Daily TemplateID(s) count (usually one).
+    const dailyTemplateIdsByCategory = dailyCategories.map(c => ({
+      category: c,
+      templateIds: templatesCache.filter(t => t.QRTarget === c.CategoryKey && t.Frequency === 'Daily').map(t => t.TemplateID)
+    }));
+
+    const rowsHtml = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = new Date(year, month - 1, day).toDateString();
+      const cells = dailyTemplateIdsByCategory.map(({ templateIds }) => {
+        const done = logsCache.some(l => templateIds.includes(l.TemplateID) && new Date(l.Timestamp).toDateString() === dateStr);
+        return `<td>${done ? '<span style="color:green;">✓</span>' : '<span style="color:#b3261e;">✕</span>'}</td>`;
+      }).join('');
+      rowsHtml.push(`<tr><td>${day}</td>${cells}</tr>`);
+    }
+
+    tableEl.innerHTML = `
+      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <table class="mvoa-table">
+          <thead><tr><th>Date</th>${dailyCategories.map(c => `<th>${escapeHtml(c.Label)}</th>`).join('')}</tr></thead>
+          <tbody>${rowsHtml.join('')}</tbody>
         </table>
       </div>
     `;
@@ -647,7 +720,8 @@ const HSModule = (function () {
 
   function renderChecklistForm(container) {
     const isDaily = currentTemplate.Frequency === 'Daily';
-    if (isDaily && !currentShift) {
+    const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
+    if (isDaily && isShiftBased && !currentShift) {
       const shiftDone = { '1st': hasSubmittedToday(currentTemplate.TemplateID, '1st'),
         '2nd': hasSubmittedToday(currentTemplate.TemplateID, '2nd'),
         '3rd': hasSubmittedToday(currentTemplate.TemplateID, '3rd') };
@@ -688,7 +762,7 @@ const HSModule = (function () {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
-        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isDaily ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
       <div class="card" style="max-width:600px;margin:0 0 12px 0;">
         <label>Performed By
@@ -697,7 +771,7 @@ const HSModule = (function () {
       </div>
       <div id="hs-items-list"></div>
       <div class="card" style="max-width:600px;margin:12px 0;">
-        ${isDaily ? `<p class="muted" style="margin:0;">Reporting an event during your shift? Use "📝 End of Shift Report" from Home after submitting this checklist.</p>` : `
+        ${isShiftBased ? `<p class="muted" style="margin:0;">Reporting an event during your shift? Use "📝 End of Shift Report" from Home after submitting this checklist.</p>` : `
         <label>Overall Notes (optional)
           <textarea id="hs-overall-notes" rows="2"></textarea>
         </label>`}
@@ -710,7 +784,7 @@ const HSModule = (function () {
 
     const listEl = container.querySelector('#hs-items-list');
     if (!items.length) {
-      listEl.innerHTML = `<p class="muted">No checklist items set up for this template${isDaily ? ' / shift' : ''}.</p>`;
+      listEl.innerHTML = `<p class="muted">No checklist items set up for this template${isShiftBased ? ' / shift' : ''}.</p>`;
     } else {
       listEl.innerHTML = items.map(item => renderItemRow(item)).join('');
       wireItemInputs(listEl, items);
@@ -845,12 +919,12 @@ const HSModule = (function () {
   async function submitChecklist(container, items) {
     if (isSubmittingChecklist) return;
     const errEl = container.querySelector('#hs-form-error');
-    const isDaily = currentTemplate.Frequency === 'Daily';
+    const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
     // Authoritative re-check right before writing — the shift-selection
     // screen already hides an already-done shift, but re-verify here in
     // case of a stale cache or two tabs racing each other.
-    if (hasSubmittedToday(currentTemplate.TemplateID, isDaily ? currentShift : null)) {
-      errEl.textContent = isDaily
+    if (hasSubmittedToday(currentTemplate.TemplateID, isShiftBased ? currentShift : null)) {
+      errEl.textContent = isShiftBased
         ? `${shiftLabel(currentShift)} shift has already been submitted today for this checklist.`
         : 'This checklist has already been submitted today.';
       return;
@@ -859,7 +933,15 @@ const HSModule = (function () {
       errEl.textContent = 'Please enter who performed this checklist.';
       return;
     }
-    const missing = items.filter(i => (i.InputType === 'PassFail' || i.InputType === 'Numeric') && !pendingResults[i.ItemID]?.result);
+    // Items marked Required=FALSE (e.g. Vacuum Cleaning / Back Wash —
+    // shown every day but only actually done every other day) don't
+    // block submission when left blank, and a blank answer never
+    // counts as a Fail for them.
+    const missing = items.filter(i =>
+      (i.InputType === 'PassFail' || i.InputType === 'Numeric') &&
+      !(i.Required === 'FALSE' || i.Required === 'false') &&
+      !pendingResults[i.ItemID]?.result
+    );
     if (missing.length) {
       errEl.textContent = `Please mark Pass or Fail for: ${missing.map(i => i.CheckItem).join(', ')}`;
       return;
@@ -1060,7 +1142,7 @@ const HSModule = (function () {
   // SHIFT COVERAGE (Daily templates only)
   // ───────────────────────────────────────────────────────────
   function renderShiftCoverageReport(container) {
-    const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily');
+    const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily' && (t.ShiftBased === 'TRUE' || t.ShiftBased === 'true'));
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const days = [];
     for (let i = 6; i >= 0; i--) {
