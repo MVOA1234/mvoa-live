@@ -770,7 +770,7 @@ const OpsModule = (function () {
     if (!task) return;
     formBody.innerHTML = `
       <div style="margin-top:8px;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
-        <p class="muted" style="margin:0 0 6px;">Currently assigned to ${t.AssignedTo ? escapeHtml(MVOA.assigneeLabel(task.AssignedTo, assigneeOptions)) : 'nobody'}. Reassigning clears any delegate on this task — new assignee starts fresh.</p>
+        <p class="muted" style="margin:0 0 6px;">Currently assigned to ${task.AssignedTo ? escapeHtml(MVOA.assigneeLabel(task.AssignedTo, assigneeOptions)) : 'nobody'}. Reassigning clears any delegate on this task — new assignee starts fresh.</p>
         <label style="margin:0;">Reassign to
           <select id="ops-reassign-select-${taskId}">
             <option value="">— Select someone —</option>
