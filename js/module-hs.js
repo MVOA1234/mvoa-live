@@ -268,6 +268,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-reports" class="btn-secondary">← Reports</button>
         <strong>⏱️ DG Running Hours</strong>
+        <button id="hs-hours-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div id="hs-hours-list"><p class="muted">Loading…</p></div>
     `;
@@ -322,16 +323,26 @@ const HSModule = (function () {
         </table>
       </div>
     `;
+    container.querySelector('#hs-hours-pdf').addEventListener('click', () => {
+      const pdfRows = rows.map(r => ({
+        Date: formatDate(r.timestamp), Shift: shiftLabel(r.shift), Reading: r.value,
+        HoursRun: r.hoursRun !== null ? r.hoursRun : 'awaiting next reading'
+      }));
+      printTablePdf('DG Running Hours', ['Date', 'Shift', 'Reading', 'HoursRun'], pdfRows);
+    });
   }
 
   // ───────────────────────────────────────────────────────────
-  // MONTHLY REPORT — a completion calendar for a chosen month: one
-  // row per date, one column per category that has a Daily template,
-  // showing whether that category's Daily checklist was submitted
-  // that date (any shift, for shift-based categories). Complements
-  // Shift Coverage (which is per-shift, one category, last 7 days)
-  // with a per-category, whole-month view across everything at once.
+  // MONTHLY REPORT — pick a Category, then a Frequency (only the ones
+  // that category actually has — e.g. Weekly/Monthly are separate
+  // reports from Daily, not combined), then a Month. Shows a full
+  // item × date matrix — dates across the top, checklist items down
+  // the side (grouped into 1st/2nd/3rd shift sections for shift-based
+  // Daily templates, matching what "View Details" shows per round,
+  // just laid out across a whole month instead of one round at a time).
   // ───────────────────────────────────────────────────────────
+  let monthlyReportCategory = '';
+  let monthlyReportFrequency = '';
   let monthlyReportMonth = ''; // 'YYYY-MM', defaults to current month on first render
 
   function renderMonthlyReport(container) {
@@ -344,7 +355,16 @@ const HSModule = (function () {
         <button id="hs-back-reports" class="btn-secondary">← Reports</button>
         <strong>📅 Monthly Report</strong>
       </div>
-      <div class="card" style="max-width:320px;margin:0 0 12px 0;">
+      <div class="card" style="max-width:600px;margin:0 0 12px 0;">
+        <label>Category
+          <select id="hs-monthly-category">
+            <option value="">— Select —</option>
+            ${categoriesCache.map(c => `<option value="${c.CategoryKey}" ${monthlyReportCategory===c.CategoryKey?'selected':''}>${escapeHtml(c.Label)}</option>`).join('')}
+          </select>
+        </label>
+        <label>Frequency
+          <select id="hs-monthly-frequency"><option value="">— Select a category first —</option></select>
+        </label>
         <label>Month
           <input type="month" id="hs-monthly-picker" value="${monthlyReportMonth}">
         </label>
@@ -352,47 +372,115 @@ const HSModule = (function () {
       <div id="hs-monthly-table"></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const freqSelect = container.querySelector('#hs-monthly-frequency');
+    function populateFrequencyOptions() {
+      const available = templatesCache.filter(t => t.QRTarget === monthlyReportCategory).sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
+      if (!available.length) {
+        freqSelect.innerHTML = '<option value="">No templates for this category</option>';
+        monthlyReportFrequency = '';
+        return;
+      }
+      freqSelect.innerHTML = available.map(t => `<option value="${t.Frequency}" ${monthlyReportFrequency===t.Frequency?'selected':''}>${FREQUENCY_LABEL[t.Frequency]}</option>`).join('');
+      if (!available.some(t => t.Frequency === monthlyReportFrequency)) monthlyReportFrequency = available[0].Frequency;
+      freqSelect.value = monthlyReportFrequency;
+    }
+    if (monthlyReportCategory) populateFrequencyOptions();
+
+    container.querySelector('#hs-monthly-category').addEventListener('change', (e) => {
+      monthlyReportCategory = e.target.value;
+      monthlyReportFrequency = '';
+      populateFrequencyOptions();
+      renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
+    });
+    freqSelect.addEventListener('change', (e) => {
+      monthlyReportFrequency = e.target.value;
+      renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
+    });
     container.querySelector('#hs-monthly-picker').addEventListener('change', (e) => {
       monthlyReportMonth = e.target.value;
-      renderMonthlyTable(container.querySelector('#hs-monthly-table'));
+      renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
-    renderMonthlyTable(container.querySelector('#hs-monthly-table'));
+    renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
   }
 
-  function renderMonthlyTable(tableEl) {
-    const [year, month] = monthlyReportMonth.split('-').map(Number); // month is 1-based here
-    const daysInMonth = new Date(year, month, 0).getDate();
-    const dailyCategories = categoriesCache.filter(c =>
-      templatesCache.some(t => t.QRTarget === c.CategoryKey && t.Frequency === 'Daily')
-    );
-    if (!dailyCategories.length) {
-      tableEl.innerHTML = '<p class="muted">No Daily-frequency categories set up yet.</p>';
+  async function renderMonthlyMatrix(tableEl) {
+    if (!monthlyReportCategory || !monthlyReportFrequency) {
+      tableEl.innerHTML = '<p class="muted">Choose a category and frequency to see its monthly matrix.</p>';
       return;
     }
-    // For each category, which Daily TemplateID(s) count (usually one).
-    const dailyTemplateIdsByCategory = dailyCategories.map(c => ({
-      category: c,
-      templateIds: templatesCache.filter(t => t.QRTarget === c.CategoryKey && t.Frequency === 'Daily').map(t => t.TemplateID)
-    }));
-
-    const rowsHtml = [];
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = new Date(year, month - 1, day).toDateString();
-      const cells = dailyTemplateIdsByCategory.map(({ templateIds }) => {
-        const done = logsCache.some(l => templateIds.includes(l.TemplateID) && new Date(l.Timestamp).toDateString() === dateStr);
-        return `<td>${done ? '<span style="color:green;">✓</span>' : '<span style="color:#b3261e;">✕</span>'}</td>`;
-      }).join('');
-      rowsHtml.push(`<tr><td>${day}</td>${cells}</tr>`);
+    const template = templatesCache.find(t => t.QRTarget === monthlyReportCategory && t.Frequency === monthlyReportFrequency);
+    if (!template) {
+      tableEl.innerHTML = '<p class="muted">No template found for this category/frequency.</p>';
+      return;
+    }
+    tableEl.innerHTML = '<p class="muted">Loading…</p>';
+    let results;
+    try {
+      results = await loadItemResults();
+    } catch (e) {
+      tableEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
     }
 
+    const [year, month] = monthlyReportMonth.split('-').map(Number); // month is 1-based
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const isShiftBased = template.ShiftBased === 'TRUE' || template.ShiftBased === 'true';
+    const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : [null];
+    const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
+
+    function cellFor(itemId, day, shift) {
+      const dateStr = new Date(year, month - 1, day).toDateString();
+      const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
+        new Date(l.Timestamp).toDateString() === dateStr &&
+        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      if (!log) return null;
+      const result = results.find(r => r.LogID === log.LogID && r.ItemID === itemId);
+      return result ? result.Result : null;
+    }
+    function cellHtml(val) {
+      if (val === null || val === undefined || val === '') return '<span class="muted">—</span>';
+      if (val === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
+      if (val === 'Pass') return '<span style="color:green;font-weight:700;">✓</span>';
+      return escapeHtml(String(val)); // Text/Dropdown/plain-numeric values
+    }
+
+    const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+    let bodyHtml = '';
+    const pdfRows = [];
+    shifts.forEach(shift => {
+      if (shift) {
+        bodyHtml += `<tr><td colspan="${daysInMonth + 1}" style="background:var(--card-bg);font-weight:700;">${shiftLabel(shift)} Shift</td></tr>`;
+        const sectionRow = { Item: '— ' + shiftLabel(shift) + ' Shift —' };
+        dayHeaders.forEach(d => sectionRow[String(d)] = '');
+        pdfRows.push(sectionRow);
+      }
+      items.forEach(item => {
+        const cells = dayHeaders.map(d => cellFor(item.ItemID, d, shift));
+        bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td>${cellHtml(v)}</td>`).join('')}</tr>`;
+        const pdfRow = { Item: item.CheckItem };
+        dayHeaders.forEach((d, i) => pdfRow[String(d)] = cells[i] || '');
+        pdfRows.push(pdfRow);
+      });
+    });
+
     tableEl.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:8px;">
+        <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${FREQUENCY_LABEL[monthlyReportFrequency]}</p>
+        <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
       <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table">
-          <thead><tr><th>Date</th>${dailyCategories.map(c => `<th>${escapeHtml(c.Label)}</th>`).join('')}</tr></thead>
-          <tbody>${rowsHtml.join('')}</tbody>
+          <thead><tr><th>Item</th>${dayHeaders.map(d => `<th>${d}</th>`).join('')}</tr></thead>
+          <tbody>${bodyHtml}</tbody>
         </table>
       </div>
     `;
+    tableEl.querySelector('#hs-monthly-pdf').addEventListener('click', () => {
+      const pdfColumns = ['Item', ...dayHeaders.map(String)];
+      const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${FREQUENCY_LABEL[monthlyReportFrequency]} — ${monthlyReportMonth}`;
+      printTablePdf(title, pdfColumns, pdfRows);
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -408,7 +496,10 @@ const HSModule = (function () {
         <button id="hs-back-home" class="btn-secondary">← Home</button>
         <strong>📊 Due Status</strong>
       </div>
-      <p class="muted" style="margin:0 0 12px;">Overdue items are listed first. Scan the equipment QR to actually log a checklist.</p>
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <p class="muted" style="margin:0;">Overdue items are listed first. Scan the equipment QR to actually log a checklist.</p>
+        <button id="hs-due-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
       <div id="hs-due-groups"></div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
@@ -431,6 +522,14 @@ const HSModule = (function () {
       groupsEl.innerHTML = '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
       return;
     }
+    container.querySelector('#hs-due-pdf').addEventListener('click', () => {
+      const pdfRows = [];
+      groups.forEach(g => g.rows.forEach(r => pdfRows.push({
+        Category: categoryLabel(g.target), Frequency: FREQUENCY_LABEL[r.template.Frequency],
+        Status: r.due.overdue ? 'Due' : 'Up to date', Detail: r.due.text
+      })));
+      printTablePdf('Due Status', ['Category', 'Frequency', 'Status', 'Detail'], pdfRows);
+    });
 
     groupsEl.innerHTML = groups.map(g => `
       <div class="card" style="max-width:600px;margin:0 0 16px 0;">
@@ -1078,6 +1177,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-reports" class="btn-secondary">← Reports</button>
         <strong>❌ Failed Items Log</strong>
+        <button id="hs-failed-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div class="ops-tabs" style="margin-bottom:10px;">
         <button data-filter="all" class="ops-tab-btn ${failedItemsFilter==='all'?'active':''}">All</button>
@@ -1119,6 +1219,14 @@ const HSModule = (function () {
         ${x.r.Remarks ? `<p style="margin:4px 0;font-size:0.9rem;">${escapeHtml(x.r.Remarks)}</p>` : ''}
       </div>
     `).join('') : '<p class="muted">No failed items found.</p>';
+    container.querySelector('#hs-failed-pdf').addEventListener('click', () => {
+      const pdfRows = fails.map(x => ({
+        Item: x.item ? x.item.CheckItem : x.r.ItemID,
+        Category: x.template ? categoryLabel(x.template.QRTarget) : '', Frequency: x.template ? FREQUENCY_LABEL[x.template.Frequency] : '',
+        PerformedBy: x.log ? x.log.PerformedBy : '', Timestamp: x.log ? formatDate(x.log.Timestamp) : '', Remarks: x.r.Remarks
+      }));
+      printTablePdf('Failed Items Log', ['Item', 'Category', 'Frequency', 'PerformedBy', 'Timestamp', 'Remarks'], pdfRows);
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1129,6 +1237,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-reports" class="btn-secondary">← Reports</button>
         <strong>🔗 Auto-Flagged Task Resolution</strong>
+        <button id="hs-task-res-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div id="hs-task-res-list"><p class="muted">Loading…</p></div>
     `;
@@ -1166,6 +1275,18 @@ const HSModule = (function () {
         </div>
       `;
     }).join('') : '<p class="muted">No failed items found.</p>';
+    container.querySelector('#hs-task-res-pdf').addEventListener('click', () => {
+      const pdfRows = fails.map(x => {
+        const status = x.taskRow ? x.taskRow[OPS_TASK_COL_IDX.Status] : null;
+        return {
+          Item: x.item ? x.item.CheckItem : x.r.ItemID, LoggedAt: x.log ? formatDate(x.log.Timestamp) : '',
+          TaskStatus: status || 'No task found',
+          ClosedBy: status === 'Closed' ? x.taskRow[OPS_TASK_COL_IDX.ClosedBy] : '',
+          ClosedDate: status === 'Closed' ? formatDate(x.taskRow[OPS_TASK_COL_IDX.ClosedDate]) : ''
+        };
+      });
+      printTablePdf('Auto-Flagged Task Resolution', ['Item', 'LoggedAt', 'TaskStatus', 'ClosedBy', 'ClosedDate'], pdfRows);
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1192,6 +1313,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-reports" class="btn-secondary">← Reports</button>
         <strong>🕐 Shift Coverage — Last 7 Days</strong>
+        <button id="hs-shift-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div id="hs-shift-tables"></div>
     `;
@@ -1215,6 +1337,20 @@ const HSModule = (function () {
         </div>
       </div>
     `).join('');
+
+    container.querySelector('#hs-shift-pdf').addEventListener('click', () => {
+      const pdfRows = [];
+      dailyTemplates.forEach(t => {
+        days.forEach(d => {
+          const shifts = loggedShifts(t.TemplateID, d);
+          pdfRows.push({
+            Category: categoryLabel(t.QRTarget), Date: d.toLocaleDateString(),
+            '1st': shifts.has('1st') ? '✓' : '✕', '2nd': shifts.has('2nd') ? '✓' : '✕', '3rd': shifts.has('3rd') ? '✓' : '✕'
+          });
+        });
+      });
+      printTablePdf('Shift Coverage — Last 7 Days', ['Category', 'Date', '1st', '2nd', '3rd'], pdfRows);
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1225,7 +1361,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-home" class="btn-secondary">← Home</button>
         <strong>📅 Checklist History</strong>
-
+        <button id="hs-history-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div class="ops-tabs" style="margin-bottom:10px;">
         <button data-filter="all" class="ops-tab-btn ${historyFilter==='all'?'active':''}">All</button>
@@ -1244,6 +1380,17 @@ const HSModule = (function () {
       .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
     listEl.innerHTML = filtered.length ? filtered.map(l => logCardHtml(l)).join('') : '<p class="muted">No checklist rounds found.</p>';
     wireLogCardDrilldowns(listEl);
+    container.querySelector('#hs-history-pdf').addEventListener('click', () => {
+      const pdfRows = filtered.map(l => {
+        const t = templateById(l.TemplateID);
+        return {
+          Category: t ? categoryLabel(t.QRTarget) : l.TemplateID, Frequency: t ? FREQUENCY_LABEL[t.Frequency] : '',
+          PerformedBy: l.PerformedBy, Timestamp: formatDate(l.Timestamp), Shift: l.Shift ? shiftLabel(l.Shift) : '',
+          Status: l.Status, Notes: l.Notes
+        };
+      });
+      printTablePdf('Checklist History', ['Category', 'Frequency', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'], pdfRows);
+    });
   }
 
   function escapeHtml(s) {
@@ -1253,6 +1400,58 @@ const HSModule = (function () {
     if (!iso) return '';
     const d = new Date(iso);
     return isNaN(d) ? iso : d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Generic Print-to-PDF, shared by every Plant Rounds report.
+  // columns: array of header labels, each also used as the key into
+  // each row object (so a wide table like Monthly Report can pass day
+  // numbers as string keys: columns=['Item','1','2',...], rows=[{Item:
+  // 'Fuel Level', '1':'Pass', '2':'Fail', ...}]).
+  // ───────────────────────────────────────────────────────────
+  function printTablePdf(title, columns, rows) {
+    const win = window.open('', '_blank');
+    const tableRows = rows.map(r => `<tr>${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' && r[c] !== null ? r[c] : '—'))}</td>`).join('')}</tr>`).join('');
+    win.document.write(`
+      <html>
+      <head>
+        <title>${escapeHtml(title)}</title>
+        <style>
+          body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
+          h1 { color: #1d4e6b; font-size: 1.3rem; margin-bottom: 4px; }
+          .muted { color: #6b7280; font-size: 0.85rem; margin-top: 0; }
+          table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+          th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.8rem; white-space: nowrap; }
+          th { background: #f5f6f8; }
+          .back-btn {
+            display: inline-block; margin-bottom: 16px; padding: 10px 18px;
+            border-radius: 8px; border: none; background: #1d4e6b; color: white;
+            font-size: 0.95rem; font-weight: 600; cursor: pointer;
+          }
+          @media print { .back-btn { display: none; } }
+        </style>
+      </head>
+      <body>
+        <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
+        <h1>MVOA Plant Rounds — ${escapeHtml(title)}</h1>
+        <p class="muted">Generated ${new Date().toLocaleString()}</p>
+        <table>
+          <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+          <tbody>${tableRows || `<tr><td colspan="${columns.length}">No data.</td></tr>`}</tbody>
+        </table>
+        <script>
+          window.onload = () => { window.print(); };
+          document.getElementById('back-to-app-btn').addEventListener('click', () => {
+            window.close();
+            setTimeout(() => {
+              document.body.innerHTML = '<p style="padding:20px;">You can close this tab/window now and return to the MVOA app in your other tab.</p>';
+            }, 300);
+          });
+        </script>
+      </body>
+      </html>
+    `);
+    win.document.close();
   }
 
   return { mount };
