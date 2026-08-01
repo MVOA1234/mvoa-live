@@ -435,14 +435,34 @@ const HSModule = (function () {
         new Date(l.Timestamp).toDateString() === dateStr &&
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       if (!log) return null;
-      const result = results.find(r => r.LogID === log.LogID && r.ItemID === itemId);
-      return result ? result.Result : null;
+      return results.find(r => r.LogID === log.LogID && r.ItemID === itemId) || null;
     }
-    function cellHtml(val) {
-      if (val === null || val === undefined || val === '') return '<span class="muted">—</span>';
-      if (val === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
-      if (val === 'Pass') return '<span style="color:green;font-weight:700;">✓</span>';
-      return escapeHtml(String(val)); // Text/Dropdown/plain-numeric values
+    // Numeric items store the auto-evaluated Pass/Fail as Result, with
+    // the actual entered number embedded in Remarks ("Entered: 87% (fails
+    // if below 40%)" or "Recorded: 5.5hrs" for threshold-less fields) —
+    // extract that number so the real reading shows in the report, not
+    // just a bare Pass/Fail.
+    function numericDisplayValue(item, resultObj) {
+      const match = (resultObj.Remarks || '').match(/[-\d.]+/);
+      return match ? match[0] + (item.Unit || '') : (resultObj.Result || '');
+    }
+    function cellHtml(item, resultObj) {
+      if (!resultObj) return '<span class="muted">—</span>';
+      if (item.InputType === 'Numeric') {
+        const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
+        const displayVal = numericDisplayValue(item, resultObj);
+        if (!hasThreshold) return escapeHtml(displayVal); // plain data log — no pass/fail meaning, no coloring
+        const isFail = resultObj.Result === 'Fail';
+        return `<span style="color:${isFail ? '#b3261e' : 'green'};font-weight:700;">${escapeHtml(displayVal)}</span>`;
+      }
+      if (resultObj.Result === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
+      if (resultObj.Result === 'Pass') return '<span style="color:green;font-weight:700;">✓</span>';
+      return escapeHtml(String(resultObj.Result)); // Text/Dropdown
+    }
+    function cellPdfValue(item, resultObj) {
+      if (!resultObj) return '';
+      if (item.InputType === 'Numeric') return numericDisplayValue(item, resultObj);
+      return resultObj.Result || '';
     }
 
     const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => i + 1);
@@ -457,9 +477,9 @@ const HSModule = (function () {
       }
       items.forEach(item => {
         const cells = dayHeaders.map(d => cellFor(item.ItemID, d, shift));
-        bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td>${cellHtml(v)}</td>`).join('')}</tr>`;
+        bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td>${cellHtml(item, v)}</td>`).join('')}</tr>`;
         const pdfRow = { Item: item.CheckItem };
-        dayHeaders.forEach((d, i) => pdfRow[String(d)] = cells[i] || '');
+        dayHeaders.forEach((d, i) => pdfRow[String(d)] = cellPdfValue(item, cells[i]));
         pdfRows.push(pdfRow);
       });
     });
