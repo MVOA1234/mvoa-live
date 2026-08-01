@@ -464,6 +464,13 @@ const HSModule = (function () {
       if (item.InputType === 'Numeric') return numericDisplayValue(item, resultObj);
       return resultObj.Result || '';
     }
+    function performedByFor(day, shift) {
+      const dateStr = new Date(year, month - 1, day).toDateString();
+      const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
+        new Date(l.Timestamp).toDateString() === dateStr &&
+        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      return log ? log.PerformedBy : '';
+    }
 
     const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => i + 1);
     let bodyHtml = '';
@@ -475,6 +482,12 @@ const HSModule = (function () {
         dayHeaders.forEach(d => sectionRow[String(d)] = '');
         pdfRows.push(sectionRow);
       }
+      const performedByCells = dayHeaders.map(d => performedByFor(d, shift));
+      bodyHtml += `<tr><td style="font-style:italic;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
+      const performedByRow = { Item: 'Performed By' };
+      dayHeaders.forEach((d, i) => performedByRow[String(d)] = performedByCells[i] || '');
+      pdfRows.push(performedByRow);
+
       items.forEach(item => {
         const cells = dayHeaders.map(d => cellFor(item.ItemID, d, shift));
         bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td>${cellHtml(item, v)}</td>`).join('')}</tr>`;
@@ -916,17 +929,41 @@ const HSModule = (function () {
       (l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd')))
     ) || null;
   }
+  // Shift time windows: 1st 7am-2pm, 2nd 2pm-9pm, 3rd 9pm-7am (wraps
+  // past midnight). Entries are only allowed within the matching
+  // shift's actual clock window — e.g. 3rd shift can't be logged
+  // during the day.
+  function isWithinShiftWindow(shift, now) {
+    const h = now.getHours() + now.getMinutes() / 60;
+    if (shift === '1st') return h >= 7 && h < 14;
+    if (shift === '2nd') return h >= 14 && h < 21;
+    if (shift === '3rd') return h >= 21 || h < 7;
+    return true;
+  }
+  function shiftWindowLabel(shift) {
+    if (shift === '1st') return '7 AM – 2 PM';
+    if (shift === '2nd') return '2 PM – 9 PM';
+    if (shift === '3rd') return '9 PM – 7 AM';
+    return '';
+  }
 
   function renderChecklistForm(container) {
     const isDaily = currentTemplate.Frequency === 'Daily';
     const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
     if (isDaily && isShiftBased && !currentShift) {
+      const now = new Date();
       const shiftDone = { '1st': hasSubmittedToday(currentTemplate.TemplateID, '1st'),
         '2nd': hasSubmittedToday(currentTemplate.TemplateID, '2nd'),
         '3rd': hasSubmittedToday(currentTemplate.TemplateID, '3rd') };
-      const shiftBtn = (shift, label) => shiftDone[shift]
-        ? `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Already submitted today</button>`
-        : `<button class="btn-${shift === '1st' ? 'primary' : 'secondary'} hs-shift-btn" data-shift="${shift}" style="width:100%;margin-bottom:8px;">${label}</button>`;
+      const shiftBtn = (shift, label) => {
+        if (shiftDone[shift]) {
+          return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Already submitted today</button>`;
+        }
+        if (!isWithinShiftWindow(shift, now)) {
+          return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Only allowed ${shiftWindowLabel(shift)}</button>`;
+        }
+        return `<button class="btn-${shift === '1st' ? 'primary' : 'secondary'} hs-shift-btn" data-shift="${shift}" style="width:100%;margin-bottom:8px;">${label}</button>`;
+      };
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
           <button id="hs-back-scan" class="btn-secondary">← Back</button>
@@ -1185,6 +1222,10 @@ const HSModule = (function () {
       errEl.textContent = isShiftBased
         ? `${shiftLabel(currentShift)} shift has already been submitted today for this checklist.`
         : 'This checklist has already been submitted today.';
+      return;
+    }
+    if (isShiftBased && !isWithinShiftWindow(currentShift, new Date())) {
+      errEl.textContent = `${shiftLabel(currentShift)} shift can only be logged between ${shiftWindowLabel(currentShift)}.`;
       return;
     }
     if (!pendingPerformedBy || !pendingPerformedBy.trim()) {
