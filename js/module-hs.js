@@ -49,7 +49,7 @@ const HSModule = (function () {
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan'];
   const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased'];
-  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required'];
+  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
@@ -342,7 +342,7 @@ const HSModule = (function () {
   // just laid out across a whole month instead of one round at a time).
   // ───────────────────────────────────────────────────────────
   let monthlyReportCategory = '';
-  let monthlyReportFrequency = '';
+  let monthlyReportTemplateId = '';
   let monthlyReportMonth = ''; // 'YYYY-MM', defaults to current month on first render
 
   function renderMonthlyReport(container) {
@@ -362,8 +362,8 @@ const HSModule = (function () {
             ${categoriesCache.map(c => `<option value="${c.CategoryKey}" ${monthlyReportCategory===c.CategoryKey?'selected':''}>${escapeHtml(c.Label)}</option>`).join('')}
           </select>
         </label>
-        <label>Frequency
-          <select id="hs-monthly-frequency"><option value="">— Select a category first —</option></select>
+        <label>Checklist
+          <select id="hs-monthly-template"><option value="">— Select a category first —</option></select>
         </label>
         <label>Month
           <input type="month" id="hs-monthly-picker" value="${monthlyReportMonth}">
@@ -373,28 +373,28 @@ const HSModule = (function () {
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
 
-    const freqSelect = container.querySelector('#hs-monthly-frequency');
-    function populateFrequencyOptions() {
+    const templateSelect = container.querySelector('#hs-monthly-template');
+    function populateTemplateOptions() {
       const available = templatesCache.filter(t => t.QRTarget === monthlyReportCategory).sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
       if (!available.length) {
-        freqSelect.innerHTML = '<option value="">No templates for this category</option>';
-        monthlyReportFrequency = '';
+        templateSelect.innerHTML = '<option value="">No templates for this category</option>';
+        monthlyReportTemplateId = '';
         return;
       }
-      freqSelect.innerHTML = available.map(t => `<option value="${t.Frequency}" ${monthlyReportFrequency===t.Frequency?'selected':''}>${FREQUENCY_LABEL[t.Frequency]}</option>`).join('');
-      if (!available.some(t => t.Frequency === monthlyReportFrequency)) monthlyReportFrequency = available[0].Frequency;
-      freqSelect.value = monthlyReportFrequency;
+      templateSelect.innerHTML = available.map(t => `<option value="${t.TemplateID}" ${monthlyReportTemplateId===t.TemplateID?'selected':''}>${escapeHtml(t.Name)}</option>`).join('');
+      if (!available.some(t => t.TemplateID === monthlyReportTemplateId)) monthlyReportTemplateId = available[0].TemplateID;
+      templateSelect.value = monthlyReportTemplateId;
     }
-    if (monthlyReportCategory) populateFrequencyOptions();
+    if (monthlyReportCategory) populateTemplateOptions();
 
     container.querySelector('#hs-monthly-category').addEventListener('change', (e) => {
       monthlyReportCategory = e.target.value;
-      monthlyReportFrequency = '';
-      populateFrequencyOptions();
+      monthlyReportTemplateId = '';
+      populateTemplateOptions();
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
-    freqSelect.addEventListener('change', (e) => {
-      monthlyReportFrequency = e.target.value;
+    templateSelect.addEventListener('change', (e) => {
+      monthlyReportTemplateId = e.target.value;
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
     container.querySelector('#hs-monthly-picker').addEventListener('change', (e) => {
@@ -405,13 +405,13 @@ const HSModule = (function () {
   }
 
   async function renderMonthlyMatrix(tableEl) {
-    if (!monthlyReportCategory || !monthlyReportFrequency) {
-      tableEl.innerHTML = '<p class="muted">Choose a category and frequency to see its monthly matrix.</p>';
+    if (!monthlyReportCategory || !monthlyReportTemplateId) {
+      tableEl.innerHTML = '<p class="muted">Choose a category and checklist to see its monthly matrix.</p>';
       return;
     }
-    const template = templatesCache.find(t => t.QRTarget === monthlyReportCategory && t.Frequency === monthlyReportFrequency);
+    const template = templateById(monthlyReportTemplateId);
     if (!template) {
-      tableEl.innerHTML = '<p class="muted">No template found for this category/frequency.</p>';
+      tableEl.innerHTML = '<p class="muted">No template found for this category/checklist.</p>';
       return;
     }
     tableEl.innerHTML = '<p class="muted">Loading…</p>';
@@ -486,7 +486,7 @@ const HSModule = (function () {
 
     tableEl.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:8px;">
-        <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${FREQUENCY_LABEL[monthlyReportFrequency]}</p>
+        <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${escapeHtml(template.Name)}</p>
         <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
@@ -498,7 +498,7 @@ const HSModule = (function () {
     `;
     tableEl.querySelector('#hs-monthly-pdf').addEventListener('click', () => {
       const pdfColumns = ['Item', ...dayHeaders.map(String)];
-      const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${FREQUENCY_LABEL[monthlyReportFrequency]} — ${monthlyReportMonth}`;
+      const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${template.Name} — ${monthlyReportMonth}`;
       printTablePdf(title, pdfColumns, pdfRows);
     });
   }
@@ -545,10 +545,10 @@ const HSModule = (function () {
     container.querySelector('#hs-due-pdf').addEventListener('click', () => {
       const pdfRows = [];
       groups.forEach(g => g.rows.forEach(r => pdfRows.push({
-        Category: categoryLabel(g.target), Frequency: FREQUENCY_LABEL[r.template.Frequency],
+        Category: categoryLabel(g.target), Template: r.template.Name, Frequency: FREQUENCY_LABEL[r.template.Frequency],
         Status: r.due.overdue ? 'Due' : 'Up to date', Detail: r.due.text
       })));
-      printTablePdf('Due Status', ['Category', 'Frequency', 'Status', 'Detail'], pdfRows);
+      printTablePdf('Due Status', ['Category', 'Template', 'Frequency', 'Status', 'Detail'], pdfRows);
     });
 
     groupsEl.innerHTML = groups.map(g => `
@@ -556,7 +556,7 @@ const HSModule = (function () {
         <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(categoryLabel(g.target))}</h3>
         ${g.rows.map(r => `
           <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
-            <span>${FREQUENCY_LABEL[r.template.Frequency]}</span>
+            <span>${escapeHtml(r.template.Name)}</span>
             <span style="text-align:right;">
               ${r.due.overdue ? '<span style="color:#b3261e;font-weight:700;font-size:0.85rem;">⚠️ Due</span>' : '<span class="muted" style="font-size:0.85rem;">Up to date</span>'}
               <br><span class="muted" style="font-size:0.75rem;">${escapeHtml(r.due.text)}</span>
@@ -640,6 +640,56 @@ const HSModule = (function () {
     const haystack = ((parsed.category || '') + ' ' + (parsed.assetName || '') + ' ' + (parsed.assetId || '')).toLowerCase();
     const match = categoriesCache.find(c => c.QRMatchKeyword && haystack.indexOf(c.QRMatchKeyword.toLowerCase()) !== -1);
     return match ? match.CategoryKey : null;
+  }
+
+  // Standalone scanner used only by AssetList entries to grab a single
+  // asset ID (e.g. a specific street light's QR) — unlike openQrScanner,
+  // this doesn't try to match against any category, it just returns
+  // whatever asset ID was scanned (or null if cancelled).
+  function scanAssetIdOnly() {
+    return new Promise((resolve) => {
+      const modal = document.createElement('div');
+      modal.className = 'ops-qr-modal';
+      modal.innerHTML = `
+        <div class="ops-qr-box">
+          <video id="hs-al-qr-video" autoplay playsinline muted></video>
+          <canvas id="hs-al-qr-canvas" style="display:none;"></canvas>
+          <p class="muted" id="hs-al-qr-status">Point camera at the light's QR label…</p>
+          <button id="hs-al-qr-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      const video = modal.querySelector('#hs-al-qr-video');
+      const canvas = modal.querySelector('#hs-al-qr-canvas');
+      const statusEl = modal.querySelector('#hs-al-qr-status');
+      let stream, raf;
+      function stop(result) {
+        if (raf) cancelAnimationFrame(raf);
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        modal.remove();
+        resolve(result);
+      }
+      modal.querySelector('#hs-al-qr-cancel').addEventListener('click', () => stop(null));
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then(s => { stream = s; video.srcObject = s; tick(); })
+        .catch(e => { statusEl.textContent = 'Camera access failed: ' + e.message; });
+      function tick() {
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = typeof jsQR === 'function' ? jsQR(img.data, img.width, img.height) : null;
+          if (code) {
+            const parsed = MVOA.parseAssetQR(code.data);
+            if (parsed && parsed.assetId) { stop(parsed.assetId); return; }
+            statusEl.innerHTML = `Scanned, but not a recognised MVOA format.<br>Keep trying or cancel.`;
+          }
+        }
+        raf = requestAnimationFrame(tick);
+      }
+    });
   }
 
   function openQrScanner(container, expectedCategory) {
@@ -827,7 +877,7 @@ const HSModule = (function () {
       return `
         <div class="mvoa-list-item ${canEdit ? 'hs-template-card' : ''}" data-template-id="${t.TemplateID}" style="${canEdit ? 'cursor:pointer;' : ''}">
           <div class="mvoa-row">
-            <strong>${FREQUENCY_LABEL[t.Frequency]}</strong>
+            <strong>${escapeHtml(t.Name)}</strong>
             ${due.overdue ? '<span style="color:#b3261e;font-weight:700;font-size:0.85rem;">⚠️ Due</span>' : '<span class="muted" style="font-size:0.85rem;">Up to date</span>'}
           </div>
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${due.text}</p>
@@ -981,6 +1031,26 @@ const HSModule = (function () {
           ${opts.map(o => `<option value="${escapeHtml(o.OptionValue)}" ${current.result === o.OptionValue ? 'selected' : ''}>${escapeHtml(o.OptionValue)}</option>`).join('')}
         </select>
       `;
+    } else if (item.InputType === 'AssetList') {
+      // Zero or more entries, each either typed (pre-filled with the
+      // item's AssetPrefix so the technician only fills in the suffix)
+      // or scanned (overwrites the whole field with the scanned code).
+      // Zero entries is a fully valid "nothing to report" state — this
+      // is never required, never blocks submission.
+      const entries = current.entries || [];
+      const prefix = item.AssetPrefix || '';
+      inputHtml = `
+        <div class="hs-assetlist-entries" data-item-id="${item.ItemID}">
+          ${entries.map((val, idx) => `
+            <div class="mvoa-row" style="gap:6px;margin-top:6px;">
+              <input type="text" class="hs-assetlist-input" data-item-id="${item.ItemID}" data-idx="${idx}" value="${escapeHtml(val)}" style="flex:1;">
+              <button class="btn-secondary hs-assetlist-scan" data-item-id="${item.ItemID}" data-idx="${idx}" style="padding:6px 10px;margin:0;">📷</button>
+              <button class="btn-secondary hs-assetlist-remove" data-item-id="${item.ItemID}" data-idx="${idx}" style="padding:6px 10px;margin:0;">✕</button>
+            </div>
+          `).join('')}
+        </div>
+        <button class="btn-secondary hs-assetlist-add" data-item-id="${item.ItemID}" data-prefix="${escapeHtml(prefix)}" style="margin-top:6px;width:100%;">+ Add Another Light</button>
+      `;
     } else { // Text
       inputHtml = `<textarea class="hs-text-input" data-item-id="${item.ItemID}" rows="2" style="width:100%;margin-top:6px;box-sizing:border-box;">${escapeHtml(current.result || '')}</textarea>`;
     }
@@ -1006,6 +1076,40 @@ const HSModule = (function () {
     listEl._hsWired = true;
 
     listEl.addEventListener('click', (e) => {
+      const addBtn = e.target.closest('.hs-assetlist-add');
+      if (addBtn) {
+        const itemId = addBtn.dataset.itemId;
+        const item = items.find(i => i.ItemID === itemId);
+        pendingResults[itemId] = pendingResults[itemId] || {};
+        pendingResults[itemId].entries = pendingResults[itemId].entries || [];
+        pendingResults[itemId].entries.push(addBtn.dataset.prefix || '');
+        const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+        if (row && item) row.outerHTML = renderItemRow(item);
+        return;
+      }
+      const removeBtn = e.target.closest('.hs-assetlist-remove');
+      if (removeBtn) {
+        const itemId = removeBtn.dataset.itemId;
+        const idx = parseInt(removeBtn.dataset.idx, 10);
+        const item = items.find(i => i.ItemID === itemId);
+        if (pendingResults[itemId] && pendingResults[itemId].entries) pendingResults[itemId].entries.splice(idx, 1);
+        const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+        if (row && item) row.outerHTML = renderItemRow(item);
+        return;
+      }
+      const scanBtn = e.target.closest('.hs-assetlist-scan');
+      if (scanBtn) {
+        const itemId = scanBtn.dataset.itemId;
+        const idx = parseInt(scanBtn.dataset.idx, 10);
+        const item = items.find(i => i.ItemID === itemId);
+        scanAssetIdOnly().then(assetId => {
+          if (!assetId || !pendingResults[itemId] || !pendingResults[itemId].entries) return; // cancelled
+          pendingResults[itemId].entries[idx] = assetId;
+          const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+          if (row && item) row.outerHTML = renderItemRow(item);
+        });
+        return;
+      }
       const btn = e.target.closest('.hs-pf-btn');
       if (!btn) return;
       const itemId = btn.dataset.itemId;
@@ -1019,6 +1123,11 @@ const HSModule = (function () {
     listEl.addEventListener('input', (e) => {
       const itemId = e.target.dataset.itemId;
       if (!itemId) return;
+      if (e.target.classList.contains('hs-assetlist-input')) {
+        const idx = parseInt(e.target.dataset.idx, 10);
+        if (pendingResults[itemId] && pendingResults[itemId].entries) pendingResults[itemId].entries[idx] = e.target.value;
+        return; // no re-render — would steal focus mid-typing, same reasoning as Numeric
+      }
       if (e.target.classList.contains('hs-remarks-input')) {
         pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { remarks: e.target.value });
       } else if (e.target.classList.contains('hs-text-input')) {
@@ -1116,7 +1225,8 @@ const HSModule = (function () {
       const existingLogIds = existingLogRows.slice(1).map(r => r[0]).filter(Boolean);
       const logId = MVOA.nextId('HSLOG', existingLogIds);
 
-      const anyFail = items.some(i => pendingResults[i.ItemID]?.result === 'Fail');
+      const anyFail = items.some(i => pendingResults[i.ItemID]?.result === 'Fail') ||
+        items.some(i => i.InputType === 'AssetList' && (pendingResults[i.ItemID]?.entries || []).some(v => v && v.trim()));
       const logRow = LOG_COLS.map(c => ({
         LogID: logId, TemplateID: currentTemplate.TemplateID, PerformedBy: performedBy,
         Timestamp: now, Shift: currentShift || '', Status: anyFail ? 'Flagged' : 'Submitted', Notes: notes
@@ -1133,7 +1243,15 @@ const HSModule = (function () {
       const resultRows = items.map((item, i) => {
         const r = pendingResults[item.ItemID] || {};
         const resultId = 'HSRES-' + String(nextResultNum + i).padStart(5, '0');
-        return RESULT_COLS.map(c => ({ ResultID: resultId, LogID: logId, ItemID: item.ItemID, Result: r.result || '', Remarks: r.remarks || '' })[c]);
+        let resultValue, remarksValue;
+        if (item.InputType === 'AssetList') {
+          resultValue = (r.entries || []).filter(v => v && v.trim()).join('; ');
+          remarksValue = '';
+        } else {
+          resultValue = r.result || '';
+          remarksValue = r.remarks || '';
+        }
+        return RESULT_COLS.map(c => ({ ResultID: resultId, LogID: logId, ItemID: item.ItemID, Result: resultValue, Remarks: remarksValue })[c]);
       });
       if (resultRows.length) await MVOA.sheetsAppendMany(MVOA.TABS.hsItemResults, resultRows);
 
@@ -1153,6 +1271,28 @@ const HSModule = (function () {
           // Non-critical to the checklist submission itself, but surface it —
           // silently losing a safety-critical auto-flag would be worse than a visible error.
           errEl.textContent = `Checklist saved, but couldn't auto-create a task for "${item.CheckItem}": ${e.message}`;
+        }
+      }
+
+      // Auto-flag: one Daily Ops task PER REPORTED LIGHT for AssetList
+      // items — not one bundled task, so each light is independently
+      // trackable through to closure.
+      const assetListItems = items.filter(i => i.InputType === 'AssetList');
+      for (const item of assetListItems) {
+        const entries = (pendingResults[item.ItemID]?.entries || []).filter(v => v && v.trim());
+        for (const assetCode of entries) {
+          try {
+            await MVOA.createOpsTask({
+              categoryName: failTaskCategoryFor(currentScan.qrTarget),
+              title: `Plant Rounds: ${item.CheckItem} — ${assetCode}`,
+              description: `Reported not working by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
+              assigneeTitle: 'Facility Manager',
+              priority: 'Urgent',
+              createdBy: performedBy
+            });
+          } catch (e) {
+            errEl.textContent = `Checklist saved, but couldn't auto-create a task for "${assetCode}": ${e.message}`;
+          }
         }
       }
 
