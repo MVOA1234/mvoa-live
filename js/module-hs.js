@@ -47,7 +47,7 @@ const HSModule = (function () {
   const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
-  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active'];
+  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan'];
   const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased'];
   const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
@@ -112,11 +112,13 @@ const HSModule = (function () {
   // HOME — scan entry point + recent activity
   // ───────────────────────────────────────────────────────────
   function renderHome(container) {
+    const user = MVOA.getUser();
     const recent = logsCache.slice().sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || '')).slice(0, 5);
+    const visibleCategories = categoriesCache.filter(c => MVOA.canViewPlantRoundsSection(c.CategoryKey, user));
     container.innerHTML = `
-      <div class="card" style="max-width:520px;margin:0 0 16px 0;text-align:center;">
-        <p class="muted" style="margin:0 0 12px;">Scan the DG Set or DG Panel Room QR label to log a round.</p>
-        <button id="hs-scan-btn" class="btn-primary" style="width:100%;">📷 Scan Equipment QR</button>
+      <div class="card" style="max-width:520px;margin:0 0 16px 0;">
+        <p class="muted" style="margin:0 0 10px;">Choose which equipment/area you're logging.</p>
+        <div id="hs-category-tabs" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
       </div>
       <div class="mvoa-row" style="margin-bottom:10px;">
         <p class="muted" style="margin:0;">Recent activity</p>
@@ -129,14 +131,39 @@ const HSModule = (function () {
       </div>
       <div id="hs-recent"></div>
     `;
+    const tabsEl = container.querySelector('#hs-category-tabs');
+    tabsEl.innerHTML = visibleCategories.length
+      ? visibleCategories.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('')
+      : '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
+    tabsEl.querySelectorAll('.hs-category-tab').forEach(btn => {
+      btn.addEventListener('click', () => handleCategoryTabClick(btn.dataset.category, container));
+    });
+
     const recentEl = container.querySelector('#hs-recent');
     recentEl.innerHTML = recent.length ? recent.map(l => logCardHtml(l)).join('') : '<p class="muted">No checklist rounds logged yet.</p>';
     wireLogCardDrilldowns(recentEl);
-    container.querySelector('#hs-scan-btn').addEventListener('click', () => openQrScanner(container));
     container.querySelector('#hs-history-btn').addEventListener('click', () => renderHistory(container));
     container.querySelector('#hs-due-dashboard-btn').addEventListener('click', () => renderDueDashboard(container));
     container.querySelector('#hs-reports-btn').addEventListener('click', () => renderReportsMenu(container));
     container.querySelector('#hs-eos-btn').addEventListener('click', () => renderEndOfShiftPicker(container));
+  }
+
+  // Called when a category tab on Home is tapped. RequiresScan=FALSE
+  // categories (e.g. a future "Security" with no physical QR-scannable
+  // equipment) skip the scanner entirely and go straight to the
+  // checklist list. Everything else opens the scanner already knowing
+  // which category was expected, so a mismatch (scanning the wrong
+  // equipment for the tab you picked) can be caught and flagged.
+  function handleCategoryTabClick(categoryKey, container) {
+    const cat = categoryByKey(categoryKey);
+    if (!cat) return;
+    const requiresScan = !(cat.RequiresScan === 'FALSE' || cat.RequiresScan === 'false');
+    if (!requiresScan) {
+      currentScan = { assetId: '', assetName: '', category: cat.Label, qrTarget: categoryKey };
+      renderScanResult(container);
+      return;
+    }
+    openQrScanner(container, categoryKey);
   }
 
   // ───────────────────────────────────────────────────────────
@@ -496,14 +523,15 @@ const HSModule = (function () {
     return match ? match.CategoryKey : null;
   }
 
-  function openQrScanner(container) {
+  function openQrScanner(container, expectedCategory) {
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
+    const expectedLabel = expectedCategory ? categoryLabel(expectedCategory) : null;
     modal.innerHTML = `
       <div class="ops-qr-box">
         <video id="hs-qr-video" autoplay playsinline muted></video>
         <canvas id="hs-qr-canvas" style="display:none;"></canvas>
-        <p class="muted" id="hs-qr-status">Point camera at the DG Set or Panel Room QR label…</p>
+        <p class="muted" id="hs-qr-status">${expectedLabel ? `Point camera at the ${escapeHtml(expectedLabel)} QR label…` : 'Point camera at the equipment QR label…'}</p>
         <button id="hs-qr-cancel" class="btn-secondary">Cancel</button>
       </div>
     `;
@@ -539,6 +567,8 @@ const HSModule = (function () {
             const qrTarget = inferQrTarget(parsed);
             if (!qrTarget) {
               statusEl.innerHTML = `Scanned "${escapeHtml(parsed.assetName || parsed.assetId)}", but it's not set up for Plant Rounds yet.<br>Keep trying a different label or cancel.`;
+            } else if (expectedCategory && qrTarget !== expectedCategory) {
+              statusEl.innerHTML = `This is the <strong>${escapeHtml(categoryLabel(qrTarget))}</strong> label, but you selected <strong>${escapeHtml(expectedLabel)}</strong>.<br>Scan the ${escapeHtml(expectedLabel)} label instead, or cancel and pick the right tab.`;
             } else {
               currentScan = Object.assign({}, parsed, { qrTarget });
               stop();
