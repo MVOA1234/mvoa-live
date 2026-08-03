@@ -872,9 +872,9 @@ const HSModule = (function () {
       if (item.InputType === 'Numeric') {
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
         const displayVal = numericDisplayValue(item, resultObj);
-        if (!hasThreshold) return `<span style="white-space:nowrap;">${escapeHtml(displayVal)}</span>`; // plain data log — no pass/fail meaning, no coloring
+        if (!hasThreshold) return `<span style="white-space:nowrap;font-size:0.72rem;">${escapeHtml(displayVal)}</span>`; // plain data log — no pass/fail meaning, no coloring
         const isFail = resultObj.Result === 'Fail';
-        return `<span style="white-space:nowrap;color:${isFail ? '#b3261e' : 'green'};font-weight:700;">${escapeHtml(displayVal)}</span>`;
+        return `<span style="white-space:nowrap;font-size:0.72rem;color:${isFail ? '#b3261e' : 'green'};font-weight:700;">${escapeHtml(displayVal)}</span>`;
       }
       if (item.InputType === 'AssetList') {
         // Each asset code (e.g. "MVOA-EL-SL-001-68") must stay on one line;
@@ -882,7 +882,7 @@ const HSModule = (function () {
         // rather than wrapping mid-code.
         const entries = String(resultObj.Result || '').split(';').map(s => s.trim()).filter(Boolean);
         if (!entries.length) return '<span class="muted">—</span>';
-        return entries.map(e => `<span style="display:block;white-space:nowrap;">${escapeHtml(e)}</span>`).join('');
+        return entries.map(e => `<span style="display:block;white-space:nowrap;font-size:0.62rem;line-height:1.3;">${escapeHtml(e)}</span>`).join('');
       }
       if (resultObj.Result === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
       if (resultObj.Result === 'Pass') return '<span style="color:green;font-weight:700;">✓</span>';
@@ -933,7 +933,7 @@ const HSModule = (function () {
       </div>
       <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table" style="table-layout:fixed;">
-          <thead><tr><th style="width:160px;word-wrap:break-word;">Item</th>${dayHeaders.map(d => `<th style="width:56px;word-wrap:break-word;white-space:normal;">${d}</th>`).join('')}</tr></thead>
+          <thead><tr><th style="width:160px;word-wrap:break-word;">Item</th>${dayHeaders.map(d => `<th style="width:100px;word-wrap:break-word;white-space:normal;">${d}</th>`).join('')}</tr></thead>
           <tbody>${bodyHtml}</tbody>
         </table>
       </div>
