@@ -120,17 +120,15 @@ const HSModule = (function () {
         <p class="muted" style="margin:0 0 10px;">Choose which equipment/area you're logging.</p>
         <div id="hs-category-tabs" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
       </div>
-      <div class="mvoa-row" style="margin-bottom:10px;">
-        <p class="muted" style="margin:0;">Recent activity</p>
-        <div>
-          <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
-          <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
-          <button id="hs-reports-btn" class="btn-secondary">📈 More Reports</button>
-          <button id="hs-eos-btn" class="btn-secondary">📝 End of Shift Report</button>
-          <button id="hs-shiftduty-btn" class="btn-secondary">🗓️ Shift Duty</button>
-          <button id="hs-amc-btn" class="btn-secondary">📋 AMC &amp; Compliance</button>
-        </div>
+      <div style="margin-bottom:16px;display:flex;flex-wrap:wrap;gap:8px;">
+        <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
+        <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
+        <button id="hs-reports-btn" class="btn-secondary">📈 More Reports</button>
+        <button id="hs-eos-btn" class="btn-secondary">📝 End of Shift Report</button>
+        <button id="hs-shiftduty-btn" class="btn-secondary">🗓️ Shift Duty</button>
+        <button id="hs-amc-btn" class="btn-secondary">📋 AMC &amp; Compliance</button>
       </div>
+      <p class="muted" style="margin:0 0 8px;">Recent activity</p>
       <div id="hs-recent"></div>
     `;
     const tabsEl = container.querySelector('#hs-category-tabs');
@@ -298,7 +296,7 @@ const HSModule = (function () {
             return `<td class="muted">${escapeHtml(currentName || '—')}</td>`;
           }
           return `<td>
-            <input type="text" class="hs-duty-input" data-date="${dateStr}" data-shift="${shift}" value="${escapeHtml(currentName)}" placeholder="Name" style="width:100%;box-sizing:border-box;">
+            <input type="text" class="hs-duty-input" data-date="${dateStr}" data-shift="${shift}" value="${escapeHtml(currentName)}" placeholder="Name" style="width:100%;box-sizing:border-box;font-size:0.8rem;padding:4px 6px;">
           </td>`;
         }).join('')}
       </tr>
@@ -368,7 +366,7 @@ const HSModule = (function () {
   // reflects just the most recent one (matching the original sheet's
   // simple flat-table shape).
   // ───────────────────────────────────────────────────────────
-  const AMC_COLS = ['AssetID', 'AssetName', 'AssetCode', 'Nature', 'LastDone', 'FrequencyMonths', 'ReminderLeadDays', 'Active'];
+  const AMC_COLS = ['AssetID', 'AssetName', 'AssetCode', 'Nature', 'LastDone', 'FrequencyMonths', 'ReminderLeadDays', 'Active', 'ContractStartDate', 'ContractEndDate'];
   const AMC_LOG_COLS = ['LogID', 'AssetID', 'CompletedDate', 'CompletedBy', 'ReportURL'];
 
   function addMonths(date, months) {
@@ -386,6 +384,14 @@ const HSModule = (function () {
     if (!due) return null;
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return Math.round((due - today) / (1000 * 60 * 60 * 24));
+  }
+  const CONTRACT_END_LEAD_DAYS = 14; // fixed lead for contract-expiry flagging, separate from each asset's own ReminderLeadDays (which is for the AMC-due reminder)
+  function amcDaysUntilContractEnd(asset) {
+    if (!asset.ContractEndDate) return null;
+    const end = new Date(asset.ContractEndDate);
+    if (isNaN(end)) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return Math.round((end - today) / (1000 * 60 * 60 * 24));
   }
 
   async function renderAmcCompliance(container) {
@@ -413,6 +419,11 @@ const HSModule = (function () {
       return days !== null && days <= (parseInt(a.ReminderLeadDays, 10) || 0);
     }).sort((a, b) => amcDaysUntilDue(a) - amcDaysUntilDue(b));
 
+    const contractsExpiringSoon = assets.filter(a => {
+      const days = amcDaysUntilContractEnd(a);
+      return days !== null && days <= CONTRACT_END_LEAD_DAYS;
+    }).sort((a, b) => amcDaysUntilContractEnd(a) - amcDaysUntilContractEnd(b));
+
     bodyEl.innerHTML = `
       ${dueSoon.length ? `
         <div class="card" style="max-width:100%;margin:0 0 16px 0;border:2px solid #b3261e;">
@@ -423,6 +434,15 @@ const HSModule = (function () {
           }).join('')}
         </div>
       ` : ''}
+      ${contractsExpiringSoon.length ? `
+        <div class="card" style="max-width:100%;margin:0 0 16px 0;border:2px solid #b3261e;">
+          <h3 style="margin:0 0 8px;color:#b3261e;">📄 Contract Expiring Soon</h3>
+          ${contractsExpiringSoon.map(a => {
+            const days = amcDaysUntilContractEnd(a);
+            return `<p style="margin:4px 0;">${escapeHtml(a.AssetName)} (${escapeHtml(a.AssetCode)}) — ${days < 0 ? `<strong style="color:#b3261e;">Expired ${-days} day(s) ago</strong>` : `expires in ${days} day(s)`}</p>`;
+          }).join('')}
+        </div>
+      ` : ''}
       <div class="mvoa-row" style="margin-bottom:10px;">
         <p class="muted" style="margin:0;">${assets.length} asset(s) tracked</p>
         <button id="hs-amc-add-btn" class="btn-secondary">+ Add New Asset</button>
@@ -430,7 +450,7 @@ const HSModule = (function () {
       <div id="hs-amc-add-form"></div>
       <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table">
-          <thead><tr><th>Asset Name</th><th>Asset Code</th><th>Nature</th><th>Last Done</th><th>Next Due</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Asset Name</th><th>Asset Code</th><th>Nature</th><th>Last Done</th><th>Next Due</th><th>Status</th><th>Contract End</th><th></th></tr></thead>
           <tbody>
             ${assets.map(a => {
               const due = amcNextDue(a);
@@ -439,6 +459,11 @@ const HSModule = (function () {
                 : days < 0 ? `<span style="color:#b3261e;font-weight:700;">Overdue ${-days}d</span>`
                 : days <= (parseInt(a.ReminderLeadDays, 10) || 0) ? `<span style="color:#b3261e;font-weight:700;">Due in ${days}d</span>`
                 : `<span style="color:green;">OK (${days}d)</span>`;
+              const contractDays = amcDaysUntilContractEnd(a);
+              const contractHtml = !a.ContractEndDate ? '<span class="muted">—</span>'
+                : contractDays < 0 ? `<span style="color:#b3261e;font-weight:700;">Expired</span>`
+                : contractDays <= CONTRACT_END_LEAD_DAYS ? `<span style="color:#b3261e;font-weight:700;">${new Date(a.ContractEndDate).toLocaleDateString()} (${contractDays}d)</span>`
+                : new Date(a.ContractEndDate).toLocaleDateString();
               return `<tr>
                 <td>${escapeHtml(a.AssetName)}</td>
                 <td>${escapeHtml(a.AssetCode)}</td>
@@ -446,6 +471,7 @@ const HSModule = (function () {
                 <td>${a.LastDone ? new Date(a.LastDone).toLocaleDateString() : '—'}</td>
                 <td>${due ? due.toLocaleDateString() : '—'}</td>
                 <td>${statusHtml}</td>
+                <td>${contractHtml}</td>
                 <td><button class="btn-primary hs-amc-done-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">✓ Mark Done</button></td>
               </tr>`;
             }).join('')}
@@ -469,6 +495,8 @@ const HSModule = (function () {
         <label>Last Done <input type="date" id="hs-amc-new-lastdone"></label>
         <label>Frequency (months) <input type="number" id="hs-amc-new-freq" value="2"></label>
         <label>Reminder Lead (days) <input type="number" id="hs-amc-new-lead" value="14"></label>
+        <label>Contract Start Date (optional) <input type="date" id="hs-amc-new-cstart"></label>
+        <label>Contract End Date (optional) <input type="date" id="hs-amc-new-cend"></label>
         <button id="hs-amc-new-save" class="btn-primary" style="width:100%;margin-top:8px;">Add Asset</button>
         <p class="error-text" id="hs-amc-new-error"></p>
       </div>
@@ -481,6 +509,8 @@ const HSModule = (function () {
       const lastDone = formEl.querySelector('#hs-amc-new-lastdone').value;
       const freq = formEl.querySelector('#hs-amc-new-freq').value;
       const lead = formEl.querySelector('#hs-amc-new-lead').value;
+      const cstart = formEl.querySelector('#hs-amc-new-cstart').value;
+      const cend = formEl.querySelector('#hs-amc-new-cend').value;
       if (!name || !code || !lastDone || !freq) {
         errEl.textContent = 'Please fill in at least Name, Code, Last Done, and Frequency.';
         return;
@@ -489,7 +519,7 @@ const HSModule = (function () {
         const existingRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcAssets);
         const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
         const assetId = MVOA.nextId('AMC', existingIds);
-        await MVOA.sheetsAppend(MVOA.TABS.hsAmcAssets, [assetId, name, code, nature, lastDone, freq, lead, 'TRUE']);
+        await MVOA.sheetsAppend(MVOA.TABS.hsAmcAssets, [assetId, name, code, nature, lastDone, freq, lead, 'TRUE', cstart, cend]);
         formEl.innerHTML = '';
         renderAmcCompliance(container);
       } catch (e) {
@@ -808,14 +838,14 @@ const HSModule = (function () {
         pdfRows.push(sectionRow);
       }
       const performedByCells = dayHeaders.map(d => performedByFor(d, shift));
-      bodyHtml += `<tr><td style="font-style:italic;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
+      bodyHtml += `<tr><td style="font-style:italic;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
       const performedByRow = { Item: 'Performed By' };
       dayHeaders.forEach((d, i) => performedByRow[String(d)] = performedByCells[i] || '');
       pdfRows.push(performedByRow);
 
       items.forEach(item => {
         const cells = dayHeaders.map(d => cellFor(item.ItemID, d, shift));
-        bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td>${cellHtml(item, v)}</td>`).join('')}</tr>`;
+        bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td style="word-wrap:break-word;white-space:normal;">${cellHtml(item, v)}</td>`).join('')}</tr>`;
         const pdfRow = { Item: item.CheckItem };
         dayHeaders.forEach((d, i) => pdfRow[String(d)] = cellPdfValue(item, cells[i]));
         pdfRows.push(pdfRow);
@@ -828,8 +858,8 @@ const HSModule = (function () {
         <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
-        <table class="mvoa-table">
-          <thead><tr><th>Item</th>${dayHeaders.map(d => `<th>${d}</th>`).join('')}</tr></thead>
+        <table class="mvoa-table" style="table-layout:fixed;">
+          <thead><tr><th style="width:160px;word-wrap:break-word;">Item</th>${dayHeaders.map(d => `<th style="width:56px;word-wrap:break-word;white-space:normal;">${d}</th>`).join('')}</tr></thead>
           <tbody>${bodyHtml}</tbody>
         </table>
       </div>
@@ -1311,6 +1341,21 @@ const HSModule = (function () {
       container.querySelectorAll('.hs-shift-btn').forEach(btn => {
         btn.addEventListener('click', () => { currentShift = btn.dataset.shift; renderChecklistForm(container); });
       });
+      return;
+    }
+
+    if (isDaily && !isShiftBased && hasSubmittedToday(currentTemplate.TemplateID, null)) {
+      const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
+      container.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="hs-back-scan" class="btn-secondary">← Back</button>
+          <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        </div>
+        <div class="card" style="max-width:420px;margin:0;">
+          <p class="muted" style="margin:0;">Already submitted today. Next entry allowed from ${tomorrow.toLocaleDateString()}.</p>
+        </div>
+      `;
+      container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
       return;
     }
 
