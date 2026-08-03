@@ -872,9 +872,17 @@ const HSModule = (function () {
       if (item.InputType === 'Numeric') {
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
         const displayVal = numericDisplayValue(item, resultObj);
-        if (!hasThreshold) return escapeHtml(displayVal); // plain data log — no pass/fail meaning, no coloring
+        if (!hasThreshold) return `<span style="white-space:nowrap;">${escapeHtml(displayVal)}</span>`; // plain data log — no pass/fail meaning, no coloring
         const isFail = resultObj.Result === 'Fail';
-        return `<span style="color:${isFail ? '#b3261e' : 'green'};font-weight:700;">${escapeHtml(displayVal)}</span>`;
+        return `<span style="white-space:nowrap;color:${isFail ? '#b3261e' : 'green'};font-weight:700;">${escapeHtml(displayVal)}</span>`;
+      }
+      if (item.InputType === 'AssetList') {
+        // Each asset code (e.g. "MVOA-EL-SL-001-68") must stay on one line;
+        // multiple entries stack as separate lines within the same cell
+        // rather than wrapping mid-code.
+        const entries = String(resultObj.Result || '').split(';').map(s => s.trim()).filter(Boolean);
+        if (!entries.length) return '<span class="muted">—</span>';
+        return entries.map(e => `<span style="display:block;white-space:nowrap;">${escapeHtml(e)}</span>`).join('');
       }
       if (resultObj.Result === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
       if (resultObj.Result === 'Pass') return '<span style="color:green;font-weight:700;">✓</span>';
