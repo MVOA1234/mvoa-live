@@ -1460,6 +1460,7 @@ const HSModule = (function () {
   // ───────────────────────────────────────────────────────────
   // AUTO-FLAGGED TASK RESOLUTION
   // ───────────────────────────────────────────────────────────
+  let taskResolutionFilter = 'all'; // 'all' | 'Open' | 'Approved'
   async function renderTaskResolutionReport(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -1467,9 +1468,22 @@ const HSModule = (function () {
         <strong>🔗 Auto-Flagged Task Resolution</strong>
         <button id="hs-task-res-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
+      <div class="card" style="max-width:260px;margin:0 0 12px 0;">
+        <label>Status
+          <select id="hs-task-res-filter">
+            <option value="all" ${taskResolutionFilter==='all'?'selected':''}>All</option>
+            <option value="Open" ${taskResolutionFilter==='Open'?'selected':''}>Open</option>
+            <option value="Approved" ${taskResolutionFilter==='Approved'?'selected':''}>Approved</option>
+          </select>
+        </label>
+      </div>
       <div id="hs-task-res-list"><p class="muted">Loading…</p></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelector('#hs-task-res-filter').addEventListener('change', (e) => {
+      taskResolutionFilter = e.target.value;
+      renderTaskResolutionReport(container);
+    });
 
     const listEl = container.querySelector('#hs-task-res-list');
     let flagged;
@@ -1479,22 +1493,25 @@ const HSModule = (function () {
       listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
     }
-    flagged = flagged.sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
+    flagged = flagged
+      .map(x => Object.assign({}, x, { bucket: x.status === 'Closed' ? 'Approved' : 'Open' }))
+      .filter(x => taskResolutionFilter === 'all' || x.bucket === taskResolutionFilter)
+      .sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
 
     listEl.innerHTML = flagged.length ? flagged.map(x => `
         <div class="mvoa-list-item">
           <div class="mvoa-row">
             <strong>${escapeHtml(x.item)}</strong>
-            ${x.status === 'Closed' ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Critical')}
+            ${x.bucket === 'Approved' ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Critical').replace('Critical', 'Open')}
           </div>
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(x.createdDate)}</p>
-          ${x.status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed by ${escapeHtml(x.closedBy)} · ${formatDate(x.closedDate)}</p>` : ''}
+          ${x.bucket === 'Approved' ? `<p class="muted" style="font-size:0.8rem;">Closed by ${escapeHtml(x.closedBy)} · ${formatDate(x.closedDate)}</p>` : ''}
         </div>
     `).join('') : '<p class="muted">No flagged items found.</p>';
     container.querySelector('#hs-task-res-pdf').addEventListener('click', () => {
       const pdfRows = flagged.map(x => ({
-        Item: x.item, LoggedAt: formatDate(x.createdDate), TaskStatus: x.status,
-        ClosedBy: x.status === 'Closed' ? x.closedBy : '', ClosedDate: x.status === 'Closed' ? formatDate(x.closedDate) : ''
+        Item: x.item, LoggedAt: formatDate(x.createdDate), TaskStatus: x.bucket,
+        ClosedBy: x.bucket === 'Approved' ? x.closedBy : '', ClosedDate: x.bucket === 'Approved' ? formatDate(x.closedDate) : ''
       }));
       printTablePdf('Auto-Flagged Task Resolution', ['Item', 'LoggedAt', 'TaskStatus', 'ClosedBy', 'ClosedDate'], pdfRows);
     });
