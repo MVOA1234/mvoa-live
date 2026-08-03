@@ -181,7 +181,7 @@ const HSModule = (function () {
     const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily' && (t.ShiftBased === 'TRUE' || t.ShiftBased === 'true') && MVOA.canEditPlantRoundsSection(t.QRTarget, user));
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>📝 End of Shift Report</strong>
       </div>
       <p class="muted" style="margin:0 0 12px;">Pick which of today's submitted shifts you're reporting on.</p>
@@ -257,7 +257,7 @@ const HSModule = (function () {
   async function renderShiftDuty(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>🗓️ Shift Duty — This Week</strong>
       </div>
       <div id="hs-shiftduty-body"><p class="muted">Loading…</p></div>
@@ -397,7 +397,7 @@ const HSModule = (function () {
   async function renderAmcCompliance(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>📋 AMC &amp; Compliance</strong>
       </div>
       <div id="hs-amc-body"><p class="muted">Loading…</p></div>
@@ -656,7 +656,7 @@ const HSModule = (function () {
   function renderReportsMenu(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>📈 Reports</strong>
       </div>
       <div class="card" style="max-width:420px;margin:0;">
@@ -955,7 +955,7 @@ const HSModule = (function () {
   function renderDueDashboard(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>📊 Due Status</strong>
       </div>
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -1286,7 +1286,7 @@ const HSModule = (function () {
     if (!canView) {
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
-          <button id="hs-back-home" class="btn-secondary">← Home</button>
+          <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
           <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
         </div>
         <p class="muted">You don't have access to ${escapeHtml(categoryLabel(currentScan.qrTarget))}.</p>
@@ -1301,7 +1301,7 @@ const HSModule = (function () {
 
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}${currentScan.assetName ? ' — ' + escapeHtml(currentScan.assetName) : ''}</strong>
       </div>
       <p class="muted" style="margin:0 0 12px;">${canEdit ? 'Choose which checklist to log.' : "View only — you don't have edit access here."}</p>
@@ -2031,7 +2031,7 @@ const HSModule = (function () {
   function renderHistory(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>📅 Checklist History</strong>
         <button id="hs-history-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
