@@ -127,6 +127,8 @@ const HSModule = (function () {
           <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
           <button id="hs-reports-btn" class="btn-secondary">📈 More Reports</button>
           <button id="hs-eos-btn" class="btn-secondary">📝 End of Shift Report</button>
+          <button id="hs-shiftduty-btn" class="btn-secondary">🗓️ Shift Duty</button>
+          <button id="hs-amc-btn" class="btn-secondary">📋 AMC &amp; Compliance</button>
         </div>
       </div>
       <div id="hs-recent"></div>
@@ -146,6 +148,8 @@ const HSModule = (function () {
     container.querySelector('#hs-due-dashboard-btn').addEventListener('click', () => renderDueDashboard(container));
     container.querySelector('#hs-reports-btn').addEventListener('click', () => renderReportsMenu(container));
     container.querySelector('#hs-eos-btn').addEventListener('click', () => renderEndOfShiftPicker(container));
+    container.querySelector('#hs-shiftduty-btn').addEventListener('click', () => renderShiftDuty(container));
+    container.querySelector('#hs-amc-btn').addEventListener('click', () => renderAmcCompliance(container));
   }
 
   // Called when a category tab on Home is tapped. RequiresScan=FALSE
@@ -229,6 +233,335 @@ const HSModule = (function () {
           btn.textContent = 'Save';
         }
       });
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SHIFT DUTY — one shared weekly roster (not per category/equipment).
+  // HSShiftDuty columns: Date (YYYY-MM-DD) | Shift | Name.
+  // Only today and the remaining days of the CURRENT week are editable
+  // — past days in the week are shown locked, since rewriting history
+  // isn't the point (readjustment is for upcoming coverage, e.g. leave).
+  // ───────────────────────────────────────────────────────────
+  const SHIFT_DUTY_COLS = ['Date', 'Shift', 'Name'];
+  function mondayOfWeek(d) {
+    const day = d.getDay(); // 0=Sun..6=Sat
+    const diff = day === 0 ? 6 : day - 1;
+    const m = new Date(d);
+    m.setDate(m.getDate() - diff);
+    m.setHours(0, 0, 0, 0);
+    return m;
+  }
+  function isoDate(d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  async function renderShiftDuty(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <strong>🗓️ Shift Duty — This Week</strong>
+      </div>
+      <div id="hs-shiftduty-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+
+    const bodyEl = container.querySelector('#hs-shiftduty-body');
+    let rows, assigneeOptions;
+    try {
+      [rows, assigneeOptions] = await Promise.all([
+        MVOA.sheetsRead(MVOA.TABS.hsShiftDuty),
+        MVOA.loadAssigneeOptions()
+      ]);
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const duty = rowsToObjs(rows, SHIFT_DUTY_COLS); // rowNumber tracked for in-place updates
+
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const monday = mondayOfWeek(today);
+    const days = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday); d.setDate(d.getDate() + i); return d; });
+    const shifts = ['1st', '2nd', '3rd'];
+    const dayLabels = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+    function entryFor(dateStr, shift) {
+      return duty.find(r => r.Date === dateStr && r.Shift === shift) || null;
+    }
+
+    const cellsHtml = shifts.map(shift => `
+      <tr>
+        <td style="font-weight:600;">${shift}</td>
+        ${days.map((d, i) => {
+          const dateStr = isoDate(d);
+          const editable = d.getTime() >= today.getTime();
+          const entry = entryFor(dateStr, shift);
+          const currentName = entry ? entry.Name : '';
+          if (!editable) {
+            return `<td class="muted">${escapeHtml(currentName || '—')}</td>`;
+          }
+          return `<td>
+            <select class="hs-duty-select" data-date="${dateStr}" data-shift="${shift}">
+              <option value="">— Unassigned —</option>
+              ${assigneeOptions.filter(o => o.value.indexOf('user:') === 0).map(o =>
+                `<option value="${escapeHtml(o.label.split(' (')[0])}" ${currentName === o.label.split(' (')[0] ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
+              ).join('')}
+            </select>
+          </td>`;
+        }).join('')}
+      </tr>
+    `).join('');
+
+    bodyEl.innerHTML = `
+      <p class="muted" style="margin:0 0 10px;">Past days this week are locked. Today and the rest of the week can be adjusted (e.g. for leave/readjustment).</p>
+      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <table class="mvoa-table">
+          <thead><tr><th>Shift</th>${days.map((d, i) => `<th>${dayLabels[i]}<br><span class="muted" style="font-weight:400;">${d.toLocaleDateString()}</span></th>`).join('')}</tr></thead>
+          <tbody>${cellsHtml}</tbody>
+        </table>
+      </div>
+      <button id="hs-duty-save" class="btn-primary" style="margin-top:12px;">Save Roster</button>
+      <p class="error-text" id="hs-duty-error"></p>
+      <p class="muted" id="hs-duty-saved"></p>
+    `;
+
+    bodyEl.querySelector('#hs-duty-save').addEventListener('click', async () => {
+      const errEl = bodyEl.querySelector('#hs-duty-error');
+      const savedEl = bodyEl.querySelector('#hs-duty-saved');
+      const btn = bodyEl.querySelector('#hs-duty-save');
+      errEl.textContent = ''; savedEl.textContent = '';
+      btn.disabled = true; btn.textContent = 'Saving…';
+      try {
+        const toUpdate = []; // { rowNumber, row }
+        const toAppend = []; // row
+        bodyEl.querySelectorAll('.hs-duty-select').forEach(sel => {
+          const dateStr = sel.dataset.date;
+          const shift = sel.dataset.shift;
+          const newName = sel.value;
+          const existing = entryFor(dateStr, shift);
+          const originalName = existing ? existing.Name : '';
+          if (newName === originalName) return; // unchanged
+          if (existing) {
+            toUpdate.push({ rowNumber: existing.rowNumber, row: [dateStr, shift, newName] });
+          } else if (newName) {
+            toAppend.push([dateStr, shift, newName]);
+          }
+        });
+        for (const u of toUpdate) {
+          await MVOA.sheetsUpdateRow(MVOA.TABS.hsShiftDuty, u.rowNumber, u.row);
+        }
+        if (toAppend.length) await MVOA.sheetsAppendMany(MVOA.TABS.hsShiftDuty, toAppend);
+        if (!toUpdate.length && !toAppend.length) {
+          savedEl.textContent = 'No changes to save.';
+        } else {
+          savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
+          renderShiftDuty(container); // refresh so row numbers stay correct for further edits
+        }
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Save Roster';
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // AMC & COMPLIANCE — HSAMCAssets columns: AssetID | AssetName |
+  // AssetCode | Nature | LastDone | FrequencyMonths | ReminderLeadDays
+  // | Active. NextDue and the reminder trigger are always COMPUTED
+  // from LastDone+FrequencyMonths (not stored), so they can never go
+  // stale. HSAMCLog (AssetID | CompletedDate | CompletedBy |
+  // ReportURL) keeps a full history of completions with their
+  // attached report, while the asset row's own LastDone always
+  // reflects just the most recent one (matching the original sheet's
+  // simple flat-table shape).
+  // ───────────────────────────────────────────────────────────
+  const AMC_COLS = ['AssetID', 'AssetName', 'AssetCode', 'Nature', 'LastDone', 'FrequencyMonths', 'ReminderLeadDays', 'Active'];
+  const AMC_LOG_COLS = ['LogID', 'AssetID', 'CompletedDate', 'CompletedBy', 'ReportURL'];
+
+  function addMonths(date, months) {
+    const d = new Date(date);
+    d.setMonth(d.getMonth() + parseInt(months, 10) || 0);
+    return d;
+  }
+  function amcNextDue(asset) {
+    const last = new Date(asset.LastDone);
+    if (isNaN(last)) return null;
+    return addMonths(last, asset.FrequencyMonths);
+  }
+  function amcDaysUntilDue(asset) {
+    const due = amcNextDue(asset);
+    if (!due) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return Math.round((due - today) / (1000 * 60 * 60 * 24));
+  }
+
+  async function renderAmcCompliance(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Home</button>
+        <strong>📋 AMC &amp; Compliance</strong>
+      </div>
+      <div id="hs-amc-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+
+    const bodyEl = container.querySelector('#hs-amc-body');
+    let rows;
+    try {
+      rows = await MVOA.sheetsRead(MVOA.TABS.hsAmcAssets);
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const assets = rowsToObjs(rows, AMC_COLS).filter(a => a.Active === 'TRUE' || a.Active === 'true');
+
+    const dueSoon = assets.filter(a => {
+      const days = amcDaysUntilDue(a);
+      return days !== null && days <= (parseInt(a.ReminderLeadDays, 10) || 0);
+    }).sort((a, b) => amcDaysUntilDue(a) - amcDaysUntilDue(b));
+
+    bodyEl.innerHTML = `
+      ${dueSoon.length ? `
+        <div class="card" style="max-width:100%;margin:0 0 16px 0;border:2px solid #b3261e;">
+          <h3 style="margin:0 0 8px;color:#b3261e;">⚠️ Due Soon / Overdue</h3>
+          ${dueSoon.map(a => {
+            const days = amcDaysUntilDue(a);
+            return `<p style="margin:4px 0;">${escapeHtml(a.AssetName)} (${escapeHtml(a.AssetCode)}) — ${days < 0 ? `<strong style="color:#b3261e;">Overdue by ${-days} day(s)</strong>` : `due in ${days} day(s)`}</p>`;
+          }).join('')}
+        </div>
+      ` : ''}
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <p class="muted" style="margin:0;">${assets.length} asset(s) tracked</p>
+        <button id="hs-amc-add-btn" class="btn-secondary">+ Add New Asset</button>
+      </div>
+      <div id="hs-amc-add-form"></div>
+      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <table class="mvoa-table">
+          <thead><tr><th>Asset Name</th><th>Asset Code</th><th>Nature</th><th>Last Done</th><th>Next Due</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${assets.map(a => {
+              const due = amcNextDue(a);
+              const days = amcDaysUntilDue(a);
+              const statusHtml = days === null ? '<span class="muted">—</span>'
+                : days < 0 ? `<span style="color:#b3261e;font-weight:700;">Overdue ${-days}d</span>`
+                : days <= (parseInt(a.ReminderLeadDays, 10) || 0) ? `<span style="color:#b3261e;font-weight:700;">Due in ${days}d</span>`
+                : `<span style="color:green;">OK (${days}d)</span>`;
+              return `<tr>
+                <td>${escapeHtml(a.AssetName)}</td>
+                <td>${escapeHtml(a.AssetCode)}</td>
+                <td>${escapeHtml(a.Nature)}</td>
+                <td>${a.LastDone ? new Date(a.LastDone).toLocaleDateString() : '—'}</td>
+                <td>${due ? due.toLocaleDateString() : '—'}</td>
+                <td>${statusHtml}</td>
+                <td><button class="btn-primary hs-amc-done-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">✓ Mark Done</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    bodyEl.querySelector('#hs-amc-add-btn').addEventListener('click', () => renderAmcAddForm(bodyEl.querySelector('#hs-amc-add-form'), container));
+    bodyEl.querySelectorAll('.hs-amc-done-btn').forEach(btn => {
+      btn.addEventListener('click', () => openAmcMarkDoneDialog(btn.dataset.assetId, assets, container));
+    });
+  }
+
+  function renderAmcAddForm(formEl, container) {
+    formEl.innerHTML = `
+      <div class="card" style="max-width:420px;margin:0 0 16px 0;">
+        <label>Asset Name <input type="text" id="hs-amc-new-name"></label>
+        <label>Asset Code <input type="text" id="hs-amc-new-code"></label>
+        <label>Nature (e.g. AMC, Fitness Check) <input type="text" id="hs-amc-new-nature"></label>
+        <label>Last Done <input type="date" id="hs-amc-new-lastdone"></label>
+        <label>Frequency (months) <input type="number" id="hs-amc-new-freq" value="2"></label>
+        <label>Reminder Lead (days) <input type="number" id="hs-amc-new-lead" value="14"></label>
+        <button id="hs-amc-new-save" class="btn-primary" style="width:100%;margin-top:8px;">Add Asset</button>
+        <p class="error-text" id="hs-amc-new-error"></p>
+      </div>
+    `;
+    formEl.querySelector('#hs-amc-new-save').addEventListener('click', async () => {
+      const errEl = formEl.querySelector('#hs-amc-new-error');
+      const name = formEl.querySelector('#hs-amc-new-name').value.trim();
+      const code = formEl.querySelector('#hs-amc-new-code').value.trim();
+      const nature = formEl.querySelector('#hs-amc-new-nature').value.trim();
+      const lastDone = formEl.querySelector('#hs-amc-new-lastdone').value;
+      const freq = formEl.querySelector('#hs-amc-new-freq').value;
+      const lead = formEl.querySelector('#hs-amc-new-lead').value;
+      if (!name || !code || !lastDone || !freq) {
+        errEl.textContent = 'Please fill in at least Name, Code, Last Done, and Frequency.';
+        return;
+      }
+      try {
+        const existingRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcAssets);
+        const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+        const assetId = MVOA.nextId('AMC', existingIds);
+        await MVOA.sheetsAppend(MVOA.TABS.hsAmcAssets, [assetId, name, code, nature, lastDone, freq, lead, 'TRUE']);
+        formEl.innerHTML = '';
+        renderAmcCompliance(container);
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+      }
+    });
+  }
+
+  function openAmcMarkDoneDialog(assetId, assets, container) {
+    const asset = assets.find(a => a.AssetID === assetId);
+    if (!asset) return;
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;">
+        <h3>Mark Done: ${escapeHtml(asset.AssetName)}</h3>
+        <label>Completed Date
+          <input type="date" id="hs-amc-done-date" value="${isoDate(new Date())}">
+        </label>
+        <div id="hs-amc-done-attach" style="margin-top:10px;"></div>
+        <button id="hs-amc-done-attach-btn" class="btn-secondary" style="width:100%;">📎 Attach Report (optional)</button>
+        <button id="hs-amc-done-save" class="btn-primary" style="margin-top:10px;">Save</button>
+        <button id="hs-amc-done-cancel" class="btn-secondary">Cancel</button>
+        <p class="error-text" id="hs-amc-done-error"></p>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    let attachment = null;
+
+    modal.querySelector('#hs-amc-done-cancel').addEventListener('click', () => modal.remove());
+    modal.querySelector('#hs-amc-done-attach-btn').addEventListener('click', async () => {
+      const a = await MVOA.pickAttachment({ photoOnly: false, useCamera: false });
+      if (a) {
+        attachment = a;
+        modal.querySelector('#hs-amc-done-attach').innerHTML = `<p class="muted">📎 ${escapeHtml(a.name)}</p>`;
+      }
+    });
+    modal.querySelector('#hs-amc-done-save').addEventListener('click', async () => {
+      const errEl = modal.querySelector('#hs-amc-done-error');
+      const dateVal = modal.querySelector('#hs-amc-done-date').value;
+      if (!dateVal) { errEl.textContent = 'Please pick a date.'; return; }
+      const saveBtn = modal.querySelector('#hs-amc-done-save');
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        let reportUrl = '';
+        if (attachment) {
+          saveBtn.textContent = 'Uploading report…';
+          reportUrl = await MVOA.uploadPhotoToDrive(attachment.file, `AMC_${asset.AssetCode}_${dateVal}_${attachment.name}`);
+        }
+        const updated = Object.assign({}, asset, { LastDone: dateVal });
+        await MVOA.sheetsUpdateRow(MVOA.TABS.hsAmcAssets, asset.rowNumber, AMC_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
+        const existingLogRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcLog);
+        const existingLogIds = existingLogRows.slice(1).map(r => r[0]).filter(Boolean);
+        const logId = MVOA.nextId('AMCLOG', existingLogIds);
+        const user = MVOA.getUser();
+        await MVOA.sheetsAppend(MVOA.TABS.hsAmcLog, [logId, asset.AssetID, dateVal, user.name, reportUrl]);
+        modal.remove();
+        renderAmcCompliance(container);
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+      }
     });
   }
 
