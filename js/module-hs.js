@@ -472,7 +472,10 @@ const HSModule = (function () {
                 <td>${due ? due.toLocaleDateString() : '—'}</td>
                 <td>${statusHtml}</td>
                 <td>${contractHtml}</td>
-                <td><button class="btn-primary hs-amc-done-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">✓ Mark Done</button></td>
+                <td>
+                  <button class="btn-primary hs-amc-done-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0 0 4px 0;">✓ Mark Done</button>
+                  <button class="btn-secondary hs-amc-edit-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">✏️ Edit</button>
+                </td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -483,6 +486,69 @@ const HSModule = (function () {
     bodyEl.querySelector('#hs-amc-add-btn').addEventListener('click', () => renderAmcAddForm(bodyEl.querySelector('#hs-amc-add-form'), container));
     bodyEl.querySelectorAll('.hs-amc-done-btn').forEach(btn => {
       btn.addEventListener('click', () => openAmcMarkDoneDialog(btn.dataset.assetId, assets, container));
+    });
+    bodyEl.querySelectorAll('.hs-amc-edit-btn').forEach(btn => {
+      btn.addEventListener('click', () => openAmcEditDialog(btn.dataset.assetId, assets, container));
+    });
+  }
+
+  function openAmcEditDialog(assetId, assets, container) {
+    const asset = assets.find(a => a.AssetID === assetId);
+    if (!asset) return;
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;">
+        <h3>Edit Asset: ${escapeHtml(asset.AssetName)}</h3>
+        <label>Asset Name <input type="text" id="hs-amc-edit-name" value="${escapeHtml(asset.AssetName)}"></label>
+        <label>Asset Code <input type="text" id="hs-amc-edit-code" value="${escapeHtml(asset.AssetCode)}"></label>
+        <label>Nature (e.g. AMC, Fitness Check) <input type="text" id="hs-amc-edit-nature" value="${escapeHtml(asset.Nature)}"></label>
+        <label>Frequency (months) <input type="number" id="hs-amc-edit-freq" value="${escapeHtml(asset.FrequencyMonths)}"></label>
+        <label>Reminder Lead (days) <input type="number" id="hs-amc-edit-lead" value="${escapeHtml(asset.ReminderLeadDays)}"></label>
+        <label>Contract Start Date <input type="date" id="hs-amc-edit-cstart" value="${asset.ContractStartDate ? isoDate(new Date(asset.ContractStartDate)) : ''}"></label>
+        <label>Contract End Date <input type="date" id="hs-amc-edit-cend" value="${asset.ContractEndDate ? isoDate(new Date(asset.ContractEndDate)) : ''}"></label>
+        <button id="hs-amc-edit-save" class="btn-primary" style="margin-top:10px;">Save</button>
+        <button id="hs-amc-edit-cancel" class="btn-secondary">Cancel</button>
+        <p class="error-text" id="hs-amc-edit-error"></p>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    modal.querySelector('#hs-amc-edit-cancel').addEventListener('click', () => modal.remove());
+    modal.querySelector('#hs-amc-edit-save').addEventListener('click', async () => {
+      const errEl = modal.querySelector('#hs-amc-edit-error');
+      const name = modal.querySelector('#hs-amc-edit-name').value.trim();
+      const code = modal.querySelector('#hs-amc-edit-code').value.trim();
+      const nature = modal.querySelector('#hs-amc-edit-nature').value.trim();
+      const freq = modal.querySelector('#hs-amc-edit-freq').value;
+      const lead = modal.querySelector('#hs-amc-edit-lead').value;
+      const cstart = modal.querySelector('#hs-amc-edit-cstart').value;
+      const cend = modal.querySelector('#hs-amc-edit-cend').value;
+      if (!name || !code || !freq) {
+        errEl.textContent = 'Please fill in at least Name, Code, and Frequency.';
+        return;
+      }
+      const saveBtn = modal.querySelector('#hs-amc-edit-save');
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        const updated = Object.assign({}, asset, {
+          AssetName: name,
+          AssetCode: code,
+          Nature: nature,
+          FrequencyMonths: freq,
+          ReminderLeadDays: lead,
+          ContractStartDate: cstart,
+          ContractEndDate: cend
+        });
+        await MVOA.sheetsUpdateRow(MVOA.TABS.hsAmcAssets, asset.rowNumber, AMC_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
+        modal.remove();
+        renderAmcCompliance(container);
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+      }
     });
   }
 
