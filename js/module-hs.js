@@ -1317,22 +1317,34 @@ const HSModule = (function () {
 
       // Auto-flag: one Daily Ops task PER REPORTED LIGHT for AssetList
       // items — not one bundled task, so each light is independently
-      // trackable through to closure.
+      // trackable through to closure. But if that light already has an
+      // OPEN task from a previous night (repair can take days), don't
+      // create a duplicate — the existing task already tracks it. The
+      // checklist submission itself (this log entry) is still fully
+      // recorded either way, so History/Monthly Report always show
+      // every night's report regardless of whether a new task fired.
       const assetListItems = items.filter(i => i.InputType === 'AssetList');
-      for (const item of assetListItems) {
-        const entries = (pendingResults[item.ItemID]?.entries || []).filter(v => v && v.trim());
-        for (const assetCode of entries) {
-          try {
-            await MVOA.createOpsTask({
-              categoryName: failTaskCategoryFor(currentScan.qrTarget),
-              title: `Plant Rounds: ${item.CheckItem} — ${assetCode}`,
-              description: `Reported not working by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
-              assigneeTitle: 'Facility Manager',
-              priority: 'Urgent',
-              createdBy: performedBy
-            });
-          } catch (e) {
-            errEl.textContent = `Checklist saved, but couldn't auto-create a task for "${assetCode}": ${e.message}`;
+      if (assetListItems.length) {
+        const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+        const hasOpenTaskFor = (assetCode) => opsTaskRows.slice(1).some(r =>
+          (r[OPS_TASK_COL_IDX.Title] || '').indexOf(assetCode) !== -1 && r[OPS_TASK_COL_IDX.Status] === 'Open'
+        );
+        for (const item of assetListItems) {
+          const entries = (pendingResults[item.ItemID]?.entries || []).filter(v => v && v.trim());
+          for (const assetCode of entries) {
+            if (hasOpenTaskFor(assetCode)) continue; // still-open task from an earlier night already tracks this light
+            try {
+              await MVOA.createOpsTask({
+                categoryName: failTaskCategoryFor(currentScan.qrTarget),
+                title: `Plant Rounds: ${item.CheckItem} — ${assetCode}`,
+                description: `Reported not working by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
+                assigneeTitle: 'Facility Manager',
+                priority: 'Urgent',
+                createdBy: performedBy
+              });
+            } catch (e) {
+              errEl.textContent = `Checklist saved, but couldn't auto-create a task for "${assetCode}": ${e.message}`;
+            }
           }
         }
       }
@@ -1359,14 +1371,37 @@ const HSModule = (function () {
   // OpsTasks column indexes — must match OPS_TASK_COLS in shared.js.
   // Read directly by index rather than pulling in module-ops.js's own
   // column list, since modules don't share internals with each other.
-  const OPS_TASK_COL_IDX = { Title: 1, Description: 2, Status: 9, ClosedDate: 12, ClosedBy: 13 };
-  async function findAutoFlaggedTask(logId, checkItem) {
+  const OPS_TASK_COL_IDX = { Title: 1, Description: 2, CreatedDate: 7, Status: 9, ClosedDate: 12, ClosedBy: 13 };
+
+  // Both Failed Items Log and Task Resolution are derived from actual
+  // AUTO-CREATED TASKS (found via the "(Plant Rounds log LOGID)" marker
+  // every createOpsTask call embeds), not from checklist Results
+  // directly. This is what makes AssetList items (street lights) show
+  // up correctly — their Result is a joined list of codes, never
+  // literally "Fail" — and it's also what keeps a still-unresolved
+  // light from duplicating across reports on repeat nights: since a
+  // repeat night skips creating a new task (handled in
+  // submitChecklist), there's simply no new task-event for these
+  // reports to pick up, so nothing duplicates. PassFail/Numeric Fails
+  // still create one task per Fail per submission, same as always.
+  async function loadPlantRoundsFlaggedTasks() {
     const rows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
-    const marker = `(Plant Rounds log ${logId})`;
-    return rows.slice(1).find(r =>
-      (r[OPS_TASK_COL_IDX.Description] || '').indexOf(marker) !== -1 &&
-      (r[OPS_TASK_COL_IDX.Title] || '').indexOf(checkItem) !== -1
-    ) || null;
+    return rows.slice(1).map(r => {
+      const desc = r[OPS_TASK_COL_IDX.Description] || '';
+      const m = desc.match(/\(Plant Rounds log (HSLOG-\d+)\)/);
+      if (!m) return null;
+      const logId = m[1];
+      const log = logsCache.find(l => l.LogID === logId);
+      const template = log ? templateById(log.TemplateID) : null;
+      return {
+        logId, log, template,
+        item: (r[OPS_TASK_COL_IDX.Title] || '').replace(/^Plant Rounds:\s*/, ''),
+        status: r[OPS_TASK_COL_IDX.Status] || '',
+        createdDate: r[OPS_TASK_COL_IDX.CreatedDate] || '',
+        closedBy: r[OPS_TASK_COL_IDX.ClosedBy] || '',
+        closedDate: r[OPS_TASK_COL_IDX.ClosedDate] || ''
+      };
+    }).filter(Boolean);
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1392,41 +1427,33 @@ const HSModule = (function () {
     });
 
     const listEl = container.querySelector('#hs-failed-list');
-    let results;
+    let flagged;
     try {
-      results = await loadItemResults();
+      flagged = await loadPlantRoundsFlaggedTasks();
     } catch (e) {
       listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
     }
-    const fails = results
-      .filter(r => r.Result === 'Fail')
-      .map(r => {
-        const log = logsCache.find(l => l.LogID === r.LogID);
-        const item = itemsCache.find(i => i.ItemID === r.ItemID);
-        const template = log ? templateById(log.TemplateID) : null;
-        return { r, log, item, template };
-      })
+    const fails = flagged
       .filter(x => failedItemsFilter === 'all' || (x.template && x.template.QRTarget === failedItemsFilter))
-      .sort((a, b) => (b.log ? b.log.Timestamp : '').localeCompare(a.log ? a.log.Timestamp : ''));
+      .sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
 
     listEl.innerHTML = fails.length ? fails.map(x => `
       <div class="mvoa-list-item">
         <div class="mvoa-row">
-          <strong>${escapeHtml(x.item ? x.item.CheckItem : x.r.ItemID)}</strong>
+          <strong>${escapeHtml(x.item)}</strong>
           ${MVOA.statusBadgeHtml('Critical')}
         </div>
-        <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.template ? escapeHtml(categoryLabel(x.template.QRTarget) + ' — ' + FREQUENCY_LABEL[x.template.Frequency]) : ''} · ${x.log ? escapeHtml(x.log.PerformedBy) + ' · ' + formatDate(x.log.Timestamp) : ''}</p>
-        ${x.r.Remarks ? `<p style="margin:4px 0;font-size:0.9rem;">${escapeHtml(x.r.Remarks)}</p>` : ''}
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.template ? escapeHtml(categoryLabel(x.template.QRTarget) + ' — ' + FREQUENCY_LABEL[x.template.Frequency]) : ''} · ${x.log ? escapeHtml(x.log.PerformedBy) + ' · ' : ''}${formatDate(x.createdDate)}</p>
       </div>
     `).join('') : '<p class="muted">No failed items found.</p>';
     container.querySelector('#hs-failed-pdf').addEventListener('click', () => {
       const pdfRows = fails.map(x => ({
-        Item: x.item ? x.item.CheckItem : x.r.ItemID,
+        Item: x.item,
         Category: x.template ? categoryLabel(x.template.QRTarget) : '', Frequency: x.template ? FREQUENCY_LABEL[x.template.Frequency] : '',
-        PerformedBy: x.log ? x.log.PerformedBy : '', Timestamp: x.log ? formatDate(x.log.Timestamp) : '', Remarks: x.r.Remarks
+        PerformedBy: x.log ? x.log.PerformedBy : '', Timestamp: formatDate(x.createdDate)
       }));
-      printTablePdf('Failed Items Log', ['Item', 'Category', 'Frequency', 'PerformedBy', 'Timestamp', 'Remarks'], pdfRows);
+      printTablePdf('Failed Items Log', ['Item', 'Category', 'Frequency', 'PerformedBy', 'Timestamp'], pdfRows);
     });
   }
 
@@ -1445,47 +1472,30 @@ const HSModule = (function () {
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
 
     const listEl = container.querySelector('#hs-task-res-list');
-    let results, opsTaskRows;
+    let flagged;
     try {
-      [results, opsTaskRows] = await Promise.all([loadItemResults(), MVOA.sheetsRead(MVOA.TABS.opsTasks)]);
+      flagged = await loadPlantRoundsFlaggedTasks();
     } catch (e) {
       listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
     }
-    const fails = results.filter(r => r.Result === 'Fail').map(r => {
-      const log = logsCache.find(l => l.LogID === r.LogID);
-      const item = itemsCache.find(i => i.ItemID === r.ItemID);
-      const marker = `(Plant Rounds log ${r.LogID})`;
-      const taskRow = opsTaskRows.slice(1).find(row =>
-        (row[OPS_TASK_COL_IDX.Description] || '').indexOf(marker) !== -1 &&
-        item && (row[OPS_TASK_COL_IDX.Title] || '').indexOf(item.CheckItem) !== -1
-      );
-      return { r, log, item, taskRow };
-    }).sort((a, b) => (b.log ? b.log.Timestamp : '').localeCompare(a.log ? a.log.Timestamp : ''));
+    flagged = flagged.sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
 
-    listEl.innerHTML = fails.length ? fails.map(x => {
-      const status = x.taskRow ? x.taskRow[OPS_TASK_COL_IDX.Status] : null;
-      return `
+    listEl.innerHTML = flagged.length ? flagged.map(x => `
         <div class="mvoa-list-item">
           <div class="mvoa-row">
-            <strong>${escapeHtml(x.item ? x.item.CheckItem : x.r.ItemID)}</strong>
-            ${status === 'Closed' ? MVOA.statusBadgeHtml('Approved') : status === 'Open' ? MVOA.statusBadgeHtml('Critical') : '<span class="muted">No task found</span>'}
+            <strong>${escapeHtml(x.item)}</strong>
+            ${x.status === 'Closed' ? MVOA.statusBadgeHtml('Approved') : MVOA.statusBadgeHtml('Critical')}
           </div>
-          <p class="muted" style="margin:4px 0;font-size:0.8rem;">${x.log ? formatDate(x.log.Timestamp) : ''}</p>
-          ${status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed by ${escapeHtml(x.taskRow[OPS_TASK_COL_IDX.ClosedBy])} · ${formatDate(x.taskRow[OPS_TASK_COL_IDX.ClosedDate])}</p>` : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(x.createdDate)}</p>
+          ${x.status === 'Closed' ? `<p class="muted" style="font-size:0.8rem;">Closed by ${escapeHtml(x.closedBy)} · ${formatDate(x.closedDate)}</p>` : ''}
         </div>
-      `;
-    }).join('') : '<p class="muted">No failed items found.</p>';
+    `).join('') : '<p class="muted">No flagged items found.</p>';
     container.querySelector('#hs-task-res-pdf').addEventListener('click', () => {
-      const pdfRows = fails.map(x => {
-        const status = x.taskRow ? x.taskRow[OPS_TASK_COL_IDX.Status] : null;
-        return {
-          Item: x.item ? x.item.CheckItem : x.r.ItemID, LoggedAt: x.log ? formatDate(x.log.Timestamp) : '',
-          TaskStatus: status || 'No task found',
-          ClosedBy: status === 'Closed' ? x.taskRow[OPS_TASK_COL_IDX.ClosedBy] : '',
-          ClosedDate: status === 'Closed' ? formatDate(x.taskRow[OPS_TASK_COL_IDX.ClosedDate]) : ''
-        };
-      });
+      const pdfRows = flagged.map(x => ({
+        Item: x.item, LoggedAt: formatDate(x.createdDate), TaskStatus: x.status,
+        ClosedBy: x.status === 'Closed' ? x.closedBy : '', ClosedDate: x.status === 'Closed' ? formatDate(x.closedDate) : ''
+      }));
       printTablePdf('Auto-Flagged Task Resolution', ['Item', 'LoggedAt', 'TaskStatus', 'ClosedBy', 'ClosedDate'], pdfRows);
     });
   }
