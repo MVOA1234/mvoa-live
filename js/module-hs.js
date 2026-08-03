@@ -267,12 +267,9 @@ const HSModule = (function () {
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
 
     const bodyEl = container.querySelector('#hs-shiftduty-body');
-    let rows, assigneeOptions;
+    let rows;
     try {
-      [rows, assigneeOptions] = await Promise.all([
-        MVOA.sheetsRead(MVOA.TABS.hsShiftDuty),
-        MVOA.loadAssigneeOptions()
-      ]);
+      rows = await MVOA.sheetsRead(MVOA.TABS.hsShiftDuty);
     } catch (e) {
       bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
@@ -301,12 +298,7 @@ const HSModule = (function () {
             return `<td class="muted">${escapeHtml(currentName || '—')}</td>`;
           }
           return `<td>
-            <select class="hs-duty-select" data-date="${dateStr}" data-shift="${shift}">
-              <option value="">— Unassigned —</option>
-              ${assigneeOptions.filter(o => o.value.indexOf('user:') === 0).map(o =>
-                `<option value="${escapeHtml(o.label.split(' (')[0])}" ${currentName === o.label.split(' (')[0] ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
-              ).join('')}
-            </select>
+            <input type="text" class="hs-duty-input" data-date="${dateStr}" data-shift="${shift}" value="${escapeHtml(currentName)}" placeholder="Name" style="width:100%;box-sizing:border-box;">
           </td>`;
         }).join('')}
       </tr>
@@ -334,10 +326,10 @@ const HSModule = (function () {
       try {
         const toUpdate = []; // { rowNumber, row }
         const toAppend = []; // row
-        bodyEl.querySelectorAll('.hs-duty-select').forEach(sel => {
-          const dateStr = sel.dataset.date;
-          const shift = sel.dataset.shift;
-          const newName = sel.value;
+        bodyEl.querySelectorAll('.hs-duty-input').forEach(input => {
+          const dateStr = input.dataset.date;
+          const shift = input.dataset.shift;
+          const newName = input.value.trim();
           const existing = entryFor(dateStr, shift);
           const originalName = existing ? existing.Name : '';
           if (newName === originalName) return; // unchanged
