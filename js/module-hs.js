@@ -912,14 +912,14 @@ const HSModule = (function () {
         pdfRows.push(sectionRow);
       }
       const performedByCells = dayHeaders.map(d => performedByFor(d, shift));
-      bodyHtml += `<tr><td style="font-style:italic;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
+      bodyHtml += `<tr><td style="font-style:italic;white-space:normal;word-wrap:break-word;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
       const performedByRow = { Item: 'Performed By' };
       dayHeaders.forEach((d, i) => performedByRow[String(d)] = performedByCells[i] || '');
       pdfRows.push(performedByRow);
 
       items.forEach(item => {
         const cells = dayHeaders.map(d => cellFor(item.ItemID, d, shift));
-        bodyHtml += `<tr><td>${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td style="word-wrap:break-word;white-space:normal;">${cellHtml(item, v)}</td>`).join('')}</tr>`;
+        bodyHtml += `<tr><td style="white-space:normal;word-wrap:break-word;">${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td style="word-wrap:break-word;white-space:normal;">${cellHtml(item, v)}</td>`).join('')}</tr>`;
         const pdfRow = { Item: item.CheckItem };
         dayHeaders.forEach((d, i) => pdfRow[String(d)] = cellPdfValue(item, cells[i]));
         pdfRows.push(pdfRow);
