@@ -231,7 +231,7 @@ const MVOA = (function () {
       if (!u || !u.active) throw new Error('Invalid PIN');
       if (await verifyPin(pin, u.pinHash)) {
         currentUser = u;
-        sessionStorage.setItem('mvoa_user', JSON.stringify(u));
+        localStorage.setItem('mvoa_user', JSON.stringify(u));
         return u;
       }
       throw new Error('Invalid PIN');
@@ -242,7 +242,7 @@ const MVOA = (function () {
       if (!u.active) continue;
       if (await verifyPin(pin, u.pinHash)) {
         currentUser = u;
-        sessionStorage.setItem('mvoa_user', JSON.stringify(u));
+        localStorage.setItem('mvoa_user', JSON.stringify(u));
         return u;
       }
     }
@@ -251,7 +251,7 @@ const MVOA = (function () {
 
   function restoreSession() {
     try {
-      const raw = sessionStorage.getItem('mvoa_user');
+      const raw = localStorage.getItem('mvoa_user');
       if (raw) currentUser = JSON.parse(raw);
     } catch (e) { /* ignore */ }
     return currentUser;
@@ -259,7 +259,7 @@ const MVOA = (function () {
 
   function logout() {
     currentUser = null;
-    sessionStorage.removeItem('mvoa_user');
+    localStorage.removeItem('mvoa_user');
   }
 
   // Self-service PIN change for the currently logged-in user. Re-verifies
@@ -277,7 +277,7 @@ const MVOA = (function () {
     fresh.pinHash = newHash;
     await writeRolesRow(fresh);
     currentUser = fresh;
-    sessionStorage.setItem('mvoa_user', JSON.stringify(currentUser));
+    localStorage.setItem('mvoa_user', JSON.stringify(currentUser));
     await logAudit({ module: 'Settings', requestId: currentUser.name, eventType: 'PinChanged', comment: 'Self-service PIN change', statusAfter: 'Active' });
   }
 
@@ -345,7 +345,7 @@ const MVOA = (function () {
     await logAudit({ module: 'Settings', requestId: newName, eventType: 'UserRenamed', comment: oldName + ' → ' + newName, statusAfter: 'Active' });
     if (currentUser.name === oldName) {
       currentUser.name = newName;
-      sessionStorage.setItem('mvoa_user', JSON.stringify(currentUser));
+      localStorage.setItem('mvoa_user', JSON.stringify(currentUser));
     }
   }
 
