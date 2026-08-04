@@ -1412,7 +1412,32 @@ const HSModule = (function () {
     return '';
   }
 
-  function renderChecklistForm(container) {
+  // ───────────────────────────────────────────────────────────
+  // Running-hours meter guard — a cumulative meter can never go
+  // backwards, so a new reading lower than the last one logged is
+  // almost certainly a typo (e.g. 1886.17 instead of 1886.83). This
+  // caches the most recent reading per item so it can be checked live
+  // as the technician types, before the entry is ever accepted —
+  // rather than only surfacing as a confusing negative "Hours Run" in
+  // the report afterwards.
+  // ───────────────────────────────────────────────────────────
+  const lastReadingCache = {}; // itemId -> {value, timestamp} | null
+  async function loadLastReadingFor(itemId) {
+    if (lastReadingCache[itemId] !== undefined) return lastReadingCache[itemId];
+    try {
+      const results = await loadItemResults();
+      const matches = results.filter(r => r.ItemID === itemId)
+        .map(r => { const log = logsCache.find(l => l.LogID === r.LogID); return log ? { value: parseFloat(r.Result), timestamp: log.Timestamp } : null; })
+        .filter(x => x && !isNaN(x.value))
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      lastReadingCache[itemId] = matches.length ? matches[matches.length - 1] : null;
+    } catch (e) {
+      lastReadingCache[itemId] = null; // fail open — non-critical, worst case the guard just doesn't fire this time
+    }
+    return lastReadingCache[itemId];
+  }
+
+  async function renderChecklistForm(container) {
     const isDaily = currentTemplate.Frequency === 'Daily';
     const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
     if (isDaily && isShiftBased && !currentShift) {
@@ -1474,6 +1499,11 @@ const HSModule = (function () {
       .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
         (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
+
+    // Preload the last recorded reading for any running-hours meter
+    // item on this template, so the live guard below has it ready
+    // the moment the technician starts typing.
+    await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
 
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -1662,7 +1692,22 @@ const HSModule = (function () {
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
         if (!hasThreshold) {
           // Plain data-capture field (e.g. Running Hours in Shift) —
-          // no pass/fail meaning, just record the number as-is.
+          // no pass/fail meaning, just record the number as-is — EXCEPT
+          // for a running-hours meter, which gets a live backwards-
+          // reading guard: a cumulative meter can't decrease, so a
+          // lower value than last time is flagged before it's ever
+          // accepted, not just discovered later in the report.
+          if (/running hours/i.test(item.CheckItem)) {
+            const last = lastReadingCache[itemId];
+            if (last && val < last.value) {
+              pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, belowLastReading: true };
+              if (statusEl) {
+                statusEl.innerHTML = `⚠️ This is LOWER than the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — a running-hours meter can't go backwards. Please double-check this value.`;
+                statusEl.style.color = '#b3261e';
+              }
+              return;
+            }
+          }
           pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val };
           if (statusEl) { statusEl.textContent = `Recorded: ${val}${unit}`; statusEl.style.color = 'inherit'; }
           return;
@@ -1728,6 +1773,11 @@ const HSModule = (function () {
     const failedWithoutRemarks = items.filter(i => pendingResults[i.ItemID]?.result === 'Fail' && !pendingResults[i.ItemID]?.remarks?.trim());
     if (failedWithoutRemarks.length) {
       errEl.textContent = `Please add remarks for the failed item(s): ${failedWithoutRemarks.map(i => i.CheckItem).join(', ')}`;
+      return;
+    }
+    const belowLastReading = items.filter(i => pendingResults[i.ItemID]?.belowLastReading);
+    if (belowLastReading.length) {
+      errEl.textContent = `${belowLastReading.map(i => i.CheckItem).join(', ')}: entered value is lower than the last recorded reading. Please correct it before submitting.`;
       return;
     }
     const requiresOverallNotes = currentTemplate.RequireOverallNotes === 'TRUE' || currentTemplate.RequireOverallNotes === 'true';
