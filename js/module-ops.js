@@ -154,6 +154,38 @@ const OpsModule = (function () {
     }
   }
 
+  // ───────────────────────────────────────────────────────────
+  // Edit — corrects the task's own details (Title/Description/
+  // Priority), as opposed to Reassign which only changes who's
+  // accountable. Same permission as Reassign (originator or DEV) —
+  // editing what a task says is the same kind of call as handing it
+  // to someone else. Works regardless of whether the assignee has
+  // already opened the task (AssigneeSeenAt is not a gate on this,
+  // only a badge it controls). In-place update, same TaskID and
+  // CreatedDate/CreatedBy — this is a correction, not a new task.
+  // Always clears AssigneeSeenAt so the change re-flags 🆕 New for
+  // the assignee, since whatever they already saw no longer matches
+  // what's now on the task.
+  // ───────────────────────────────────────────────────────────
+  function canEditTask(t, user) {
+    return user.role === 'DEV' || isCreatorOf(t, user);
+  }
+  async function editTask(t, { title, description, priority }) {
+    t.Title = title;
+    t.Description = description;
+    t.Priority = priority;
+    t.AssigneeSeenAt = '';
+    try {
+      await MVOA.sheetsUpdateRow(TAB, t.rowNumber, objToRow(t));
+      await MVOA.logAudit({
+        module: 'DailyOps', requestId: t.TaskID, eventType: 'Edited',
+        comment: 'Title/Description/Priority updated', statusAfter: t.Status
+      });
+    } catch (e) {
+      throw e;
+    }
+  }
+
   async function loadTasks() {
     const rows = await MVOA.sheetsRead(TAB);
     tasksCache = rows.slice(1).map((r, i) => rowToObj(r, i + 2)).filter(t => t.TaskID);
@@ -644,11 +676,13 @@ const OpsModule = (function () {
                <button class="ops-notes-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;position:relative;">💬 Notes${noteCount ? ` (${noteCount})` : ''}${unread ? ` <span class="ops-unread-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d9534f;margin-left:4px;"></span>` : ''}</button>
                ${isAssigneeOf(t, user) ? `<button class="ops-delegate-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">🔀 ${t.DelegatedTo ? 'Change Delegate' : 'Delegate'}</button>` : ''}
                ${canReassign(t, user) ? `<button class="ops-reassign-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">🔁 Reassign</button>` : ''}
+               ${canEditTask(t, user) ? `<button class="ops-edit-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">✏️ Edit Task</button>` : ''}
                ${isDelegateOf(t, user) && complianceAttachmentCount(t) < 3 ? `<button class="ops-evidence-toggle btn-secondary" data-task-id="${t.TaskID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">📎 Add Completion Evidence</button>` : ''}
              </div>
              <div class="ops-notes-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-delegate-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-reassign-body hidden" data-task-id="${t.TaskID}"></div>
+             <div class="ops-edit-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-evidence-body hidden" data-task-id="${t.TaskID}"></div>
              ${canClose ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
           : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
@@ -706,6 +740,17 @@ const OpsModule = (function () {
         if (!isHidden) { formBody.classList.add('hidden'); return; }
         formBody.classList.remove('hidden');
         renderReassignForm(formBody, taskId, container);
+      });
+    });
+
+    body.querySelectorAll('.ops-edit-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const taskId = btn.dataset.taskId;
+        const formBody = body.querySelector(`.ops-edit-body[data-task-id="${taskId}"]`);
+        const isHidden = formBody.classList.contains('hidden');
+        if (!isHidden) { formBody.classList.add('hidden'); return; }
+        formBody.classList.remove('hidden');
+        renderEditTaskForm(formBody, taskId, container);
       });
     });
 
@@ -811,7 +856,55 @@ const OpsModule = (function () {
   }
 
 
-  // is done, WITHOUT closing the task themselves — these go straight
+  // Edit form — corrects Title/Description/Priority in place. Same
+  // permission gate as Reassign (canEditTask), and available whether
+  // or not the assignee has already opened the task; saving always
+  // clears AssigneeSeenAt so the task re-flags 🆕 for them.
+  function renderEditTaskForm(formBody, taskId, container) {
+    const task = tasksCache.find(t => t.TaskID === taskId);
+    if (!task) return;
+    formBody.innerHTML = `
+      <div style="margin-top:8px;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
+        <p class="muted" style="margin:0 0 6px;">Editing re-flags this task as 🆕 New for the assignee, since what they already saw will change.</p>
+        <label style="margin:0;">Title
+          <input id="ops-edit-title-${taskId}" type="text" value="${escapeHtml(task.Title)}">
+        </label>
+        <label>Description
+          <textarea id="ops-edit-desc-${taskId}" rows="2">${escapeHtml(task.Description)}</textarea>
+        </label>
+        <label>Priority
+          <select id="ops-edit-priority-${taskId}">
+            <option value="Urgent" ${task.Priority === 'Urgent' ? 'selected' : ''}>Urgent</option>
+            <option value="Medium" ${task.Priority === 'Medium' ? 'selected' : ''}>Medium</option>
+            <option value="Low" ${task.Priority === 'Low' ? 'selected' : ''}>Low</option>
+          </select>
+        </label>
+        <button class="btn-primary ops-edit-save" data-task-id="${taskId}" style="margin-top:8px;width:100%;">Save</button>
+        <p class="error-text ops-edit-error" style="min-height:1em;margin-top:4px;"></p>
+      </div>
+    `;
+    const errEl = formBody.querySelector('.ops-edit-error');
+    formBody.querySelector('.ops-edit-save').addEventListener('click', async () => {
+      const title = formBody.querySelector(`#ops-edit-title-${taskId}`).value.trim();
+      const description = formBody.querySelector(`#ops-edit-desc-${taskId}`).value.trim();
+      const priority = formBody.querySelector(`#ops-edit-priority-${taskId}`).value;
+      if (!title) { errEl.textContent = 'Title cannot be blank.'; return; }
+      const btn = formBody.querySelector('.ops-edit-save');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        await editTask(task, { title, description, priority });
+        formBody.classList.add('hidden');
+        render(container); // full re-render — picks up the updated Title/Description/Priority and the 🆕 New badge
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      }
+    });
+  }
+
+
   // into the same PhotoURL_Compliance/ComplianceAttachmentURL_2/3 slots
   // the closing dialog uses, so when the assignee later closes the
   // task, this evidence is already there waiting for them rather than
