@@ -44,11 +44,11 @@ MVOA.registerModule('hs', {
 });
 
 const HSModule = (function () {
-  const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
-  const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
+  const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'MonthlyFirstWeek', 'BiMonthly'];
+  const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', MonthlyFirstWeek: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan'];
-  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased'];
+  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes'];
   const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
@@ -1280,6 +1280,20 @@ const HSModule = (function () {
       return isMonday ? { text: 'Due today (Monday)', overdue: false } : { text: `Not done since ${formatDate(monday)}`, overdue: true };
     }
 
+    // Monthly-First-Week: due window is always days 1–7 of the CURRENT
+    // month (unlike the Monthly/BiMonthly window below, this never needs
+    // to look back at a previous month — a fresh window starts the
+    // moment a new month begins).
+    if (template.Frequency === 'MonthlyFirstWeek') {
+      const y = now.getFullYear(), m0 = now.getMonth();
+      const monthStart = new Date(y, m0, 1); monthStart.setHours(0, 0, 0, 0);
+      const weekEnd = new Date(y, m0, 7); weekEnd.setHours(23, 59, 59, 999);
+      const done = hasLogSince(template.TemplateID, monthStart);
+      if (done) return { text: lastText, overdue: false };
+      if (now <= weekEnd) return { text: 'Due this week (1st week of month)', overdue: false };
+      return { text: `Overdue since ${formatDate(new Date(y, m0, 8))}`, overdue: true };
+    }
+
     // Monthly and BiMonthly share the same "last week of a cycle month" shape
     const interval = template.Frequency === 'BiMonthly' ? 2 : 1;
     const anchor0 = 6; // July, 0-based — only relevant when interval=2
@@ -1294,6 +1308,7 @@ const HSModule = (function () {
   function frequencyRuleText(template) {
     if (template.Frequency === 'Weekly') return 'Due every Monday';
     if (template.Frequency === 'Monthly') return 'Due last week of the month';
+    if (template.Frequency === 'MonthlyFirstWeek') return 'Due 1st week of the month';
     if (template.Frequency === 'BiMonthly') return 'Due last week of Jul / Sep / Nov / Jan / Mar / May';
     return ''; // Daily has no interval to state — it's due every day
   }
@@ -1473,7 +1488,7 @@ const HSModule = (function () {
       <div id="hs-items-list"></div>
       <div class="card" style="max-width:600px;margin:12px 0;">
         ${isShiftBased ? `<p class="muted" style="margin:0;">Reporting an event during your shift? Use "📝 End of Shift Report" from Home after submitting this checklist.</p>` : `
-        <label>Overall Notes (optional)
+        <label>Overall Notes ${currentTemplate.RequireOverallNotes === 'TRUE' || currentTemplate.RequireOverallNotes === 'true' ? '(required)' : '(optional)'}
           <textarea id="hs-overall-notes" rows="2"></textarea>
         </label>`}
         <button id="hs-submit-btn" class="btn-primary" style="width:100%;margin-top:8px;">Submit Checklist</button>
@@ -1714,6 +1729,14 @@ const HSModule = (function () {
     if (failedWithoutRemarks.length) {
       errEl.textContent = `Please add remarks for the failed item(s): ${failedWithoutRemarks.map(i => i.CheckItem).join(', ')}`;
       return;
+    }
+    const requiresOverallNotes = currentTemplate.RequireOverallNotes === 'TRUE' || currentTemplate.RequireOverallNotes === 'true';
+    if (requiresOverallNotes) {
+      const notesEl = container.querySelector('#hs-overall-notes');
+      if (!notesEl || !notesEl.value.trim()) {
+        errEl.textContent = 'Please add Overall Notes for this check.';
+        return;
+      }
     }
     errEl.textContent = '';
     isSubmittingChecklist = true;
