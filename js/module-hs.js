@@ -49,7 +49,7 @@ const HSModule = (function () {
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan'];
   const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes'];
-  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix'];
+  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix', 'TypicalValue'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
@@ -878,6 +878,14 @@ const HSModule = (function () {
       if (item.InputType === 'Numeric') {
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
         const displayVal = numericDisplayValue(item, resultObj);
+        const isRecheck = (resultObj.Remarks || '').includes('[RECHECK-CONFIRMED]');
+        if (isRecheck) {
+          // Confirmed-outlier — deliberately its own amber styling, distinct
+          // from both Pass (green) and Fail (red): this value wasn't a
+          // functional failure, but the technician had to confirm it past
+          // a ±20% plausibility warning, so it still needs a second look.
+          return `<span style="white-space:nowrap;font-size:0.72rem;color:#b8860b;font-weight:700;">⚠️ ${escapeHtml(displayVal)}</span>`;
+        }
         if (!hasThreshold) return `<span style="white-space:nowrap;font-size:0.72rem;">${escapeHtml(displayVal)}</span>`; // plain data log — no pass/fail meaning, no coloring
         const isFail = resultObj.Result === 'Fail';
         return `<span style="white-space:nowrap;font-size:0.72rem;color:${isFail ? '#b3261e' : 'green'};font-weight:700;">${escapeHtml(displayVal)}</span>`;
@@ -902,7 +910,10 @@ const HSModule = (function () {
     }
     function cellPdfValue(item, resultObj) {
       if (!resultObj) return '';
-      if (item.InputType === 'Numeric') return numericDisplayValue(item, resultObj);
+      if (item.InputType === 'Numeric') {
+        const isRecheck = (resultObj.Remarks || '').includes('[RECHECK-CONFIRMED]');
+        return (isRecheck ? '⚠️ RECHECK ' : '') + numericDisplayValue(item, resultObj);
+      }
       if (item.InputType === 'AssetList' && !String(resultObj.Result || '').trim()) return resultObj._logNotes || '';
       return resultObj.Result || '';
     }
@@ -1569,6 +1580,10 @@ const HSModule = (function () {
           <span class="muted">${escapeHtml(item.Unit || '')}</span>
         </div>
         <p class="hs-numeric-status" data-item-id="${item.ItemID}" style="margin:4px 0 0;font-size:0.85rem;font-weight:700;color:${statusColor};">${escapeHtml(statusText)}</p>
+        <label class="hs-outlier-confirm-wrap ${current.outlierFlag ? '' : 'hidden'}" data-item-id="${item.ItemID}" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.85rem;color:#b3261e;">
+          <input type="checkbox" class="hs-outlier-confirm-cb" data-item-id="${item.ItemID}" ${current.outlierConfirmed ? 'checked' : ''}>
+          I've rechecked — this reading is correct, submit it anyway
+        </label>
       `;
     } else if (item.InputType === 'Dropdown') {
       const opts = itemOptionsCache.filter(o => o.ItemID === item.ItemID).sort((a, b) => (parseInt(a.OptionOrder, 10) || 0) - (parseInt(b.OptionOrder, 10) || 0));
@@ -1690,6 +1705,31 @@ const HSModule = (function () {
         }
         const unit = item.Unit || '';
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
+        const confirmWrap = listEl.querySelector(`.hs-outlier-confirm-wrap[data-item-id="${itemId}"]`);
+        const confirmCb = confirmWrap ? confirmWrap.querySelector('.hs-outlier-confirm-cb') : null;
+
+        // Outlier guard — independent of Pass/Fail: a value can be
+        // technically "Pass" (e.g. 32bar isn't below the 3.2bar fail
+        // threshold) yet still be an obvious typo (32 instead of 3.2).
+        // TypicalValue (optional, per item) defines a ±20% plausible
+        // band; outside it, the entry isn't blocked, but it does need
+        // an explicit "yes, I checked, this is right" before it's
+        // accepted — and even then it's flagged through to the
+        // Monthly Report and a Maintenance task, not silently accepted.
+        function applyOutlierGuard(result, remarks) {
+          const typical = parseFloat(item.TypicalValue);
+          const hasTypical = !isNaN(typical) && typical !== 0;
+          const outOfRange = hasTypical && (val < typical * 0.8 || val > typical * 1.2);
+          if (!outOfRange) {
+            pendingResults[itemId] = { result, remarks, numericValue: val };
+            if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
+            return false;
+          }
+          pendingResults[itemId] = { result, remarks, numericValue: val, outlierFlag: true, outlierConfirmed: false };
+          if (confirmWrap) { confirmWrap.classList.remove('hidden'); if (confirmCb) confirmCb.checked = false; }
+          return true;
+        }
+
         if (!hasThreshold) {
           // Plain data-capture field (e.g. Running Hours in Shift) —
           // no pass/fail meaning, just record the number as-is — EXCEPT
@@ -1708,18 +1748,27 @@ const HSModule = (function () {
               return;
             }
           }
-          pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val };
-          if (statusEl) { statusEl.textContent = `Recorded: ${val}${unit}`; statusEl.style.color = 'inherit'; }
+          const remarks = `Recorded: ${val}${unit}`;
+          const isOutlier = applyOutlierGuard(String(val), remarks);
+          if (statusEl) {
+            statusEl.textContent = isOutlier ? `⚠️ ${remarks} — this looks far outside the usual range. Please recheck the value.` : remarks;
+            statusEl.style.color = isOutlier ? '#b3261e' : 'inherit';
+          }
           return;
         }
         const threshold = parseFloat(item.FailThreshold);
         const isFail = item.FailDirection === 'above' ? val > threshold : val < threshold;
         const result = isFail ? 'Fail' : 'Pass';
         const remarks = `Entered: ${val}${unit} (fails if ${item.FailDirection === 'above' ? 'above' : 'below'} ${threshold}${unit})`;
-        pendingResults[itemId] = { result, remarks, numericValue: val };
+        const isOutlier = applyOutlierGuard(result, remarks);
         if (statusEl) {
-          statusEl.textContent = (isFail ? '✕ Fail — ' : '✓ Pass — ') + remarks;
-          statusEl.style.color = isFail ? '#b3261e' : 'green';
+          if (isOutlier) {
+            statusEl.textContent = `⚠️ ${(isFail ? 'Fail — ' : 'Pass — ') + remarks} — this looks far outside the usual range. Please recheck the value.`;
+            statusEl.style.color = '#b3261e';
+          } else {
+            statusEl.textContent = (isFail ? '✕ Fail — ' : '✓ Pass — ') + remarks;
+            statusEl.style.color = isFail ? '#b3261e' : 'green';
+          }
         }
       }
     });
@@ -1727,6 +1776,9 @@ const HSModule = (function () {
     listEl.addEventListener('change', (e) => {
       if (e.target.classList.contains('hs-dropdown-input')) {
         pendingResults[e.target.dataset.itemId] = { result: e.target.value };
+      } else if (e.target.classList.contains('hs-outlier-confirm-cb')) {
+        const itemId = e.target.dataset.itemId;
+        if (pendingResults[itemId]) pendingResults[itemId].outlierConfirmed = e.target.checked;
       }
     });
   }
@@ -1780,6 +1832,11 @@ const HSModule = (function () {
       errEl.textContent = `${belowLastReading.map(i => i.CheckItem).join(', ')}: entered value is lower than the last recorded reading. Please correct it before submitting.`;
       return;
     }
+    const unconfirmedOutliers = items.filter(i => pendingResults[i.ItemID]?.outlierFlag && !pendingResults[i.ItemID]?.outlierConfirmed);
+    if (unconfirmedOutliers.length) {
+      errEl.textContent = `${unconfirmedOutliers.map(i => i.CheckItem).join(', ')}: this reading looks far outside the usual range. Please recheck the value, or tick "I've rechecked" to confirm and continue.`;
+      return;
+    }
     const requiresOverallNotes = currentTemplate.RequireOverallNotes === 'TRUE' || currentTemplate.RequireOverallNotes === 'true';
     if (requiresOverallNotes) {
       const notesEl = container.querySelector('#hs-overall-notes');
@@ -1829,6 +1886,11 @@ const HSModule = (function () {
         } else {
           resultValue = r.result || '';
           remarksValue = r.remarks || '';
+          // Confirmed-outlier marker — carried in Remarks so the Monthly
+          // Report (and anything else reading this row) can tell a
+          // "technician double-checked and it's really this value" entry
+          // apart from an ordinary Pass/Fail, without a new results column.
+          if (r.outlierFlag && r.outlierConfirmed) remarksValue += ' [RECHECK-CONFIRMED]';
         }
         return RESULT_COLS.map(c => ({ ResultID: resultId, LogID: logId, ItemID: item.ItemID, Result: resultValue, Remarks: remarksValue })[c]);
       });
@@ -1850,6 +1912,29 @@ const HSModule = (function () {
           // Non-critical to the checklist submission itself, but surface it —
           // silently losing a safety-critical auto-flag would be worse than a visible error.
           errEl.textContent = `Checklist saved, but couldn't auto-create a task for "${item.CheckItem}": ${e.message}`;
+        }
+      }
+
+      // Auto-flag: one Daily Ops task PER CONFIRMED-OUTLIER reading —
+      // technician typed a value far outside the usual range and
+      // explicitly confirmed it anyway, so it's not a Fail (may not even
+      // cross the item's own threshold, e.g. 32bar isn't "below 3.2bar")
+      // but still needs a second look. Always routed to Maintenance
+      // regardless of the section's normal FailTaskCategory, since this
+      // is "please recheck this reading," not a functional failure.
+      const outlierItems = items.filter(i => pendingResults[i.ItemID]?.outlierFlag && pendingResults[i.ItemID]?.outlierConfirmed);
+      for (const item of outlierItems) {
+        try {
+          await MVOA.createOpsTask({
+            categoryName: 'Maintenance',
+            title: `Plant Rounds: ${item.CheckItem} reading needs recheck — ${categoryLabel(currentScan.qrTarget)}`,
+            description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nEntered value was outside the usual ±20% range and confirmed anyway by the technician.\nLogged by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
+            assigneeTitle: 'Facility Manager',
+            priority: 'Medium',
+            createdBy: performedBy
+          });
+        } catch (e) {
+          errEl.textContent = `Checklist saved, but couldn't auto-create a recheck task for "${item.CheckItem}": ${e.message}`;
         }
       }
 
