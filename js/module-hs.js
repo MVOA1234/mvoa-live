@@ -856,7 +856,13 @@ const HSModule = (function () {
         new Date(l.Timestamp).toDateString() === dateStr &&
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       if (!log) return null;
-      return results.find(r => r.LogID === log.LogID && r.ItemID === itemId) || null;
+      const result = results.find(r => r.LogID === log.LogID && r.ItemID === itemId) || null;
+      if (!result) return null;
+      // Carry the log's Overall Notes along with the result — used by
+      // AssetList cells so an empty "nothing to report" entry (e.g. all
+      // street lights working) can still show what the technician wrote
+      // ("All OK") instead of a bare dash.
+      return Object.assign({}, result, { _logNotes: log.Notes || '' });
     }
     // Numeric items store the auto-evaluated Pass/Fail as Result, with
     // the actual entered number embedded in Remarks ("Entered: 87% (fails
@@ -881,7 +887,13 @@ const HSModule = (function () {
         // multiple entries stack as separate lines within the same cell
         // rather than wrapping mid-code.
         const entries = String(resultObj.Result || '').split(';').map(s => s.trim()).filter(Boolean);
-        if (!entries.length) return '<span class="muted">—</span>';
+        if (!entries.length) {
+          // Nothing reported — show the technician's Overall Notes for
+          // that shift/day if they wrote one (e.g. "All OK"), so an
+          // all-clear day isn't indistinguishable from "not checked".
+          const notes = (resultObj._logNotes || '').trim();
+          return notes ? `<span class="muted" style="font-size:0.68rem;white-space:normal;">${escapeHtml(notes)}</span>` : '<span class="muted">—</span>';
+        }
         return entries.map(e => `<span style="display:block;white-space:nowrap;font-size:0.62rem;line-height:1.3;">${escapeHtml(e)}</span>`).join('');
       }
       if (resultObj.Result === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
@@ -891,6 +903,7 @@ const HSModule = (function () {
     function cellPdfValue(item, resultObj) {
       if (!resultObj) return '';
       if (item.InputType === 'Numeric') return numericDisplayValue(item, resultObj);
+      if (item.InputType === 'AssetList' && !String(resultObj.Result || '').trim()) return resultObj._logNotes || '';
       return resultObj.Result || '';
     }
     function performedByFor(day, shift) {
@@ -1278,6 +1291,13 @@ const HSModule = (function () {
     return { text: `Overdue since ${formatDate(win.start)}`, overdue: true };
   }
 
+  function frequencyRuleText(template) {
+    if (template.Frequency === 'Weekly') return 'Due every Monday';
+    if (template.Frequency === 'Monthly') return 'Due last week of the month';
+    if (template.Frequency === 'BiMonthly') return 'Due last week of Jul / Sep / Nov / Jan / Mar / May';
+    return ''; // Daily has no interval to state — it's due every day
+  }
+
   function renderScanResult(container) {
     const user = MVOA.getUser();
     const canView = MVOA.canViewPlantRoundsSection(currentScan.qrTarget, user);
@@ -1316,10 +1336,11 @@ const HSModule = (function () {
     }
     cardsEl.innerHTML = targetTemplates.map(t => {
       const due = dueInfo(t);
+      const rule = frequencyRuleText(t);
       return `
         <div class="mvoa-list-item ${canEdit ? 'hs-template-card' : ''}" data-template-id="${t.TemplateID}" style="${canEdit ? 'cursor:pointer;' : ''}">
           <div class="mvoa-row">
-            <strong>${escapeHtml(t.Name)}</strong>
+            <span><strong>${escapeHtml(t.Name)}</strong>${rule ? ` <span class="muted" style="font-size:0.8rem;">(${rule})</span>` : ''}</span>
             ${due.overdue ? '<span style="color:#b3261e;font-weight:700;font-size:0.85rem;">⚠️ Due</span>' : '<span class="muted" style="font-size:0.85rem;">Up to date</span>'}
           </div>
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${due.text}</p>
