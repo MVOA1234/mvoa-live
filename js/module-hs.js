@@ -53,12 +53,16 @@ const HSModule = (function () {
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes', 'AssetID', 'AssetName'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
+  const CATEGORY_ASSET_COLS = ['CategoryKey', 'AssetID', 'AssetLabel', 'Active'];
 
   let categoriesCache = [];
   let templatesCache = [];
   let itemsCache = [];
   let itemOptionsCache = [];
   let logsCache = [];
+  let categoryAssetsCache = []; // per-asset master list — CategoryKey|AssetID|AssetLabel|Active
+                                 // (e.g. all 18 Distribution Panels), so Due Status can show a
+                                 // unit that's never been scanned yet, not just ones with a log
 
   let currentScan = null;    // { assetId, assetName, category, qrTarget }
   let currentTemplate = null;
@@ -106,6 +110,17 @@ const HSModule = (function () {
     itemsCache = rowsToObjs(items, ITEM_COLS).filter(i => i.Active === 'TRUE' || i.Active === 'true' || i.Active === true || i.Active === '1');
     itemOptionsCache = rowsToObjs(options, OPTION_COLS);
     logsCache = rowsToObjs(logs, LOG_COLS);
+    // Optional tab — a per-asset master list (e.g. all 18 Distribution
+    // Panels) so Due Status can show a unit that's never been scanned
+    // yet. Read separately and fail open: until this tab exists, or for
+    // an installation that never needs it, Plant Rounds works exactly
+    // as before — this only adds pre-registered rows, never required.
+    try {
+      const categoryAssets = await MVOA.sheetsRead(MVOA.TABS.hsCategoryAssets);
+      categoryAssetsCache = rowsToObjs(categoryAssets, CATEGORY_ASSET_COLS).filter(a => a.Active === 'TRUE' || a.Active === 'true' || a.Active === true || a.Active === '1');
+    } catch (e) {
+      categoryAssetsCache = [];
+    }
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1022,14 +1037,19 @@ const HSModule = (function () {
             // Per-asset expansion — a template shared by multiple physical
             // units (e.g. 18 Distribution Panels, each scanned separately)
             // shows one row per unit rather than one row for the whole
-            // template. Detected from the logs themselves (any AssetID
-            // recorded against this template) — a unit that's never been
-            // scanned yet simply doesn't have a row until its first scan.
-            const assetIds = [...new Set(logsCache.filter(l => l.TemplateID === t.TemplateID && l.AssetID).map(l => l.AssetID))];
+            // template. Combines the pre-registered master list (HSCategoryAssets,
+            // if present — so a never-scanned unit still shows up as overdue)
+            // with any AssetID actually seen in the logs (covers a unit
+            // scanned before it was added to the master list, if ever).
+            const registeredIds = categoryAssetsCache.filter(a => a.CategoryKey === t.QRTarget).map(a => a.AssetID);
+            const loggedIds = [...new Set(logsCache.filter(l => l.TemplateID === t.TemplateID && l.AssetID).map(l => l.AssetID))];
+            const assetIds = [...new Set([...registeredIds, ...loggedIds])];
             if (!assetIds.length) return [{ template: t, due: dueInfo(t), assetLabel: '' }];
             return assetIds.map(aid => {
+              const registered = categoryAssetsCache.find(a => a.CategoryKey === t.QRTarget && a.AssetID === aid);
               const sample = logsCache.find(l => l.TemplateID === t.TemplateID && l.AssetID === aid);
-              return { template: t, due: dueInfo(t, aid), assetLabel: (sample && sample.AssetName) || aid };
+              const label = (registered && registered.AssetLabel) || (sample && sample.AssetName) || aid;
+              return { template: t, due: dueInfo(t, aid), assetLabel: label };
             });
           })
           .sort((a, b) => {
