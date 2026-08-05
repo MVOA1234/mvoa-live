@@ -54,6 +54,7 @@ const MVOA = (function () {
     hsShiftDuty: 'HSShiftDuty',
     hsAmcAssets: 'HSAMCAssets',
     hsAmcLog: 'HSAMCLog',
+    hsCategoryAssets: 'HSCategoryAssets',
     expenseRequests: 'Expense_Requests',
     expenseVotes: 'Expense_Votes',
     approvalMatrix: 'ApprovalMatrix',
@@ -400,7 +401,7 @@ const MVOA = (function () {
 
 
   // Columns (OpsCategories): CategoryID | Name | Icon | Color |
-  //   AllowedRoles | AllowedUsers | Active | SortOrder
+  //   AllowedRoles | AllowedUsers | Active | SortOrder | RequireEvidenceOnClose
   // Columns (Technicians): TechnicianID | Name | Contact | Active
   // ───────────────────────────────────────────────────────────
   let categoriesCache = null;
@@ -414,7 +415,8 @@ const MVOA = (function () {
       AllowedRoles: (r[4] || '').split(',').map(s => s.trim()).filter(Boolean),
       AllowedUsers: (r[5] || '').split(',').map(s => s.trim()).filter(Boolean),
       Active: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
-      SortOrder: parseInt(r[7], 10) || 0
+      SortOrder: parseInt(r[7], 10) || 0,
+      RequireEvidenceOnClose: ['true', 'TRUE', '1', 'yes'].includes(String(r[8]))
     })).filter(c => c.CategoryID);
     categoriesCache.sort((a, b) => a.SortOrder - b.SortOrder);
     return categoriesCache;
