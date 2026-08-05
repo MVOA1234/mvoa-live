@@ -700,7 +700,8 @@ const HSModule = (function () {
         <button id="hs-report-tasks" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔗 Auto-Flagged Task Resolution</button>
         <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
         <button id="hs-report-hours" class="btn-secondary" style="width:100%;margin-bottom:8px;">⏱️ DG Running Hours</button>
-        <button id="hs-report-monthly" class="btn-secondary" style="width:100%;">📅 Monthly Report</button>
+        <button id="hs-report-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">📅 Monthly Report</button>
+        <button id="hs-report-schedule" class="btn-secondary" style="width:100%;">🗂️ Inspection Schedule</button>
       </div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
@@ -709,6 +710,62 @@ const HSModule = (function () {
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
     container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
     container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
+    container.querySelector('#hs-report-schedule').addEventListener('click', () => renderInspectionSchedule(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // INSPECTION SCHEDULE — a pure overview: which frequencies apply to
+  // which category, with no item-level detail at all. Derived entirely
+  // from existing HSCategories/HSChecklistTemplates — adding, removing,
+  // or re-timing a template automatically updates this, no separate
+  // data to maintain.
+  // ───────────────────────────────────────────────────────────
+  function renderInspectionSchedule(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>🗂️ Inspection Schedule</strong>
+        <button id="hs-schedule-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
+      <p class="muted" style="margin:0 0 12px;">Which frequency applies to each equipment/category — no item-level detail, just the cadence.</p>
+      <div style="overflow-x:auto;">
+        <table class="mvoa-table" style="table-layout:fixed;width:100%;">
+          <thead><tr>
+            <th style="width:220px;text-align:left;">Equipment / Category</th>
+            <th>Daily</th><th>Weekly</th><th>Monthly</th><th>Bi-Monthly</th>
+          </tr></thead>
+          <tbody id="hs-schedule-body"></tbody>
+        </table>
+      </div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const rows = categoriesCache.map(c => {
+      const cellFor = (freq) => {
+        const t = templatesCache.find(t => t.QRTarget === c.CategoryKey && t.Frequency === freq);
+        return t ? frequencyRuleText(t) || '✓' : '';
+      };
+      return { label: c.Label, group: c.Group || '', Daily: cellFor('Daily'), Weekly: cellFor('Weekly'), Monthly: cellFor('Monthly'), BiMonthly: cellFor('BiMonthly') };
+    });
+
+    const cellHtml = (val) => val ? `<span style="color:green;font-weight:700;">✓</span><br><span class="muted" style="font-size:0.72rem;">${escapeHtml(val === '✓' ? '' : val)}</span>` : '<span class="muted">—</span>';
+    container.querySelector('#hs-schedule-body').innerHTML = rows.map(r => `
+      <tr>
+        <td>${escapeHtml(r.label)}${r.group ? `<br><span class="muted" style="font-size:0.72rem;">${escapeHtml(r.group)}</span>` : ''}</td>
+        <td style="text-align:center;">${cellHtml(r.Daily)}</td>
+        <td style="text-align:center;">${cellHtml(r.Weekly)}</td>
+        <td style="text-align:center;">${cellHtml(r.Monthly)}</td>
+        <td style="text-align:center;">${cellHtml(r.BiMonthly)}</td>
+      </tr>
+    `).join('');
+
+    container.querySelector('#hs-schedule-pdf').addEventListener('click', () => {
+      const pdfRows = rows.map(r => ({
+        Category: r.label + (r.group ? ` (${r.group})` : ''),
+        Daily: r.Daily ? '✓' : '—', Weekly: r.Weekly || '—', Monthly: r.Monthly || '—', BiMonthly: r.BiMonthly || '—'
+      }));
+      printTablePdf('Inspection Schedule', ['Category', 'Daily', 'Weekly', 'Monthly', 'BiMonthly'], pdfRows);
+    });
   }
 
   // ───────────────────────────────────────────────────────────
