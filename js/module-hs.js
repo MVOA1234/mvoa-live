@@ -44,14 +44,14 @@ MVOA.registerModule('hs', {
 });
 
 const HSModule = (function () {
-  const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'MonthlyFirstWeek', 'BiMonthly'];
-  const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', MonthlyFirstWeek: 'Monthly', BiMonthly: 'Bi-Monthly' };
+  const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
+  const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
-  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan'];
-  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes'];
+  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan', 'Group'];
+  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay'];
   const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix', 'TypicalValue'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
-  const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes'];
+  const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes', 'AssetID', 'AssetName'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
 
   let categoriesCache = [];
@@ -115,11 +115,24 @@ const HSModule = (function () {
     const user = MVOA.getUser();
     const recent = logsCache.slice().sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || '')).slice(0, 5);
     const visibleCategories = categoriesCache.filter(c => MVOA.canViewPlantRoundsSection(c.CategoryKey, user));
+    const ungrouped = visibleCategories.filter(c => !c.Group);
+    // Categories can optionally belong to a named Group (e.g. "Monthly
+    // Inspections") — each distinct Group gets its own labeled box below
+    // the main equipment row, so unrelated categories (a DG Set vs. a
+    // Server Room housekeeping check) aren't visually mixed together.
+    // Grouping is purely presentational — a data change (fill in the
+    // Group column), no code change, same as adding a category at all.
+    const groupNames = [...new Set(visibleCategories.filter(c => c.Group).map(c => c.Group))];
     container.innerHTML = `
       <div class="card" style="max-width:520px;margin:0 0 16px 0;">
         <p class="muted" style="margin:0 0 10px;">Choose which equipment/area you're logging.</p>
         <div id="hs-category-tabs" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
       </div>
+      ${groupNames.map(g => `
+      <div class="card" style="max-width:520px;margin:0 0 16px 0;">
+        <p class="muted" style="margin:0 0 10px;font-weight:700;">${escapeHtml(g)}</p>
+        <div class="hs-group-tabs" data-group="${escapeHtml(g)}" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+      </div>`).join('')}
       <div style="margin-bottom:16px;display:flex;flex-wrap:wrap;gap:8px;">
         <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
         <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
@@ -132,11 +145,19 @@ const HSModule = (function () {
       <div id="hs-recent"></div>
     `;
     const tabsEl = container.querySelector('#hs-category-tabs');
-    tabsEl.innerHTML = visibleCategories.length
-      ? visibleCategories.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('')
+    tabsEl.innerHTML = ungrouped.length
+      ? ungrouped.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('')
       : '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
     tabsEl.querySelectorAll('.hs-category-tab').forEach(btn => {
       btn.addEventListener('click', () => handleCategoryTabClick(btn.dataset.category, container));
+    });
+    groupNames.forEach(g => {
+      const groupEl = container.querySelector(`.hs-group-tabs[data-group="${escapeHtml(g)}"]`);
+      const groupCats = visibleCategories.filter(c => c.Group === g);
+      groupEl.innerHTML = groupCats.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('');
+      groupEl.querySelectorAll('.hs-category-tab').forEach(btn => {
+        btn.addEventListener('click', () => handleCategoryTabClick(btn.dataset.category, container));
+      });
     });
 
     const recentEl = container.querySelector('#hs-recent');
@@ -997,7 +1018,20 @@ const HSModule = (function () {
       .map(target => {
         const rows = templatesCache
           .filter(t => t.QRTarget === target)
-          .map(t => ({ template: t, due: dueInfo(t) }))
+          .flatMap(t => {
+            // Per-asset expansion — a template shared by multiple physical
+            // units (e.g. 18 Distribution Panels, each scanned separately)
+            // shows one row per unit rather than one row for the whole
+            // template. Detected from the logs themselves (any AssetID
+            // recorded against this template) — a unit that's never been
+            // scanned yet simply doesn't have a row until its first scan.
+            const assetIds = [...new Set(logsCache.filter(l => l.TemplateID === t.TemplateID && l.AssetID).map(l => l.AssetID))];
+            if (!assetIds.length) return [{ template: t, due: dueInfo(t), assetLabel: '' }];
+            return assetIds.map(aid => {
+              const sample = logsCache.find(l => l.TemplateID === t.TemplateID && l.AssetID === aid);
+              return { template: t, due: dueInfo(t, aid), assetLabel: (sample && sample.AssetName) || aid };
+            });
+          })
           .sort((a, b) => {
             if (a.due.overdue !== b.due.overdue) return a.due.overdue ? -1 : 1;
             return FREQUENCY_ORDER.indexOf(a.template.Frequency) - FREQUENCY_ORDER.indexOf(b.template.Frequency);
@@ -1011,7 +1045,7 @@ const HSModule = (function () {
     container.querySelector('#hs-due-pdf').addEventListener('click', () => {
       const pdfRows = [];
       groups.forEach(g => g.rows.forEach(r => pdfRows.push({
-        Category: categoryLabel(g.target), Template: r.template.Name, Frequency: FREQUENCY_LABEL[r.template.Frequency],
+        Category: categoryLabel(g.target), Template: r.template.Name + (r.assetLabel ? ` (${r.assetLabel})` : ''), Frequency: FREQUENCY_LABEL[r.template.Frequency],
         Status: r.due.overdue ? 'Due' : 'Up to date', Detail: r.due.text
       })));
       printTablePdf('Due Status', ['Category', 'Template', 'Frequency', 'Status', 'Detail'], pdfRows);
@@ -1022,7 +1056,7 @@ const HSModule = (function () {
         <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(categoryLabel(g.target))}</h3>
         ${g.rows.map(r => `
           <div class="mvoa-row" style="padding:6px 0;border-bottom:1px solid var(--border);">
-            <span>${escapeHtml(r.template.Name)}</span>
+            <span>${escapeHtml(r.template.Name)}${r.assetLabel ? `<br><span class="muted" style="font-size:0.75rem;">${escapeHtml(r.assetLabel)}</span>` : ''}</span>
             <span style="text-align:right;">
               ${r.due.overdue ? '<span style="color:#b3261e;font-weight:700;font-size:0.85rem;">⚠️ Due</span>' : '<span class="muted" style="font-size:0.85rem;">Up to date</span>'}
               <br><span class="muted" style="font-size:0.75rem;">${escapeHtml(r.due.text)}</span>
@@ -1265,16 +1299,16 @@ const HSModule = (function () {
     d.setHours(0, 0, 0, 0);
     return d;
   }
-  function lastLogForTemplate(templateId) {
-    const matches = logsCache.filter(l => l.TemplateID === templateId).sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
+  function lastLogForTemplate(templateId, assetId) {
+    const matches = logsCache.filter(l => l.TemplateID === templateId && (!assetId || l.AssetID === assetId)).sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
     return matches[0] || null;
   }
-  function hasLogSince(templateId, sinceDate) {
-    return logsCache.some(l => l.TemplateID === templateId && new Date(l.Timestamp) >= sinceDate);
+  function hasLogSince(templateId, sinceDate, assetId) {
+    return logsCache.some(l => l.TemplateID === templateId && (!assetId || l.AssetID === assetId) && new Date(l.Timestamp) >= sinceDate);
   }
 
-  function dueInfo(template) {
-    const last = lastLogForTemplate(template.TemplateID);
+  function dueInfo(template, assetId) {
+    const last = lastLogForTemplate(template.TemplateID, assetId);
     const lastText = last ? `Last: ${formatDate(last.Timestamp)}` : 'Never logged';
     const now = new Date();
 
@@ -1285,24 +1319,29 @@ const HSModule = (function () {
 
     if (template.Frequency === 'Weekly') {
       const monday = mostRecentMonday(now);
-      const done = hasLogSince(template.TemplateID, monday);
+      const done = hasLogSince(template.TemplateID, monday, assetId);
       if (done) return { text: lastText, overdue: false };
       const isMonday = now.getDay() === 1;
       return isMonday ? { text: 'Due today (Monday)', overdue: false } : { text: `Not done since ${formatDate(monday)}`, overdue: true };
     }
 
-    // Monthly-First-Week: due window is always days 1–7 of the CURRENT
-    // month (unlike the Monthly/BiMonthly window below, this never needs
-    // to look back at a previous month — a fresh window starts the
-    // moment a new month begins).
-    if (template.Frequency === 'MonthlyFirstWeek') {
+    // Fixed day-of-month window (WindowStartDay/WindowEndDay set on the
+    // template) — a generic replacement for the one-off "first week of
+    // month" rule: any day range works (Club House: 1–7, this batch:
+    // 8–14, etc.) via pure data, no code change per new window shape.
+    // Only applies to Monthly; a fresh window starts the moment a new
+    // month begins, no need to look back at a previous month at all.
+    const winStart = parseInt(template.WindowStartDay, 10);
+    const winEnd = parseInt(template.WindowEndDay, 10);
+    if (template.Frequency === 'Monthly' && winStart && winEnd) {
       const y = now.getFullYear(), m0 = now.getMonth();
+      const windowStart = new Date(y, m0, winStart); windowStart.setHours(0, 0, 0, 0);
+      const windowEnd = new Date(y, m0, winEnd); windowEnd.setHours(23, 59, 59, 999);
       const monthStart = new Date(y, m0, 1); monthStart.setHours(0, 0, 0, 0);
-      const weekEnd = new Date(y, m0, 7); weekEnd.setHours(23, 59, 59, 999);
-      const done = hasLogSince(template.TemplateID, monthStart);
+      const done = hasLogSince(template.TemplateID, monthStart, assetId);
       if (done) return { text: lastText, overdue: false };
-      if (now <= weekEnd) return { text: 'Due this week (1st week of month)', overdue: false };
-      return { text: `Overdue since ${formatDate(new Date(y, m0, 8))}`, overdue: true };
+      if (now <= windowEnd) return { text: `Due this week (days ${winStart}-${winEnd} of month)`, overdue: false };
+      return { text: `Overdue since ${formatDate(new Date(y, m0, winEnd + 1))}`, overdue: true };
     }
 
     // Monthly and BiMonthly share the same "last week of a cycle month" shape
@@ -1310,7 +1349,7 @@ const HSModule = (function () {
     const anchor0 = 6; // July, 0-based — only relevant when interval=2
     const win = currentOrLastCycleWindow(now, interval, anchor0);
     if (!win) return { text: lastText, overdue: true };
-    const done = hasLogSince(template.TemplateID, win.start);
+    const done = hasLogSince(template.TemplateID, win.start, assetId);
     if (done) return { text: lastText, overdue: false };
     if (win.isCurrentMonth) return { text: 'Due this week', overdue: false };
     return { text: `Overdue since ${formatDate(win.start)}`, overdue: true };
@@ -1318,8 +1357,10 @@ const HSModule = (function () {
 
   function frequencyRuleText(template) {
     if (template.Frequency === 'Weekly') return 'Due every Monday';
+    const winStart = parseInt(template.WindowStartDay, 10);
+    const winEnd = parseInt(template.WindowEndDay, 10);
+    if (template.Frequency === 'Monthly' && winStart && winEnd) return `Due days ${winStart}-${winEnd} of the month`;
     if (template.Frequency === 'Monthly') return 'Due last week of the month';
-    if (template.Frequency === 'MonthlyFirstWeek') return 'Due 1st week of the month';
     if (template.Frequency === 'BiMonthly') return 'Due last week of Jul / Sep / Nov / Jan / Mar / May';
     return ''; // Daily has no interval to state — it's due every day
   }
@@ -1865,7 +1906,12 @@ const HSModule = (function () {
         items.some(i => i.InputType === 'AssetList' && (pendingResults[i.ItemID]?.entries || []).some(v => v && v.trim()));
       const logRow = LOG_COLS.map(c => ({
         LogID: logId, TemplateID: currentTemplate.TemplateID, PerformedBy: performedBy,
-        Timestamp: now, Shift: currentShift || '', Status: anyFail ? 'Flagged' : 'Submitted', Notes: notes
+        Timestamp: now, Shift: currentShift || '', Status: anyFail ? 'Flagged' : 'Submitted', Notes: notes,
+        // Carries which physical instance this log belongs to, for
+        // categories with multiple scannable units sharing one template
+        // (e.g. 18 Distribution Panels) — blank for single-instance
+        // categories (DG Set etc.), same as always.
+        AssetID: currentScan.assetId || '', AssetName: currentScan.assetName || ''
       })[c]);
       await MVOA.sheetsAppend(MVOA.TABS.hsLog, logRow);
 
