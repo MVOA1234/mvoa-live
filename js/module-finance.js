@@ -1090,7 +1090,10 @@ const FinanceModule = (function () {
         <label>Invoice Period / Purpose <input id="fin-exp-purpose" type="text" value="${escapeHtml(e.InvoicePeriodPurpose || req.Description || '')}"></label>
         <label>Period <input id="fin-exp-period" type="text" value="${escapeHtml(e.Period || '')}"></label>
         <label>Gross Amount (₹) <input id="fin-exp-gross" type="number" min="0" value="${escapeHtml(e.GrossAmount !== undefined ? e.GrossAmount : req.Amount)}"></label>
-        <label>GST (₹) <input id="fin-exp-gst" type="number" min="0" value="${escapeHtml(e.GST || 0)}"></label>
+        <label>GST Applicable? <select id="fin-exp-gst">
+          <option value="No" ${(e.GST || 'No') === 'No' ? 'selected' : ''}>No</option>
+          <option value="Yes" ${e.GST === 'Yes' ? 'selected' : ''}>Yes</option>
+        </select></label>
         <label>TDS Rate (%) <input id="fin-exp-tdsrate" type="number" min="0" value="${escapeHtml(e.TDSRate || 0)}"></label>
         <label>TDS (₹) <input id="fin-exp-tds" type="number" min="0" value="${escapeHtml(e.TDS || 0)}"></label>
         <label>Less / Add (₹, +/-) <input id="fin-exp-lessadd" type="number" value="${escapeHtml(e.LessAdd || 0)}"></label>
@@ -1121,7 +1124,7 @@ const FinanceModule = (function () {
       SlNo: (existing && existing.row.SlNo) || '',
       Vendor: vendor, InvoiceDate: val('#fin-exp-invdate'), InvoiceNumber: val('#fin-exp-invno'),
       InvoicePeriodPurpose: val('#fin-exp-purpose'), Period: val('#fin-exp-period'),
-      GrossAmount: gross, GST: Number(val('#fin-exp-gst')) || 0, TDSRate: Number(val('#fin-exp-tdsrate')) || 0,
+      GrossAmount: gross, GST: val('#fin-exp-gst'), TDSRate: Number(val('#fin-exp-tdsrate')) || 0,
       TDS: Number(val('#fin-exp-tds')) || 0, LessAdd: Number(val('#fin-exp-lessadd')) || 0,
       NetAmount: Number(val('#fin-exp-net')) || gross,
       NelsonCheck: (existing && existing.row.NelsonCheck) || '', LakshmanCheck: (existing && existing.row.LakshmanCheck) || '',
