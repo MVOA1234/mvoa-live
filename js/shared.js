@@ -156,6 +156,34 @@ const MVOA = (function () {
     return r.json();
   }
 
+  // Creates a new tab with the given header row if it doesn't already exist —
+  // used for month-per-tab sheets (e.g. ExpenseSheet_Aug26) that get created
+  // the first time an entry lands in a given month, rather than pre-seeded.
+  // Safe to call every time before writing; a no-op if the tab is already there.
+  async function sheetsEnsureTab(sheetName, headerRow) {
+    const token = await getServiceAccountToken();
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}?fields=sheets.properties.title`;
+    const metaRes = await fetchWithTimeout(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!metaRes.ok) throw new Error(`Could not check existing tabs: ${metaRes.status}`);
+    const meta = await metaRes.json();
+    const exists = (meta.sheets || []).some(s => s.properties && s.properties.title === sheetName);
+    if (exists) return false;
+    const createUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}:batchUpdate`;
+    const createRes = await fetchWithTimeout(createUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: sheetName } } }] })
+    });
+    if (!createRes.ok) {
+      const body = await createRes.text().catch(() => '');
+      // Another concurrent request may have created it a moment ago — treat as success.
+      if (body.indexOf('already exists') !== -1) return false;
+      throw new Error(`Could not create tab ${sheetName}: ${createRes.status} ${body}`);
+    }
+    if (headerRow && headerRow.length) await sheetsAppend(sheetName, headerRow);
+    return true;
+  }
+
   // Service Account JWT token generation (cached until near-expiry)
   let saTokenCache = { token: '', expires: 0 };
   async function getServiceAccountToken() {
@@ -972,7 +1000,7 @@ const MVOA = (function () {
   return {
     CFG, TABS,
     loadConfig, saveConfig,
-    sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow,
+    sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow, sheetsEnsureTab,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
