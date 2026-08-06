@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
 // MODULE: Approvals & Payments
 // Sheet tabs used: FinanceApprovalRules | FinanceRequests |
-//   FinanceApprovals | FinanceRequestNotes | Roles (existing)
+//   FinanceApprovals | FinanceRequestNotes | Roles | ExpenseSheet_<MonYY>
+//   (one tab per month, created on demand — see sheetsEnsureTab)
 //
 // FinanceApprovalRules columns: RuleID | ExpenseCategory | BudgetStatus |
 //   MinAmount | MaxAmount | InitiatedByRole | TechnicalVerificationRole |
@@ -13,15 +14,43 @@
 //   RequestType | AttachmentURL_1 | AttachmentURL_2 | AttachmentURL_3 |
 //   RequiredDocsSnapshot | Status | QuorumRequired | ECApprovalCount |
 //   ClosedDate | ClosedBy | PaymentStatus | PaymentDate | PaymentRef |
-//   NotifiedAt | ReminderSentAt
+//   NotifiedAt | ReminderSentAt | DisbursementStage | ExpenseTab | ExpenseRow
+//
+// DisbursementStage (new — models the real Schedule D payment-release
+// workflow: Accountant logs the Expense Sheet entry → Treasurer reviews,
+// possibly kicking it back for correction over more than one round →
+// Treasurer's approval of that entry IS the formal Treasurer approval →
+// Disbursement Officer releases payment → Accountant's entry is updated
+// with the Cheque/UTR reference):
+//   '' → not yet logged as an expense (Status must be 'Approved' first)
+//   'PendingTreasurer' → Accountant has logged the entry, awaiting Treasurer
+//   'NeedsCorrection' → Treasurer sent it back with a query (see notes thread)
+//   'PendingPayment' → Treasurer approved, awaiting Disbursement Officer
+//   'Paid' → Disbursement Officer has released payment
+// ExpenseTab / ExpenseRow point at the specific ExpenseSheet_<MonYY> row
+// this request's entry lives in, so it can be re-read/updated in place.
+//
+// ExpenseSheet_<MonYY> columns (mirrors the Association's existing
+// month-by-month Excel Payments sheet, unchanged so nothing about how the
+// Accountant already works has to change):
+//   RequestID | SlNo | Vendor | InvoiceDate | InvoiceNumber |
+//   InvoicePeriodPurpose | Period | GrossAmount | GST | TDSRate | TDS |
+//   LessAdd | NetAmount | NelsonCheck | LakshmanCheck | ApprovedBy |
+//   PassedBy | UDNumber | Date
+// ("PassedBy" being filled in is what constitutes the Treasurer's formal
+// approval — same as the real paper process. UDNumber/Date are filled by
+// the Disbursement Officer at the moment of payment.)
 //
 // FinanceApprovals columns: ApprovalID | RequestID | ApproverName |
 //   ApproverRole | Stage | Decision | Comment | Timestamp
 //
 // FinanceRequestNotes columns: NoteID | RequestID | Author | Timestamp | Note
+// (reused for the Accountant↔Treasurer clarify/correction loop too, not
+// just pre-approval questions — same thread, same tab.)
 //
 // STATUS values on FinanceRequests: PendingApproval | Approved | Rejected
-// PaymentStatus values: Unpaid | Paid
+// PaymentStatus values: Unpaid | Paid (kept for simple display on "My
+// Requests"; DisbursementStage above is what actually drives the workflow)
 //
 // Approval routing is data-driven from FinanceApprovalRules (the DoFA
 // matrix), not hardcoded — see resolveRule() and the approver-matching
@@ -45,6 +74,7 @@ const FinanceModule = (function () {
   const TAB_APPROVALS = 'FinanceApprovals';
   const TAB_NOTES = 'FinanceRequestNotes';
   const TAB_ROLES = 'Roles';
+  const EXPENSE_TAB_PREFIX = 'ExpenseSheet_';
   const DEFAULT_QUORUM = 7;
 
   const RULE_COLS = ['RuleID','ExpenseCategory','BudgetStatus','MinAmount','MaxAmount',
@@ -54,7 +84,13 @@ const FinanceModule = (function () {
   const REQUEST_COLS = ['RequestID','RuleID','Category','BudgetStatus','Amount','Vendor',
     'Description','RequestedBy','RequestedDate','RequestType','AttachmentURL_1','AttachmentURL_2',
     'AttachmentURL_3','RequiredDocsSnapshot','Status','QuorumRequired','ECApprovalCount',
-    'ClosedDate','ClosedBy','PaymentStatus','PaymentDate','PaymentRef','NotifiedAt','ReminderSentAt'];
+    'ClosedDate','ClosedBy','PaymentStatus','PaymentDate','PaymentRef','NotifiedAt','ReminderSentAt',
+    // Purchase Requisition fields — only populated when the requester used
+    // "Fill Purchase Requisition in-app" instead of uploading FIN-F-004:
+    'PR_AssetFacility','PR_Location','PR_ReasonJustification','PR_CurrentCondition',
+    'PR_RiskIfDeferred','PR_ProcurementMethod','PR_ExpectedCompletionDays',
+    // Schedule D payment-release workflow — see header comment.
+    'DisbursementStage','ExpenseTab','ExpenseRow'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -62,11 +98,19 @@ const FinanceModule = (function () {
 
   const ROLE_COLS = ['Name','Role','PIN_Hash','Phone','Email','Active','EC_Member','Title','AdminAccess'];
 
+  // Mirrors the Association's existing month-by-month Excel Payments
+  // sheet column-for-column — see header comment for the workflow this
+  // drives.
+  const EXPENSE_COLS = ['RequestID','SlNo','Vendor','InvoiceDate','InvoiceNumber',
+    'InvoicePeriodPurpose','Period','GrossAmount','GST','TDSRate','TDS','LessAdd','NetAmount',
+    'NelsonCheck','LakshmanCheck','ApprovedBy','PassedBy','UDNumber','Date'];
+
   let rulesCache = [];
   let requestsCache = [];
   let rolesCache = [];
-  let currentView = 'mine'; // 'submit' | 'mine' | 'queue'
+  let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
+  let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
 
   // ───────────────────────────────────────────────────────────
   // Row <-> object helpers (same pattern as module-ops.js)
@@ -113,6 +157,7 @@ const FinanceModule = (function () {
         <button data-view="submit" class="ops-tab-btn ${currentView==='submit'?'active':''}">+ New Request</button>
         <button data-view="mine" class="ops-tab-btn ${currentView==='mine'?'active':''}">My Requests</button>
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue</button>
+        <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">💰 Payments</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
@@ -135,6 +180,7 @@ const FinanceModule = (function () {
     const body = container.querySelector('#fin-view-body');
     if (currentView === 'submit') renderSubmitForm(body, container);
     else if (currentView === 'queue') renderQueue(body, container);
+    else if (currentView === 'payments') renderPayments(body, container);
     else renderMine(body, container);
   }
 
@@ -311,6 +357,8 @@ const FinanceModule = (function () {
           <textarea id="fin-desc" rows="2" placeholder="What is this expense for?"></textarea>
         </label>
         <div id="fin-rule-preview"></div>
+        <div id="fin-pr-toggle-wrap"></div>
+        <div id="fin-pr-fields-wrap"></div>
         <div style="margin-top:12px;">
           <p class="muted" id="fin-attachments-label" style="margin:0 0 6px;">Attachments</p>
           <div id="fin-attachment-chips"></div>
@@ -369,15 +417,62 @@ const FinanceModule = (function () {
           ${rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification'
             ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — quorum ${rule.QuorumOverride || DEFAULT_QUORUM}</p>` : ''}
           ${rule.AGMApprovalRequired === 'Yes' ? `<p class="muted" style="margin:2px 0;">AGM approval required</p>` : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')} — please attach at least ${Math.min(docs.length, 3)} file(s) below.</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')} — please attach at least ${Math.min(docs.length, 3)} file(s) below, or fill the Purchase Requisition in-app if offered.</p>` : ''}
         </div>`;
       body.querySelector('#fin-attachments-label').textContent =
         docs.length ? `Attachments — at least ${Math.min(docs.length, 3)} required` : 'Attachments (optional — up to 3)';
+
+      // Purchase Requisition (FIN-F-004) — offered as a fillable in-app
+      // form wherever the DoFA Matrix calls for a "Purchase Request" as
+      // part of the minimum documentation, instead of requiring an upload.
+      const prToggleWrap = body.querySelector('#fin-pr-toggle-wrap');
+      const needsPR = docs.some(d => /purchase request/i.test(d));
+      if (needsPR) {
+        prToggleWrap.innerHTML = `
+          <label style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+            <input type="checkbox" id="fin-pr-fill-toggle" ${fillPrInApp ? 'checked' : ''}>
+            📝 Fill the Purchase Requisition in-app instead of uploading FIN-F-004
+          </label>`;
+        prToggleWrap.querySelector('#fin-pr-fill-toggle').addEventListener('change', (e) => {
+          fillPrInApp = e.target.checked;
+          renderPrFields();
+        });
+      } else {
+        prToggleWrap.innerHTML = '';
+        fillPrInApp = false;
+      }
+      renderPrFields();
+    }
+
+    function renderPrFields() {
+      const wrap = body.querySelector('#fin-pr-fields-wrap');
+      if (!fillPrInApp) { wrap.innerHTML = ''; return; }
+      wrap.innerHTML = `
+        <div class="mvoa-list-item" style="margin-top:10px;">
+          <p style="margin:0 0 8px;font-weight:600;">Purchase Requisition details</p>
+          <label>Asset / Facility <input id="fin-pr-asset" type="text"></label>
+          <label>Location <input id="fin-pr-location" type="text"></label>
+          <label>Reason / Justification <input id="fin-pr-reason" type="text" placeholder="e.g. Breakdown, Preventive Maintenance, Safety, Statutory Compliance…"></label>
+          <label>Current Condition <textarea id="fin-pr-condition" rows="2"></textarea></label>
+          <label>Risk if Work is Deferred <input id="fin-pr-risk" type="text" placeholder="e.g. Safety Risk, Service Interruption…"></label>
+          <label>Procurement Method
+            <select id="fin-pr-method">
+              <option value="One Quotation">One Quotation</option>
+              <option value="Two Quotations">Two Quotations</option>
+              <option value="Three Quotations">Three Quotations</option>
+              <option value="Rate Contract">Rate Contract</option>
+              <option value="Proprietary Item">Proprietary Item</option>
+              <option value="Emergency Procurement">Emergency Procurement</option>
+            </select>
+          </label>
+          <label>Expected Completion (days) <input id="fin-pr-days" type="number" min="0"></label>
+        </div>`;
     }
 
     catEl.addEventListener('change', () => { refreshBudgetStatusSelector(); refreshRulePreview(); });
     amtEl.addEventListener('input', refreshRulePreview);
     refreshBudgetStatusSelector();
+    fillPrInApp = false;
 
     body.querySelector('#fin-submit-btn').addEventListener('click', () => submitRequest(body, container));
   }
@@ -445,10 +540,28 @@ const FinanceModule = (function () {
     if (!result.rule) { errEl.textContent = 'No approval rule matches this category/amount combination — contact your Developer.'; return; }
     const rule = result.rule;
     const docs = requiredDocsList(rule);
-    const minAttachments = Math.min(docs.length, 3);
+    // If the Purchase Requisition is being filled in-app, it no longer needs
+    // to be one of the uploaded attachments — the in-app fields below stand
+    // in for FIN-F-004 directly.
+    const docsNeedingUpload = fillPrInApp ? docs.filter(d => !/purchase request/i.test(d)) : docs;
+    const minAttachments = Math.min(docsNeedingUpload.length, 3);
     if (pendingAttachments.length < minAttachments) {
-      errEl.textContent = `This category requires at least ${minAttachments} attachment(s): ${docs.join(', ')}.`;
+      errEl.textContent = `This category requires at least ${minAttachments} attachment(s): ${docsNeedingUpload.join(', ')}.`;
       return;
+    }
+    let prFields = {};
+    if (fillPrInApp) {
+      const val = id => (body.querySelector(id) || { value: '' }).value.trim();
+      prFields = {
+        PR_AssetFacility: val('#fin-pr-asset'), PR_Location: val('#fin-pr-location'),
+        PR_ReasonJustification: val('#fin-pr-reason'), PR_CurrentCondition: val('#fin-pr-condition'),
+        PR_RiskIfDeferred: val('#fin-pr-risk'), PR_ProcurementMethod: val('#fin-pr-method'),
+        PR_ExpectedCompletionDays: val('#fin-pr-days')
+      };
+      if (!prFields.PR_AssetFacility || !prFields.PR_ReasonJustification) {
+        errEl.textContent = 'Please fill in at least Asset/Facility and Reason/Justification on the Purchase Requisition.';
+        return;
+      }
     }
 
     submitBtn.disabled = true;
@@ -476,15 +589,15 @@ const FinanceModule = (function () {
     const requestType = category === 'Petty Cash Reimbursement' ? 'PettyCashReimbursement'
       : category === 'Emergency Expenditure' ? 'Emergency' : 'Standard';
 
-    const row = {
+    const row = Object.assign({
       RequestID: requestId, RuleID: rule.RuleID, Category: category, BudgetStatus: budgetStatus,
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
       RequestType: requestType, AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
       AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
       Status: 'PendingApproval', QuorumRequired: rule.QuorumOverride || '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
-      NotifiedAt: '', ReminderSentAt: ''
-    };
+      NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: ''
+    }, prFields);
 
     try {
       await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
@@ -496,6 +609,7 @@ const FinanceModule = (function () {
     }
 
     pendingAttachments = [];
+    fillPrInApp = false;
     await loadAll();
     currentView = 'mine';
     render(container);
@@ -640,16 +754,11 @@ const FinanceModule = (function () {
       if (eligible) cards.push({ req, state, approvals });
     }
 
-    const paymentEligible = person.Role === 'TRES' || (person.Title || '').toLowerCase().indexOf('secretary') !== -1 || isAdmin(person);
-
     body.innerHTML = `
       <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">Awaiting your action</h3>
       ${cards.length ? '' : '<p class="muted">Nothing waiting on you right now.</p>'}
       <div id="fin-queue-cards"></div>
-      ${paymentEligible ? `
-        <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Approved — ready for payment</h3>
-        ${approved.length ? '' : '<p class="muted">Nothing awaiting payment.</p>'}
-        <div id="fin-payment-cards"></div>` : ''}
+      <p class="muted" style="margin-top:16px;">Once a request is fully approved, its actual payment release (Expense Sheet entry → Treasurer review → Disbursement Officer) happens in the <strong>💰 Payments</strong> tab, not here.</p>
     `;
 
     const cardsEl = body.querySelector('#fin-queue-cards');
@@ -697,28 +806,6 @@ const FinanceModule = (function () {
       });
     });
 
-    if (paymentEligible) {
-      const paymentCardsEl = body.querySelector('#fin-payment-cards');
-      approved.forEach(req => {
-        const div = document.createElement('div');
-        div.className = 'mvoa-list-item';
-        div.innerHTML = `
-          <div class="mvoa-row">
-            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-            ${displayStatus(req)}
-          </div>
-          ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
-          <div style="margin-top:8px;">
-            <input type="text" class="fin-payment-ref" data-request-id="${escapeHtml(req.RequestID)}" placeholder="Payment reference / UTR (optional)" style="width:100%;margin-bottom:6px;">
-            <button class="btn-primary fin-mark-paid-btn" data-request-id="${escapeHtml(req.RequestID)}">Mark as Paid</button>
-          </div>
-        `;
-        paymentCardsEl.appendChild(div);
-      });
-      paymentCardsEl.querySelectorAll('.fin-mark-paid-btn').forEach(btn => {
-        btn.addEventListener('click', () => markPaid(btn.dataset.requestId, body, container));
-      });
-    }
   }
 
   function attachmentLinksHtml(r) {
@@ -768,24 +855,403 @@ const FinanceModule = (function () {
     }
   }
 
-  async function markPaid(requestId, body, container) {
-    const refInput = body.querySelector(`.fin-payment-ref[data-request-id="${requestId}"]`);
-    const paymentRef = refInput ? refInput.value.trim() : '';
+  // Final step of the Schedule D workflow — called by the Disbursement
+  // Officer's action in the Payments tab once UDNumber/Date have been
+  // written into the Expense Sheet row itself (see renderPayments).
+  async function markPaid(requestId, paymentRef) {
     const req = requestsCache.find(r => r.RequestID === requestId);
     if (!req) return;
     const user = MVOA.getUser();
-    try {
-      const updated = Object.assign({}, req, {
-        PaymentStatus: 'Paid', PaymentDate: new Date().toISOString(), PaymentRef: paymentRef,
-        ClosedDate: new Date().toISOString(), ClosedBy: user.name
+    const updated = Object.assign({}, req, {
+      PaymentStatus: 'Paid', PaymentDate: new Date().toISOString(), PaymentRef: paymentRef || '',
+      DisbursementStage: 'Paid', ClosedDate: new Date().toISOString(), ClosedBy: user.name
+    });
+    await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+    await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Paid', comment: paymentRef || '', statusAfter: 'Paid' });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // PAYMENTS — the real Schedule D release workflow: Accountant logs the
+  // Expense Sheet entry → Treasurer reviews (approve, or send back with a
+  // query — may repeat) → Disbursement Officer releases payment. See the
+  // header comment for the full column/stage reference.
+  // ═══════════════════════════════════════════════════════════════
+
+  function isAccountantPerson(person) {
+    const title = (person.Title || '').toLowerCase();
+    return (person.Role || '').toUpperCase() === 'ACCT' || title.indexOf('accountant') !== -1;
+  }
+  function isDisbursementOfficerPerson(person) {
+    const title = (person.Title || '').toLowerCase();
+    return (person.Role || '').toUpperCase() === 'DISB' || title.indexOf('disbursement officer') !== -1;
+  }
+  function isTreasurerPerson(person) {
+    return roleMatchesToken(person, 'treasurer');
+  }
+
+  function currentPerson() {
+    const user = MVOA.getUser();
+    return rolesCache.find(p => p.Name === user.name) || { Name: user.name, Role: user.role, Title: user.title };
+  }
+
+  function expenseTabForDate(d) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return EXPENSE_TAB_PREFIX + months[d.getMonth()] + String(d.getFullYear()).slice(-2);
+  }
+  function allKnownExpenseTabs() {
+    const tabs = new Set([expenseTabForDate(new Date())]);
+    requestsCache.forEach(r => { if (r.ExpenseTab) tabs.add(r.ExpenseTab); });
+    return [...tabs].sort().reverse();
+  }
+  async function readExpenseRow(tab, requestId) {
+    const rows = await MVOA.sheetsRead(tab);
+    const idx = rows.findIndex((r, i) => i > 0 && r[0] === requestId);
+    if (idx === -1) return null;
+    return { row: rowToObj(EXPENSE_COLS, rows[idx], idx + 1), rowNumber: idx + 1 };
+  }
+
+  function renderPayments(body, container) {
+    const person = currentPerson();
+    const isAcct = isAccountantPerson(person);
+    const isTres = isTreasurerPerson(person);
+    const isDisb = isDisbursementOfficerPerson(person);
+    const isAdminUser = isAdmin(person);
+
+    if (!isAcct && !isTres && !isDisb && !isAdminUser) {
+      body.innerHTML = `<p class="muted">Payment release (Expense Sheet entry, Treasurer review, Disbursement) is handled by the Accountant, Treasurer and Disbursement Officer. You don't have any actions here.</p>`;
+      return;
+    }
+
+    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage);
+    const needsCorrection = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
+    const pendingTreasurer = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
+    const pendingPayment = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
+    const paid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
+      .sort((a, b) => (b.ClosedDate || '').localeCompare(a.ClosedDate || '')).slice(0, 10);
+
+    body.innerHTML = `
+      <div style="margin-bottom:14px;">
+        <button id="fin-view-expense-sheet-btn" class="btn-secondary">📅 View Expense Sheet</button>
+      </div>
+      ${(isAcct || isAdminUser) ? `
+        <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">Approved — log Expense Sheet entry</h3>
+        ${needsExpenseEntry.length ? '<div id="fin-pay-needentry"></div>' : '<p class="muted">Nothing waiting to be logged.</p>'}
+        <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Sent back for correction</h3>
+        ${needsCorrection.length ? '<div id="fin-pay-correction"></div>' : '<p class="muted">Nothing needs correction right now.</p>'}
+      ` : ''}
+      ${(isTres || isAdminUser) ? `
+        <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Awaiting your review</h3>
+        ${pendingTreasurer.length ? '<div id="fin-pay-treasurer"></div>' : '<p class="muted">Nothing awaiting your review.</p>'}
+      ` : ''}
+      ${(isDisb || isAdminUser) ? `
+        <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Ready for payment</h3>
+        ${pendingPayment.length ? '<div id="fin-pay-disburse"></div>' : '<p class="muted">Nothing awaiting payment.</p>'}
+      ` : ''}
+      <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Recently paid</h3>
+      ${paid.length ? '<div id="fin-pay-recent"></div>' : '<p class="muted">No payments logged yet.</p>'}
+    `;
+
+    body.querySelector('#fin-view-expense-sheet-btn').addEventListener('click', () => renderExpenseSheetBrowser(container));
+
+    function baseCard(req, extraRight) {
+      return `
+        <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+            ${extraRight || ''}
+          </div>
+          ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested by ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
+        </div>`;
+    }
+
+    if (needsExpenseEntry.length) {
+      const el = body.querySelector('#fin-pay-needentry');
+      el.innerHTML = needsExpenseEntry.map(req => baseCard(req,
+        `<button class="btn-primary fin-log-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Log Expense Entry</button>`
+      )).join('');
+      el.querySelectorAll('.fin-log-entry-btn').forEach(btn => {
+        btn.addEventListener('click', () => openExpenseEntryDialog(btn.dataset.requestId, container, false));
       });
-      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
-      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Paid', comment: paymentRef, statusAfter: 'Paid' });
+    }
+    if (needsCorrection.length) {
+      const el = body.querySelector('#fin-pay-correction');
+      el.innerHTML = needsCorrection.map(req => `
+        <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+            <span class="mvoa-badge" style="color:#a32d2d;background:#fbeaea;">Needs correction</span>
+          </div>
+          ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          <button class="btn-secondary fin-corr-notes-toggle" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 6px 0 0;">💬 See Treasurer's query</button>
+          <button class="btn-primary fin-edit-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 0 0 0;">Edit &amp; Resubmit</button>
+          <div class="fin-corr-notes-body hidden" data-request-id="${escapeHtml(req.RequestID)}"></div>
+        </div>`).join('');
+      el.querySelectorAll('.fin-edit-entry-btn').forEach(btn => {
+        btn.addEventListener('click', () => openExpenseEntryDialog(btn.dataset.requestId, container, true));
+      });
+      el.querySelectorAll('.fin-corr-notes-toggle').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.requestId;
+          const notesBody = el.querySelector(`.fin-corr-notes-body[data-request-id="${id}"]`);
+          const isHidden = notesBody.classList.contains('hidden');
+          if (!isHidden) { notesBody.classList.add('hidden'); return; }
+          notesBody.classList.remove('hidden');
+          await renderNotesThread(notesBody, id, null, true);
+        });
+      });
+    }
+    if (pendingTreasurer.length) {
+      const el = body.querySelector('#fin-pay-treasurer');
+      pendingTreasurer.forEach(async req => {
+        const div = document.createElement('div');
+        div.className = 'mvoa-list-item';
+        div.dataset.requestId = req.RequestID;
+        div.innerHTML = `<p class="muted">Loading entry…</p>`;
+        el.appendChild(div);
+        let entry = null;
+        try { entry = req.ExpenseTab ? await readExpenseRow(req.ExpenseTab, req.RequestID) : null; } catch (e) { /* fall through */ }
+        div.innerHTML = `
+          <div class="mvoa-row">
+            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+            <span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Awaiting review</span>
+          </div>
+          ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          ${entry ? `
+            <p class="muted" style="margin:4px 0;font-size:0.85rem;">Invoice ${escapeHtml(entry.row.InvoiceNumber || '—')} · Gross ${formatAmount(entry.row.GrossAmount)} · GST ${escapeHtml(entry.row.GST || '0')} · TDS ${escapeHtml(entry.row.TDS || '0')} · Net ${formatAmount(entry.row.NetAmount)}</p>
+          ` : '<p class="error-text" style="font-size:0.85rem;">Could not load the Expense Sheet entry.</p>'}
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn-primary fin-treasurer-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Approve</button>
+            <button class="btn-secondary fin-treasurer-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Back with Query</button>
+          </div>
+          <p class="error-text fin-treasurer-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+        `;
+        div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', () => treasurerApprove(req.RequestID, container));
+        div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', () => {
+          const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
+          if (q && q.trim()) treasurerSendBack(req.RequestID, q.trim(), container);
+        });
+      });
+    }
+    if (pendingPayment.length) {
+      const el = body.querySelector('#fin-pay-disburse');
+      el.innerHTML = pendingPayment.map(req => `
+        <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+            <span class="mvoa-badge" style="color:#0f6e56;background:#eaf5ef;">Treasurer approved</span>
+          </div>
+          ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          <div style="margin-top:8px;">
+            <input type="text" class="fin-ud-number" data-request-id="${escapeHtml(req.RequestID)}" placeholder="UD Number / Cheque / UTR" style="width:100%;margin-bottom:6px;">
+            <button class="btn-primary fin-disburse-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Release Payment</button>
+          </div>
+          <p class="error-text fin-disburse-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+        </div>`).join('');
+      el.querySelectorAll('.fin-disburse-btn').forEach(btn => {
+        btn.addEventListener('click', () => disbursePayment(btn.dataset.requestId, el, container));
+      });
+    }
+    if (paid.length) {
+      const el = body.querySelector('#fin-pay-recent');
+      el.innerHTML = paid.map(req => baseCard(req,
+        `<span class="mvoa-badge" style="color:#185fa5;background:#e6f1fb;">Paid ${req.PaymentRef ? '· ' + escapeHtml(req.PaymentRef) : ''}</span>`
+      )).join('');
+    }
+  }
+
+  // ─── Accountant: Log / Edit Expense Sheet entry ───────────────
+  function openExpenseEntryDialog(requestId, container, isCorrection) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `<div class="ops-qr-box" style="text-align:left;"><p class="muted">Loading…</p></div>`;
+    document.body.appendChild(modal);
+
+    (async () => {
+      let existing = null;
+      if (isCorrection && req.ExpenseTab) {
+        try { existing = (await readExpenseRow(req.ExpenseTab, requestId)) || null; } catch (e) { /* fresh form if unreadable */ }
+      }
+      const e = (existing && existing.row) || {};
+      const tabs = allKnownExpenseTabs();
+      const box = modal.querySelector('.ops-qr-box');
+      box.innerHTML = `
+        <h3>${isCorrection ? 'Edit' : 'Log'} Expense Entry — ${escapeHtml(req.Category)}</h3>
+        <label>Month (Expense Sheet tab)
+          <select id="fin-exp-tab" ${isCorrection ? 'disabled' : ''}>
+            ${tabs.map(t => `<option value="${t}" ${req.ExpenseTab === t ? 'selected' : ''}>${t.replace(EXPENSE_TAB_PREFIX,'')}</option>`).join('')}
+          </select>
+        </label>
+        <label>Vendor <input id="fin-exp-vendor" type="text" value="${escapeHtml(e.Vendor || req.Vendor || '')}"></label>
+        <label>Invoice Date <input id="fin-exp-invdate" type="date"></label>
+        <label>Invoice Number <input id="fin-exp-invno" type="text" value="${escapeHtml(e.InvoiceNumber || '')}"></label>
+        <label>Invoice Period / Purpose <input id="fin-exp-purpose" type="text" value="${escapeHtml(e.InvoicePeriodPurpose || req.Description || '')}"></label>
+        <label>Period <input id="fin-exp-period" type="text" value="${escapeHtml(e.Period || '')}"></label>
+        <label>Gross Amount (₹) <input id="fin-exp-gross" type="number" min="0" value="${escapeHtml(e.GrossAmount !== undefined ? e.GrossAmount : req.Amount)}"></label>
+        <label>GST (₹) <input id="fin-exp-gst" type="number" min="0" value="${escapeHtml(e.GST || 0)}"></label>
+        <label>TDS Rate (%) <input id="fin-exp-tdsrate" type="number" min="0" value="${escapeHtml(e.TDSRate || 0)}"></label>
+        <label>TDS (₹) <input id="fin-exp-tds" type="number" min="0" value="${escapeHtml(e.TDS || 0)}"></label>
+        <label>Less / Add (₹, +/-) <input id="fin-exp-lessadd" type="number" value="${escapeHtml(e.LessAdd || 0)}"></label>
+        <label>Net Amount (₹) <input id="fin-exp-net" type="number" min="0" value="${escapeHtml(e.NetAmount || '')}"></label>
+        <button id="fin-exp-save" class="btn-primary" style="margin-top:10px;">${isCorrection ? 'Resubmit to Treasurer' : 'Save &amp; Send to Treasurer'}</button>
+        <button id="fin-exp-cancel" class="btn-secondary">Cancel</button>
+        <p class="error-text" id="fin-exp-error"></p>
+      `;
+      box.querySelector('#fin-exp-cancel').addEventListener('click', () => modal.remove());
+      box.querySelector('#fin-exp-save').addEventListener('click', () => saveExpenseEntry(req, modal, container, isCorrection, existing));
+    })();
+  }
+
+  async function saveExpenseEntry(req, modal, container, isCorrection, existing) {
+    const box = modal.querySelector('.ops-qr-box');
+    const errEl = box.querySelector('#fin-exp-error');
+    const saveBtn = box.querySelector('#fin-exp-save');
+    const val = id => box.querySelector(id).value;
+    const gross = Number(val('#fin-exp-gross')) || 0;
+    const vendor = val('#fin-exp-vendor').trim();
+    if (!vendor) { errEl.textContent = 'Vendor is required.'; return; }
+    if (gross <= 0) { errEl.textContent = 'Gross Amount must be greater than zero.'; return; }
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+
+    const tabName = isCorrection ? req.ExpenseTab : val('#fin-exp-tab');
+    const entryRow = {
+      RequestID: req.RequestID,
+      SlNo: (existing && existing.row.SlNo) || '',
+      Vendor: vendor, InvoiceDate: val('#fin-exp-invdate'), InvoiceNumber: val('#fin-exp-invno'),
+      InvoicePeriodPurpose: val('#fin-exp-purpose'), Period: val('#fin-exp-period'),
+      GrossAmount: gross, GST: Number(val('#fin-exp-gst')) || 0, TDSRate: Number(val('#fin-exp-tdsrate')) || 0,
+      TDS: Number(val('#fin-exp-tds')) || 0, LessAdd: Number(val('#fin-exp-lessadd')) || 0,
+      NetAmount: Number(val('#fin-exp-net')) || gross,
+      NelsonCheck: (existing && existing.row.NelsonCheck) || '', LakshmanCheck: (existing && existing.row.LakshmanCheck) || '',
+      ApprovedBy: (existing && existing.row.ApprovedBy) || '', PassedBy: '', UDNumber: '', Date: ''
+    };
+
+    try {
+      if (isCorrection && existing) {
+        await MVOA.sheetsUpdateRow(tabName, existing.rowNumber, objToRow(EXPENSE_COLS, entryRow));
+      } else {
+        await MVOA.sheetsEnsureTab(tabName, EXPENSE_COLS);
+        const existingRows = await MVOA.sheetsRead(tabName);
+        entryRow.SlNo = existingRows.length; // header counts as row 1, so this is the new row's position
+        await MVOA.sheetsAppend(tabName, objToRow(EXPENSE_COLS, entryRow));
+      }
+      const updatedReq = Object.assign({}, req, {
+        DisbursementStage: 'PendingTreasurer', ExpenseTab: tabName,
+        ExpenseRow: isCorrection && existing ? existing.rowNumber : ''
+      });
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
+      await MVOA.logAudit({ module: 'Finance', requestId: req.RequestID, eventType: isCorrection ? 'Expense entry resubmitted' : 'Expense entry logged', comment: '', statusAfter: 'PendingTreasurer' });
+      modal.remove();
+      await loadAll();
+      render(container);
+    } catch (err) {
+      errEl.textContent = 'Could not save: ' + err.message;
+      saveBtn.disabled = false; saveBtn.textContent = isCorrection ? 'Resubmit to Treasurer' : 'Save & Send to Treasurer';
+    }
+  }
+
+  // ─── Treasurer: Approve or send back ──────────────────────────
+  async function treasurerApprove(requestId, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req || !req.ExpenseTab) return;
+    const user = MVOA.getUser();
+    const errEl = document.querySelector(`.fin-treasurer-error[data-request-id="${requestId}"]`);
+    try {
+      const entry = await readExpenseRow(req.ExpenseTab, requestId);
+      if (!entry) throw new Error('Expense Sheet entry not found');
+      const updatedEntry = Object.assign({}, entry.row, { PassedBy: `${user.name} · ${new Date().toLocaleDateString()}` });
+      await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
+      const updatedReq = Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber });
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Treasurer approved', comment: '', statusAfter: 'PendingPayment' });
       await loadAll();
       render(container);
     } catch (e) {
-      alert('Could not mark as paid: ' + e.message);
+      if (errEl) errEl.textContent = 'Could not approve: ' + e.message;
     }
+  }
+
+  async function treasurerSendBack(requestId, query, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    const user = MVOA.getUser();
+    const errEl = document.querySelector(`.fin-treasurer-error[data-request-id="${requestId}"]`);
+    try {
+      const existingNoteIds = [];
+      const noteId = MVOA.nextId('FNOTE', existingNoteIds);
+      await MVOA.sheetsAppend(TAB_NOTES, objToRow(NOTE_COLS, {
+        NoteID: noteId, RequestID: requestId, Author: user.name, Timestamp: new Date().toISOString(),
+        Note: '⚠️ Sent back for correction: ' + query
+      }));
+      const updatedReq = Object.assign({}, req, { DisbursementStage: 'NeedsCorrection' });
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Sent back for correction', comment: query, statusAfter: 'NeedsCorrection' });
+      await loadAll();
+      render(container);
+    } catch (e) {
+      if (errEl) errEl.textContent = 'Could not send back: ' + e.message;
+    }
+  }
+
+  // ─── Disbursement Officer: release payment ────────────────────
+  async function disbursePayment(requestId, scopeEl, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req || !req.ExpenseTab) return;
+    const errEl = scopeEl.querySelector(`.fin-disburse-error[data-request-id="${requestId}"]`);
+    const udInput = scopeEl.querySelector(`.fin-ud-number[data-request-id="${requestId}"]`);
+    const udNumber = udInput ? udInput.value.trim() : '';
+    if (!udNumber) { if (errEl) errEl.textContent = 'Please enter a UD Number / Cheque / UTR reference.'; return; }
+    try {
+      const entry = await readExpenseRow(req.ExpenseTab, requestId);
+      if (!entry) throw new Error('Expense Sheet entry not found');
+      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: new Date().toLocaleDateString() });
+      await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
+      await markPaid(requestId, udNumber);
+      await loadAll();
+      render(container);
+    } catch (e) {
+      if (errEl) errEl.textContent = 'Could not release payment: ' + e.message;
+    }
+  }
+
+  // ─── Expense Sheet browser — month picker + read-only table ──
+  function renderExpenseSheetBrowser(container) {
+    const body = document.querySelector('#fin-view-body');
+    const tabs = allKnownExpenseTabs();
+    body.innerHTML = `
+      <button id="fin-exp-browser-back" class="btn-secondary">← Back to Payments</button>
+      <div style="margin:12px 0;">
+        <label>Month
+          <select id="fin-exp-browser-month">
+            ${tabs.map(t => `<option value="${t}">${t.replace(EXPENSE_TAB_PREFIX,'')}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div id="fin-exp-browser-table" style="overflow-x:auto;"></div>
+    `;
+    body.querySelector('#fin-exp-browser-back').addEventListener('click', () => renderPayments(body, container));
+    const monthSel = body.querySelector('#fin-exp-browser-month');
+    const loadMonth = async () => {
+      const tableEl = body.querySelector('#fin-exp-browser-table');
+      tableEl.innerHTML = `<p class="muted">Loading…</p>`;
+      let rows;
+      try { rows = await MVOA.sheetsRead(monthSel.value); }
+      catch (e) { tableEl.innerHTML = `<p class="muted">No entries yet for this month.</p>`; return; }
+      if (rows.length <= 1) { tableEl.innerHTML = `<p class="muted">No entries yet for this month.</p>`; return; }
+      const header = EXPENSE_COLS.filter(c => c !== 'RequestID');
+      tableEl.innerHTML = `
+        <table class="mvoa-table" style="min-width:900px;">
+          <thead><tr>${header.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+          <tbody>${rows.slice(1).map(r => {
+            const obj = rowToObj(EXPENSE_COLS, r, 0);
+            return `<tr>${header.map(h => `<td>${escapeHtml(obj[h] || '')}</td>`).join('')}</tr>`;
+          }).join('')}</tbody>
+        </table>`;
+    };
+    monthSel.addEventListener('change', loadMonth);
+    loadMonth();
   }
 
   return { mount };
