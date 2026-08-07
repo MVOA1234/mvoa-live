@@ -245,6 +245,7 @@ const FinanceModule = (function () {
     const fys = [...new Set(budgetsCache.map(b => b.FYYear))].sort().reverse();
     const selectedFy = fys.includes(currentFY()) ? currentFY() : (fys[0] || currentFY());
     body.innerHTML = `
+      <button id="fin-budget-back-btn" class="btn-secondary" style="margin-bottom:12px;">← Back to Approvals &amp; Payments</button>
       <div style="margin-bottom:12px;">
         <label>Financial Year
           <select id="fin-budget-fy">
@@ -255,6 +256,7 @@ const FinanceModule = (function () {
       <div id="fin-budget-table"></div>
       ${!budgetsCache.length ? `<p class="muted" style="margin-top:12px;">No budget lines set up yet — add rows to the <strong>FinanceBudgets</strong> sheet (Category, FYYear, TotalBudget) to see them here.</p>` : ''}
     `;
+    body.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
     function draw() {
       const fy = body.querySelector('#fin-budget-fy').value;
       const rows = budgetsCache.filter(b => b.FYYear === fy);
