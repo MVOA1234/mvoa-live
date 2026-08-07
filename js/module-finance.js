@@ -213,7 +213,7 @@ const FinanceModule = (function () {
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue</button>
         <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments</button>
         <button data-view="budget" class="ops-tab-btn ${currentView==='budget'?'active':''}">📊 Budget</button>
-        ${currentView === 'budget' ? `<button id="fin-budget-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>` : ''}
+        <button id="fin-budget-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
@@ -221,9 +221,7 @@ const FinanceModule = (function () {
     container.querySelectorAll('.ops-tab-btn[data-view]').forEach(btn => {
       btn.addEventListener('click', () => { currentView = btn.dataset.view; render(container); });
     });
-    if (currentView === 'budget') {
-      container.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
-    }
+    container.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
     container.querySelector('#fin-refresh-btn').addEventListener('click', async () => {
       const btn = container.querySelector('#fin-refresh-btn');
       const original = btn.textContent;
@@ -784,7 +782,8 @@ const FinanceModule = (function () {
       rejected: '#a32d2d;background:#fbeaea',
       paid: '#185fa5;background:#e6f1fb'
     };
-    return `<span class="mvoa-badge" style="color:${colors[colorClass].split(';')[0]};background:${colors[colorClass].split('background:')[1]};">${escapeHtml(text)}</span>`;
+    const c = colors[colorClass] || colors.pending; // never throw on an unrecognized class — worst case, wrong color, not a missing badge
+    return `<span class="mvoa-badge" style="color:${c.split(';')[0]};background:${c.split('background:')[1]};">${escapeHtml(text)}</span>`;
   }
 
   function displayStatus(request) {
@@ -811,7 +810,17 @@ const FinanceModule = (function () {
 
     body.innerHTML = list.map(r => {
       const approvals = allApprovals.filter(a => a.RequestID === r.RequestID);
-      const badge = allApprovals.length || r.Status !== 'PendingApproval' ? stageBadgeHtml(r, approvals) : displayStatus(r);
+      let badge;
+      try {
+        badge = (allApprovals.length || r.Status !== 'PendingApproval') ? stageBadgeHtml(r, approvals) : displayStatus(r);
+      } catch (e) {
+        // A request whose RuleID no longer matches anything in
+        // FinanceApprovalRules (e.g. an older test row from before the
+        // rules sheet was rebuilt) shouldn't blank out its badge — fall
+        // back to the coarse Status-only badge, which never depends on
+        // rule lookups.
+        badge = displayStatus(r);
+      }
       return `
       <div class="mvoa-list-item" data-request-id="${escapeHtml(r.RequestID)}">
         <div class="mvoa-row">
