@@ -108,10 +108,17 @@ const FinanceModule = (function () {
     'PR_Quantity','PR_SuggestedVendor','PR_Urgency',
     // Comparative Statement (FIN-F-001) fields — only populated when the
     // requester used "Fill Comparative Statement in-app" instead of
-    // uploading FIN-F-001. Up to 3 vendor quotes plus a recommendation.
-    'CS_Vendor1Name','CS_Vendor1Amount','CS_Vendor1Terms',
-    'CS_Vendor2Name','CS_Vendor2Amount','CS_Vendor2Terms',
-    'CS_Vendor3Name','CS_Vendor3Amount','CS_Vendor3Terms',
+    // uploading FIN-F-001. Matches the real form field-for-field: up to 3
+    // vendor columns (Name/Amount/Delivery/Warranty/Technical Compliance/
+    // Previous Performance/Payment Terms/Overall Assessment) plus a
+    // recommendation. The Approvals table on the real form is NOT
+    // duplicated here — the app's own approval chain covers that.
+    'CS_Vendor1Name','CS_Vendor1Amount','CS_Vendor1Delivery','CS_Vendor1Warranty',
+    'CS_Vendor1TechCompliance','CS_Vendor1PrevPerformance','CS_Vendor1PaymentTerms','CS_Vendor1OverallAssessment',
+    'CS_Vendor2Name','CS_Vendor2Amount','CS_Vendor2Delivery','CS_Vendor2Warranty',
+    'CS_Vendor2TechCompliance','CS_Vendor2PrevPerformance','CS_Vendor2PaymentTerms','CS_Vendor2OverallAssessment',
+    'CS_Vendor3Name','CS_Vendor3Amount','CS_Vendor3Delivery','CS_Vendor3Warranty',
+    'CS_Vendor3TechCompliance','CS_Vendor3PrevPerformance','CS_Vendor3PaymentTerms','CS_Vendor3OverallAssessment',
     'CS_RecommendedVendor','CS_RecommendationReason'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
@@ -354,7 +361,33 @@ const FinanceModule = (function () {
         return { blocked: true, message: blockRule.Notes };
       }
     }
+    // No rule covers this amount. If this category HAS rules but none of
+    // their ranges reach this high, that's a real ceiling — tell the
+    // requester plainly instead of silently doing nothing (previously this
+    // fell through to a generic "enter an amount" message with no
+    // indication anything was wrong).
+    if (candidates.length) {
+      const highestMax = candidates.reduce((max, r) => {
+        const m = (r.MaxAmount === '' || r.MaxAmount === null || r.MaxAmount === undefined) ? Infinity : Number(r.MaxAmount);
+        return m > max ? m : max;
+      }, -Infinity);
+      if (highestMax !== Infinity && amt > highestMax) {
+        return {
+          blocked: true,
+          message: `This amount (${formatAmount(amt)}) exceeds the maximum this app can route for "${category}" (up to ${formatAmount(highestMax)}). It needs EC/AGM-level approval outside this workflow — contact your Secretary or Treasurer.`
+        };
+      }
+    }
     return { blocked: false, rule: null };
+  }
+
+  // Purchase Requisition's Procurement Method implies its own minimum
+  // number of quotation documents (independent of whatever the DoFA
+  // Matrix's MinimumDocs column separately requires) — e.g. "Three
+  // Quotations" means 3 quotes need to be attached, not just 1 generic
+  // "Rationale" file.
+  function quotationCountFor(method) {
+    return { 'One Quotation': 1, 'Two Quotations': 2, 'Three Quotations': 3 }[method] || 0;
   }
 
   function requiredDocsList(rule) {
@@ -613,6 +646,29 @@ const FinanceModule = (function () {
       return sel ? sel.value : '';
     }
 
+    // Combines the DoFA Matrix's own MinimumDocs requirement with the
+    // Purchase Requisition's Procurement Method (if that's being filled
+    // in-app) to arrive at one effective attachment minimum + label.
+    function refreshAttachmentsLabel() {
+      const category = catEl.value;
+      const amount = Number(amtEl.value) || 0;
+      const result = resolveRule(category, currentBudgetStatus(), amount);
+      const docs = result.rule ? requiredDocsList(result.rule) : [];
+      const docsMin = (docs.length && !isJustificationOnly(docs)) ? Math.min(docs.length, 3) : 0;
+      const methodEl = body.querySelector('#fin-pr-method');
+      const quoteMin = (fillPrInApp && methodEl) ? quotationCountFor(methodEl.value) : 0;
+      const min = Math.max(docsMin, quoteMin);
+      const label = body.querySelector('#fin-attachments-label');
+      if (!label) return;
+      if (quoteMin > docsMin) {
+        label.textContent = `Attachments — attach ${quoteMin} quotation(s), one per vendor (${quoteMin} required)`;
+      } else if (min > 0) {
+        label.textContent = `Attachments — at least ${min} required`;
+      } else {
+        label.textContent = 'Attachments (optional — up to 3)';
+      }
+    }
+
     function refreshRulePreview() {
       body.querySelector('#fin-form-error').textContent = ''; // clear any stale error from a previous category/amount before showing the new preview
       const previewEl = body.querySelector('#fin-rule-preview');
@@ -649,10 +705,9 @@ const FinanceModule = (function () {
           ${rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification'
             ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — quorum ${rule.QuorumOverride || DEFAULT_QUORUM}</p>` : ''}
           ${rule.AGMApprovalRequired === 'Yes' ? `<p class="muted" style="margin:2px 0;">AGM approval required</p>` : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field below, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field above, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
         </div>`;
-      body.querySelector('#fin-attachments-label').textContent =
-        (docs.length && !isJustificationOnly(docs)) ? `Attachments — at least ${Math.min(docs.length, 3)} required` : 'Attachments (optional — up to 3)';
+      refreshAttachmentsLabel();
 
       // Purchase Requisition (FIN-F-004) — offered as a fillable in-app
       // form wherever the DoFA Matrix calls for a "Purchase Request" as
@@ -701,11 +756,32 @@ const FinanceModule = (function () {
     function renderCsFields() {
       const wrap = body.querySelector('#fin-cs-fields-wrap');
       if (!fillCsInApp) { wrap.innerHTML = ''; return; }
+      // Field set matches the real FIN-F-001 Vendor Comparison table
+      // column-for-column (verified against the actual document).
       const vendorBlock = (n) => `
         <p style="margin:10px 0 4px;font-weight:600;">Vendor ${n}${n === 1 ? '' : ' (optional)'}</p>
         <label>Vendor Name <input id="fin-cs-v${n}-name" type="text"></label>
         <label>Quoted Amount (₹) <input id="fin-cs-v${n}-amount" type="number" min="0"></label>
-        <label>Delivery / Completion Terms <input id="fin-cs-v${n}-terms" type="text" placeholder="e.g. 7 days, warranty terms…"></label>`;
+        <label>Delivery Period <input id="fin-cs-v${n}-delivery" type="text" placeholder="e.g. 7 days"></label>
+        <label>Warranty <input id="fin-cs-v${n}-warranty" type="text" placeholder="e.g. 1 year"></label>
+        <label>Technical Compliance
+          <select id="fin-cs-v${n}-techcompliance">
+            <option value="">—</option>
+            <option value="Yes">Yes</option>
+            <option value="No">No</option>
+          </select>
+        </label>
+        <label>Previous Performance
+          <select id="fin-cs-v${n}-prevperf">
+            <option value="">—</option>
+            <option value="Excellent">Excellent</option>
+            <option value="Good">Good</option>
+            <option value="Fair">Fair</option>
+            <option value="Poor">Poor</option>
+          </select>
+        </label>
+        <label>Payment Terms <input id="fin-cs-v${n}-paymentterms" type="text"></label>
+        <label>Overall Assessment <textarea id="fin-cs-v${n}-assessment" rows="2"></textarea></label>`;
       wrap.innerHTML = `
         <div class="mvoa-list-item" style="margin-top:10px;">
           <p style="margin:0 0 8px;font-weight:600;">Comparative Statement details</p>
@@ -776,6 +852,8 @@ const FinanceModule = (function () {
       const reasonSel = wrap.querySelector('#fin-pr-reason');
       const otherWrap = wrap.querySelector('#fin-pr-reason-other-wrap');
       reasonSel.addEventListener('change', () => otherWrap.classList.toggle('hidden', reasonSel.value !== 'Other'));
+      wrap.querySelector('#fin-pr-method').addEventListener('change', refreshAttachmentsLabel);
+      refreshAttachmentsLabel();
     }
 
     catEl.addEventListener('change', () => { refreshBudgetStatusSelector(); refreshRulePreview(); });
@@ -860,13 +938,21 @@ const FinanceModule = (function () {
       if (fillCsInApp && /comparative statement/i.test(d)) return false;
       return true;
     });
-    const minAttachments = Math.min(docsNeedingUpload.length, 3);
+    const docsMinAttachments = Math.min(docsNeedingUpload.length, 3);
+    // Procurement Method chosen on the Purchase Requisition carries its own
+    // attachment requirement (N quotations) — take whichever minimum is
+    // stricter.
+    const prMethodVal = fillPrInApp ? (body.querySelector('#fin-pr-method') || {}).value : '';
+    const quoteMinAttachments = quotationCountFor(prMethodVal);
+    const minAttachments = Math.max(docsMinAttachments, quoteMinAttachments);
     if (justificationOnly && !desc) {
       errEl.textContent = `Please describe the reason in the Description field (this category's requirement — "${docs[0]}" — is written there, not attached as a file).`;
       return;
     }
     if (pendingAttachments.length < minAttachments) {
-      errEl.textContent = `This category requires at least ${minAttachments} attachment(s): ${docsNeedingUpload.join(', ')}.`;
+      errEl.textContent = quoteMinAttachments > docsMinAttachments
+        ? `"${prMethodVal}" requires ${quoteMinAttachments} quotation attachment(s), one per vendor.`
+        : `This category requires at least ${minAttachments} attachment(s): ${docsNeedingUpload.join(', ')}.`;
       return;
     }
     let prFields = {};
@@ -890,12 +976,20 @@ const FinanceModule = (function () {
     let csFields = {};
     if (fillCsInApp) {
       const val = id => (body.querySelector(id) || { value: '' }).value.trim();
-      csFields = {
-        CS_Vendor1Name: val('#fin-cs-v1-name'), CS_Vendor1Amount: val('#fin-cs-v1-amount'), CS_Vendor1Terms: val('#fin-cs-v1-terms'),
-        CS_Vendor2Name: val('#fin-cs-v2-name'), CS_Vendor2Amount: val('#fin-cs-v2-amount'), CS_Vendor2Terms: val('#fin-cs-v2-terms'),
-        CS_Vendor3Name: val('#fin-cs-v3-name'), CS_Vendor3Amount: val('#fin-cs-v3-amount'), CS_Vendor3Terms: val('#fin-cs-v3-terms'),
-        CS_RecommendedVendor: val('#fin-cs-recommended'), CS_RecommendationReason: val('#fin-cs-reason')
-      };
+      const vendorFields = (n) => ({
+        [`CS_Vendor${n}Name`]: val(`#fin-cs-v${n}-name`),
+        [`CS_Vendor${n}Amount`]: val(`#fin-cs-v${n}-amount`),
+        [`CS_Vendor${n}Delivery`]: val(`#fin-cs-v${n}-delivery`),
+        [`CS_Vendor${n}Warranty`]: val(`#fin-cs-v${n}-warranty`),
+        [`CS_Vendor${n}TechCompliance`]: val(`#fin-cs-v${n}-techcompliance`),
+        [`CS_Vendor${n}PrevPerformance`]: val(`#fin-cs-v${n}-prevperf`),
+        [`CS_Vendor${n}PaymentTerms`]: val(`#fin-cs-v${n}-paymentterms`),
+        [`CS_Vendor${n}OverallAssessment`]: val(`#fin-cs-v${n}-assessment`)
+      });
+      csFields = Object.assign(
+        vendorFields(1), vendorFields(2), vendorFields(3),
+        { CS_RecommendedVendor: val('#fin-cs-recommended'), CS_RecommendationReason: val('#fin-cs-reason') }
+      );
       const vendorCount = [1, 2, 3].filter(n => csFields[`CS_Vendor${n}Name`] && csFields[`CS_Vendor${n}Amount`]).length;
       if (vendorCount < 2) {
         errEl.textContent = 'Please enter at least 2 vendor quotes (name + amount) on the Comparative Statement.';
