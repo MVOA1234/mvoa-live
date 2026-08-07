@@ -102,7 +102,17 @@ const FinanceModule = (function () {
     // per-tab counts shown in the nav bar. Shared across everyone with
     // access (not per-browser) — reset to blank every time StageEnteredAt
     // changes, since a new stage means a fresh "unopened" state.
-    'StageOpenedAt'];
+    'StageOpenedAt',
+    // Added after the fact — appended at the end (not inserted earlier in
+    // the list) so existing sheet rows/columns stay correctly aligned.
+    'PR_Quantity','PR_SuggestedVendor','PR_Urgency',
+    // Comparative Statement (FIN-F-001) fields — only populated when the
+    // requester used "Fill Comparative Statement in-app" instead of
+    // uploading FIN-F-001. Up to 3 vendor quotes plus a recommendation.
+    'CS_Vendor1Name','CS_Vendor1Amount','CS_Vendor1Terms',
+    'CS_Vendor2Name','CS_Vendor2Amount','CS_Vendor2Terms',
+    'CS_Vendor3Name','CS_Vendor3Amount','CS_Vendor3Terms',
+    'CS_RecommendedVendor','CS_RecommendationReason'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -131,6 +141,7 @@ const FinanceModule = (function () {
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
   let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
+  let fillCsInApp = false; // Submit form: Comparative Statement fill-in-app toggle
 
   // Financial Year runs Apr–Mar (Indian society/RWA convention) — flag to
   // the user if this assumption doesn't match how MVOA actually budgets.
@@ -350,6 +361,15 @@ const FinanceModule = (function () {
     if (!rule || !rule.MinimumDocs) return [];
     return rule.MinimumDocs.split('+').map(s => s.trim()).filter(Boolean);
   }
+  // A written justification (e.g. "FM Justification", "Emergency
+  // Justification Note") is content, not a document that needs scanning
+  // and uploading — the requester can just type it in the Description
+  // field. Only treated this way when it's the SOLE requirement; if it's
+  // combined with something else (a quote, a comparative statement),
+  // that other item still needs a real attachment.
+  function isJustificationOnly(docs) {
+    return docs.length === 1 && /justification/i.test(docs[0]);
+  }
 
   // ───────────────────────────────────────────────────────────
   // Approver matching — parses strings like "Secretary & President"
@@ -545,7 +565,8 @@ const FinanceModule = (function () {
         </label>
         <div id="fin-budget-status-wrap"></div>
         <label>Amount (₹)
-          <input id="fin-amount" type="number" min="0" step="1" placeholder="0">
+          <input id="fin-amount" type="number" min="0" step="1" placeholder="0" style="-moz-appearance:textfield;" onwheel="this.blur()">
+          <style>#fin-amount::-webkit-outer-spin-button, #fin-amount::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }</style>
         </label>
         <label>Vendor / Payee
           <input id="fin-vendor" type="text" placeholder="e.g. ABC Electricals">
@@ -556,6 +577,8 @@ const FinanceModule = (function () {
         <div id="fin-rule-preview"></div>
         <div id="fin-pr-toggle-wrap"></div>
         <div id="fin-pr-fields-wrap"></div>
+        <div id="fin-cs-toggle-wrap"></div>
+        <div id="fin-cs-fields-wrap"></div>
         <div style="margin-top:12px;">
           <p class="muted" id="fin-attachments-label" style="margin:0 0 6px;">Attachments</p>
           <div id="fin-attachment-chips"></div>
@@ -591,6 +614,7 @@ const FinanceModule = (function () {
     }
 
     function refreshRulePreview() {
+      body.querySelector('#fin-form-error').textContent = ''; // clear any stale error from a previous category/amount before showing the new preview
       const previewEl = body.querySelector('#fin-rule-preview');
       const category = catEl.value;
       const amount = Number(amtEl.value) || 0;
@@ -625,10 +649,10 @@ const FinanceModule = (function () {
           ${rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification'
             ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — quorum ${rule.QuorumOverride || DEFAULT_QUORUM}</p>` : ''}
           ${rule.AGMApprovalRequired === 'Yes' ? `<p class="muted" style="margin:2px 0;">AGM approval required</p>` : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')} — please attach at least ${Math.min(docs.length, 3)} file(s) below, or fill the Purchase Requisition in-app if offered.</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field below, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
         </div>`;
       body.querySelector('#fin-attachments-label').textContent =
-        docs.length ? `Attachments — at least ${Math.min(docs.length, 3)} required` : 'Attachments (optional — up to 3)';
+        (docs.length && !isJustificationOnly(docs)) ? `Attachments — at least ${Math.min(docs.length, 3)} required` : 'Attachments (optional — up to 3)';
 
       // Purchase Requisition (FIN-F-004) — offered as a fillable in-app
       // form wherever the DoFA Matrix calls for a "Purchase Request" as
@@ -650,6 +674,60 @@ const FinanceModule = (function () {
         fillPrInApp = false;
       }
       renderPrFields();
+
+      // Comparative Statement (FIN-F-001) — offered the same way, wherever
+      // the Matrix calls for one. This is my best reconstruction of the
+      // form's fields (up to 3 vendor quotes + a recommendation) — if it's
+      // missing something from the real FIN-F-001, let me know and I'll add it.
+      const csToggleWrap = body.querySelector('#fin-cs-toggle-wrap');
+      const needsCS = docs.some(d => /comparative statement/i.test(d));
+      if (needsCS) {
+        csToggleWrap.innerHTML = `
+          <label style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+            <input type="checkbox" id="fin-cs-fill-toggle" ${fillCsInApp ? 'checked' : ''}>
+            📝 Fill the Comparative Statement in-app instead of uploading FIN-F-001
+          </label>`;
+        csToggleWrap.querySelector('#fin-cs-fill-toggle').addEventListener('change', (e) => {
+          fillCsInApp = e.target.checked;
+          renderCsFields();
+        });
+      } else {
+        csToggleWrap.innerHTML = '';
+        fillCsInApp = false;
+      }
+      renderCsFields();
+    }
+
+    function renderCsFields() {
+      const wrap = body.querySelector('#fin-cs-fields-wrap');
+      if (!fillCsInApp) { wrap.innerHTML = ''; return; }
+      const vendorBlock = (n) => `
+        <p style="margin:10px 0 4px;font-weight:600;">Vendor ${n}${n === 1 ? '' : ' (optional)'}</p>
+        <label>Vendor Name <input id="fin-cs-v${n}-name" type="text"></label>
+        <label>Quoted Amount (₹) <input id="fin-cs-v${n}-amount" type="number" min="0"></label>
+        <label>Delivery / Completion Terms <input id="fin-cs-v${n}-terms" type="text" placeholder="e.g. 7 days, warranty terms…"></label>`;
+      wrap.innerHTML = `
+        <div class="mvoa-list-item" style="margin-top:10px;">
+          <p style="margin:0 0 8px;font-weight:600;">Comparative Statement details</p>
+          <p class="muted" style="margin:0 0 8px;">Enter at least 2 vendor quotes to compare, and which one you're recommending.</p>
+          ${vendorBlock(1)}
+          ${vendorBlock(2)}
+          ${vendorBlock(3)}
+          <label style="margin-top:10px;">Recommended Vendor
+            <select id="fin-cs-recommended"></select>
+          </label>
+          <label>Reason for Recommendation <textarea id="fin-cs-reason" rows="2" placeholder="e.g. Lowest cost meeting spec, best warranty, past reliability…"></textarea></label>
+        </div>`;
+      const refreshRecommendedOptions = () => {
+        const sel = wrap.querySelector('#fin-cs-recommended');
+        const names = [1, 2, 3].map(n => wrap.querySelector(`#fin-cs-v${n}-name`).value.trim()).filter(Boolean);
+        const current = sel.value;
+        sel.innerHTML = names.length
+          ? names.map(n => `<option value="${escapeHtml(n)}" ${n === current ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')
+          : '<option value="">— enter vendor names above first —</option>';
+      };
+      [1, 2, 3].forEach(n => wrap.querySelector(`#fin-cs-v${n}-name`).addEventListener('input', refreshRecommendedOptions));
+      refreshRecommendedOptions();
     }
 
     function renderPrFields() {
@@ -660,9 +738,29 @@ const FinanceModule = (function () {
           <p style="margin:0 0 8px;font-weight:600;">Purchase Requisition details</p>
           <label>Asset / Facility <input id="fin-pr-asset" type="text"></label>
           <label>Location <input id="fin-pr-location" type="text"></label>
-          <label>Reason / Justification <input id="fin-pr-reason" type="text" placeholder="e.g. Breakdown, Preventive Maintenance, Safety, Statutory Compliance…"></label>
+          <label>Quantity <input id="fin-pr-qty" type="number" min="1" value="1"></label>
+          <label>Reason / Justification
+            <select id="fin-pr-reason">
+              <option value="Breakdown">Breakdown</option>
+              <option value="Preventive Maintenance">Preventive Maintenance</option>
+              <option value="Safety">Safety</option>
+              <option value="Statutory Compliance">Statutory Compliance</option>
+              <option value="Wear and Tear">Wear and Tear</option>
+              <option value="Upgrade">Upgrade</option>
+              <option value="Other">Other (specify below)</option>
+            </select>
+          </label>
+          <label id="fin-pr-reason-other-wrap" class="hidden">Specify reason <input id="fin-pr-reason-other" type="text"></label>
           <label>Current Condition <textarea id="fin-pr-condition" rows="2"></textarea></label>
           <label>Risk if Work is Deferred <input id="fin-pr-risk" type="text" placeholder="e.g. Safety Risk, Service Interruption…"></label>
+          <label>Suggested Vendor / Source (optional) <input id="fin-pr-vendor-suggestion" type="text"></label>
+          <label>Urgency
+            <select id="fin-pr-urgency">
+              <option value="Routine">Routine</option>
+              <option value="Urgent">Urgent</option>
+              <option value="Emergency">Emergency</option>
+            </select>
+          </label>
           <label>Procurement Method
             <select id="fin-pr-method">
               <option value="One Quotation">One Quotation</option>
@@ -675,12 +773,16 @@ const FinanceModule = (function () {
           </label>
           <label>Expected Completion (days) <input id="fin-pr-days" type="number" min="0"></label>
         </div>`;
+      const reasonSel = wrap.querySelector('#fin-pr-reason');
+      const otherWrap = wrap.querySelector('#fin-pr-reason-other-wrap');
+      reasonSel.addEventListener('change', () => otherWrap.classList.toggle('hidden', reasonSel.value !== 'Other'));
     }
 
     catEl.addEventListener('change', () => { refreshBudgetStatusSelector(); refreshRulePreview(); });
     amtEl.addEventListener('input', refreshRulePreview);
     refreshBudgetStatusSelector();
     fillPrInApp = false;
+    fillCsInApp = false;
 
     body.querySelector('#fin-submit-btn').addEventListener('click', () => submitRequest(body, container));
   }
@@ -748,11 +850,21 @@ const FinanceModule = (function () {
     if (!result.rule) { errEl.textContent = 'No approval rule matches this category/amount combination — contact your Developer.'; return; }
     const rule = result.rule;
     const docs = requiredDocsList(rule);
+    const justificationOnly = isJustificationOnly(docs);
     // If the Purchase Requisition is being filled in-app, it no longer needs
     // to be one of the uploaded attachments — the in-app fields below stand
-    // in for FIN-F-004 directly.
-    const docsNeedingUpload = fillPrInApp ? docs.filter(d => !/purchase request/i.test(d)) : docs;
+    // in for FIN-F-004 directly. Same for a Justification-only requirement —
+    // that's written straight into the Description field, no file needed.
+    const docsNeedingUpload = justificationOnly ? [] : docs.filter(d => {
+      if (fillPrInApp && /purchase request/i.test(d)) return false;
+      if (fillCsInApp && /comparative statement/i.test(d)) return false;
+      return true;
+    });
     const minAttachments = Math.min(docsNeedingUpload.length, 3);
+    if (justificationOnly && !desc) {
+      errEl.textContent = `Please describe the reason in the Description field (this category's requirement — "${docs[0]}" — is written there, not attached as a file).`;
+      return;
+    }
     if (pendingAttachments.length < minAttachments) {
       errEl.textContent = `This category requires at least ${minAttachments} attachment(s): ${docsNeedingUpload.join(', ')}.`;
       return;
@@ -760,14 +872,37 @@ const FinanceModule = (function () {
     let prFields = {};
     if (fillPrInApp) {
       const val = id => (body.querySelector(id) || { value: '' }).value.trim();
+      const reasonSel = val('#fin-pr-reason');
       prFields = {
         PR_AssetFacility: val('#fin-pr-asset'), PR_Location: val('#fin-pr-location'),
-        PR_ReasonJustification: val('#fin-pr-reason'), PR_CurrentCondition: val('#fin-pr-condition'),
-        PR_RiskIfDeferred: val('#fin-pr-risk'), PR_ProcurementMethod: val('#fin-pr-method'),
+        PR_Quantity: val('#fin-pr-qty'),
+        PR_ReasonJustification: reasonSel === 'Other' ? val('#fin-pr-reason-other') : reasonSel,
+        PR_CurrentCondition: val('#fin-pr-condition'),
+        PR_RiskIfDeferred: val('#fin-pr-risk'), PR_SuggestedVendor: val('#fin-pr-vendor-suggestion'),
+        PR_Urgency: val('#fin-pr-urgency'), PR_ProcurementMethod: val('#fin-pr-method'),
         PR_ExpectedCompletionDays: val('#fin-pr-days')
       };
       if (!prFields.PR_AssetFacility || !prFields.PR_ReasonJustification) {
         errEl.textContent = 'Please fill in at least Asset/Facility and Reason/Justification on the Purchase Requisition.';
+        return;
+      }
+    }
+    let csFields = {};
+    if (fillCsInApp) {
+      const val = id => (body.querySelector(id) || { value: '' }).value.trim();
+      csFields = {
+        CS_Vendor1Name: val('#fin-cs-v1-name'), CS_Vendor1Amount: val('#fin-cs-v1-amount'), CS_Vendor1Terms: val('#fin-cs-v1-terms'),
+        CS_Vendor2Name: val('#fin-cs-v2-name'), CS_Vendor2Amount: val('#fin-cs-v2-amount'), CS_Vendor2Terms: val('#fin-cs-v2-terms'),
+        CS_Vendor3Name: val('#fin-cs-v3-name'), CS_Vendor3Amount: val('#fin-cs-v3-amount'), CS_Vendor3Terms: val('#fin-cs-v3-terms'),
+        CS_RecommendedVendor: val('#fin-cs-recommended'), CS_RecommendationReason: val('#fin-cs-reason')
+      };
+      const vendorCount = [1, 2, 3].filter(n => csFields[`CS_Vendor${n}Name`] && csFields[`CS_Vendor${n}Amount`]).length;
+      if (vendorCount < 2) {
+        errEl.textContent = 'Please enter at least 2 vendor quotes (name + amount) on the Comparative Statement.';
+        return;
+      }
+      if (!csFields.CS_RecommendedVendor || !csFields.CS_RecommendationReason) {
+        errEl.textContent = 'Please select a Recommended Vendor and give a Reason for Recommendation.';
         return;
       }
     }
@@ -806,7 +941,7 @@ const FinanceModule = (function () {
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
       StageEnteredAt: now, StageOpenedAt: ''
-    }, prFields);
+    }, prFields, csFields);
 
     try {
       await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
@@ -819,6 +954,7 @@ const FinanceModule = (function () {
 
     pendingAttachments = [];
     fillPrInApp = false;
+    fillCsInApp = false;
     await loadAll();
     currentView = 'mine';
     render(container);
