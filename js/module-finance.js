@@ -74,8 +74,11 @@ const FinanceModule = (function () {
   const TAB_APPROVALS = 'FinanceApprovals';
   const TAB_NOTES = 'FinanceRequestNotes';
   const TAB_ROLES = 'Roles';
+  const TAB_BUDGETS = 'FinanceBudgets';
   const EXPENSE_TAB_PREFIX = 'ExpenseSheet_';
   const DEFAULT_QUORUM = 7;
+  const LS_QUEUE_SEEN = 'mvoa_fin_queue_last_seen';
+  const LS_PAYMENTS_SEEN = 'mvoa_fin_payments_last_seen';
 
   const RULE_COLS = ['RuleID','ExpenseCategory','BudgetStatus','MinAmount','MaxAmount',
     'InitiatedByRole','TechnicalVerificationRole','AdministrativeApprover','FinancialApprover',
@@ -90,7 +93,12 @@ const FinanceModule = (function () {
     'PR_AssetFacility','PR_Location','PR_ReasonJustification','PR_CurrentCondition',
     'PR_RiskIfDeferred','PR_ProcurementMethod','PR_ExpectedCompletionDays',
     // Schedule D payment-release workflow — see header comment.
-    'DisbursementStage','ExpenseTab','ExpenseRow'];
+    'DisbursementStage','ExpenseTab','ExpenseRow',
+    // Tracks when the request last moved to a new stage in either chain
+    // (spend-approval or payment-release) — drives the "🆕 New" indicator
+    // in the Approval Queue / Payments tabs (see LS_QUEUE_SEEN/LS_PAYMENTS_SEEN)
+    // and the human-readable stage text shown to the requester.
+    'StageEnteredAt'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -105,12 +113,50 @@ const FinanceModule = (function () {
     'InvoicePeriodPurpose','Period','GrossAmount','GST','TDSRate','TDS','LessAdd','NetAmount',
     'NelsonCheck','LakshmanCheck','ApprovedBy','PassedBy','UDNumber','Date'];
 
+  // FinanceBudgets — one row per Category × Financial Year, the source of
+  // truth for "Total Budget" (this isn't derivable from anything else —
+  // it's a real input the EC/Treasurer sets). "Consumed" and "Available"
+  // are always computed live from FinanceRequests, never stored, so they
+  // can't go stale — see budgetInfoFor().
+  const BUDGET_COLS = ['BudgetID','Category','FYYear','TotalBudget','Notes'];
+
   let rulesCache = [];
   let requestsCache = [];
   let rolesCache = [];
-  let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments'
+  let budgetsCache = [];
+  let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
   let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
+
+  // Financial Year runs Apr–Mar (Indian society/RWA convention) — flag to
+  // the user if this assumption doesn't match how MVOA actually budgets.
+  function currentFY() {
+    return fyFor(new Date());
+  }
+  function fyFor(date) {
+    const y = date.getFullYear();
+    const startYear = date.getMonth() >= 3 ? y : y - 1; // month index 3 = April
+    return `${startYear}-${String(startYear + 1).slice(-2)}`;
+  }
+  function fyDateRange(fy) {
+    const startYear = Number(fy.split('-')[0]);
+    return { start: new Date(startYear, 3, 1), end: new Date(startYear + 1, 2, 31, 23, 59, 59) };
+  }
+  function budgetInfoFor(category, fy) {
+    const b = budgetsCache.find(x => x.Category === category && x.FYYear === fy);
+    if (!b) return null;
+    const total = Number(b.TotalBudget) || 0;
+    const { start, end } = fyDateRange(fy);
+    // "Consumed" = Approved requests against this category that are
+    // Budgeted (Unbudgeted spend, by definition, doesn't draw against a
+    // budget line) and fall within this FY, regardless of payment stage —
+    // approval is the moment the commitment is made against the budget.
+    const consumed = requestsCache
+      .filter(r => r.Category === category && r.BudgetStatus === 'Budgeted' && r.Status === 'Approved')
+      .filter(r => { const d = new Date(r.RequestedDate); return d >= start && d <= end; })
+      .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
+    return { total, consumed, available: total - consumed, fy };
+  }
 
   // ───────────────────────────────────────────────────────────
   // Row <-> object helpers (same pattern as module-ops.js)
@@ -131,6 +177,14 @@ const FinanceModule = (function () {
     rulesCache = ruleRows.slice(1).map((r, i) => rowToObj(RULE_COLS, r, i + 2)).filter(r => r.RuleID);
     requestsCache = reqRows.slice(1).map((r, i) => rowToObj(REQUEST_COLS, r, i + 2)).filter(r => r.RequestID);
     rolesCache = roleRows.slice(1).map((r, i) => rowToObj(ROLE_COLS, r, i + 2)).filter(r => r.Name);
+    // Optional tab — Budget Available/Consumed only shows once this exists;
+    // fails open so a fresh install without it yet doesn't break anything else.
+    try {
+      const budgetRows = await MVOA.sheetsRead(TAB_BUDGETS);
+      budgetsCache = budgetRows.slice(1).map((r, i) => rowToObj(BUDGET_COLS, r, i + 2)).filter(b => b.BudgetID);
+    } catch (e) {
+      budgetsCache = [];
+    }
     updateBadge();
   }
 
@@ -157,7 +211,8 @@ const FinanceModule = (function () {
         <button data-view="submit" class="ops-tab-btn ${currentView==='submit'?'active':''}">+ New Request</button>
         <button data-view="mine" class="ops-tab-btn ${currentView==='mine'?'active':''}">My Requests</button>
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue</button>
-        <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">💰 Payments</button>
+        <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments</button>
+        <button data-view="budget" class="ops-tab-btn ${currentView==='budget'?'active':''}">📊 Budget</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
@@ -181,7 +236,49 @@ const FinanceModule = (function () {
     if (currentView === 'submit') renderSubmitForm(body, container);
     else if (currentView === 'queue') renderQueue(body, container);
     else if (currentView === 'payments') renderPayments(body, container);
+    else if (currentView === 'budget') renderBudgetStatus(body, container);
     else renderMine(body, container);
+  }
+
+  // ─── Budget Status — Category × FY: Total / Consumed / Available ─
+  function renderBudgetStatus(body, container) {
+    const fys = [...new Set(budgetsCache.map(b => b.FYYear))].sort().reverse();
+    const selectedFy = fys.includes(currentFY()) ? currentFY() : (fys[0] || currentFY());
+    body.innerHTML = `
+      <div style="margin-bottom:12px;">
+        <label>Financial Year
+          <select id="fin-budget-fy">
+            ${(fys.length ? fys : [currentFY()]).map(fy => `<option value="${fy}" ${fy === selectedFy ? 'selected' : ''}>${fy}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div id="fin-budget-table"></div>
+      ${!budgetsCache.length ? `<p class="muted" style="margin-top:12px;">No budget lines set up yet — add rows to the <strong>FinanceBudgets</strong> sheet (Category, FYYear, TotalBudget) to see them here.</p>` : ''}
+    `;
+    function draw() {
+      const fy = body.querySelector('#fin-budget-fy').value;
+      const rows = budgetsCache.filter(b => b.FYYear === fy);
+      const tableEl = body.querySelector('#fin-budget-table');
+      if (!rows.length) { tableEl.innerHTML = `<p class="muted">No budget lines for ${escapeHtml(fy)}.</p>`; return; }
+      tableEl.innerHTML = `
+        <table class="mvoa-table">
+          <thead><tr><th>Category</th><th>Total Budget</th><th>Consumed</th><th>Available</th></tr></thead>
+          <tbody>
+            ${rows.map(b => {
+              const info = budgetInfoFor(b.Category, fy);
+              const overBudget = info.available < 0;
+              return `<tr>
+                <td>${escapeHtml(b.Category)}</td>
+                <td>${formatAmount(info.total)}</td>
+                <td>${formatAmount(info.consumed)}</td>
+                <td style="color:${overBudget ? '#b3261e' : 'green'};font-weight:700;">${formatAmount(info.available)}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`;
+    }
+    body.querySelector('#fin-budget-fy').addEventListener('change', draw);
+    draw();
   }
 
   function escapeHtml(s) {
@@ -334,6 +431,52 @@ const FinanceModule = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
+  // Human-readable "where is this right now" — covers BOTH chains
+  // (spend-approval via computeRequestState, and payment-release via
+  // DisbursementStage) so the requester always has one clear answer,
+  // whichever half of the pipeline the request is currently in.
+  // ───────────────────────────────────────────────────────────
+  function stageDescription(request, approvals) {
+    if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
+    if (request.Status === 'PendingApproval') {
+      const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
+      const state = computeRequestState(request, approvals);
+      if (state.stage === 'Administrative') return { text: `Awaiting ${rule.AdministrativeApprover || 'Administrative'} approval`, cls: 'pending' };
+      if (state.stage === 'Financial') return { text: `Awaiting ${rule.FinancialApprover || 'Financial'} approval`, cls: 'pending' };
+      if (state.stage === 'EC') return { text: `Awaiting EC approval (${state.ecCount} of ${state.quorum})`, cls: 'pending' };
+      if (state.stage === 'AGM') return { text: 'Awaiting AGM approval', cls: 'pending' };
+      return { text: 'Pending approval', cls: 'pending' };
+    }
+    // Status === 'Approved' — now in the Schedule D payment-release chain
+    switch (request.DisbursementStage) {
+      case 'PendingTreasurer': return { text: 'Awaiting Treasurer review (payment release)', cls: 'approved' };
+      case 'NeedsCorrection': return { text: "Sent back by Treasurer for correction — waiting on Accountant", cls: 'rejected' };
+      case 'PendingPayment': return { text: 'Treasurer approved — awaiting Disbursement Officer', cls: 'approved' };
+      case 'Paid': return { text: 'Paid' + (request.PaymentRef ? ` (Ref: ${request.PaymentRef})` : ''), cls: 'paid' };
+      default: return { text: 'Approved — awaiting Expense Sheet entry (Accountant)', cls: 'approved' };
+    }
+  }
+  function stageBadgeHtml(request, approvals) {
+    const s = stageDescription(request, approvals);
+    return statusBadge(s.text, s.cls);
+  }
+
+  // "🆕 New" indicator — compares each request's StageEnteredAt against
+  // when THIS browser last opened the given tab (stored in localStorage).
+  // This is an in-app "something arrived since you last looked" signal —
+  // NOT a push/email/SMS notification, since that infrastructure isn't
+  // built. It resets every time the tab is opened, same browser only.
+  function getLastSeen(key) {
+    return localStorage.getItem(key) || '1970-01-01T00:00:00.000Z';
+  }
+  function markSeenNow(key) {
+    localStorage.setItem(key, new Date().toISOString());
+  }
+  function isNewSince(request, lastSeen) {
+    return !!request.StageEnteredAt && request.StageEnteredAt > lastSeen;
+  }
+
+  // ───────────────────────────────────────────────────────────
   // SUBMIT — new request form
   // ───────────────────────────────────────────────────────────
   function renderSubmitForm(body, container) {
@@ -409,7 +552,18 @@ const FinanceModule = (function () {
       }
       const rule = result.rule;
       const docs = requiredDocsList(rule);
+      const budgetStatus = currentBudgetStatus();
+      const fy = currentFY();
+      const info = budgetStatus === 'Budgeted' ? budgetInfoFor(category, fy) : null;
       previewEl.innerHTML = `
+        ${budgetStatus === 'Budgeted' ? (info ? `
+          <div class="mvoa-list-item" style="margin-top:10px;background:${info.available - amount < 0 ? '#fbeaea' : 'var(--card-bg)'};">
+            <p style="margin:0;font-weight:600;">Budget Available (FY ${escapeHtml(fy)}): <span style="color:${info.available - amount < 0 ? '#b3261e' : 'green'};">${formatAmount(info.available)}</span> of ${formatAmount(info.total)}</p>
+            ${amount > 0 && info.available - amount < 0 ? `<p class="error-text" style="margin:4px 0 0;">⚠️ This request (${formatAmount(amount)}) would exceed the remaining budget for this category.</p>` : ''}
+          </div>` : `
+          <div class="mvoa-list-item" style="margin-top:10px;">
+            <p class="muted" style="margin:0;">No budget line set up yet for "${escapeHtml(category)}" in FY ${escapeHtml(fy)}.</p>
+          </div>`) : ''}
         <div class="mvoa-list-item" style="margin-top:10px;">
           <p style="margin:0 0 6px;font-weight:600;">This request will need:</p>
           <p class="muted" style="margin:2px 0;">Administrative approval: ${escapeHtml(rule.AdministrativeApprover || '—')}</p>
@@ -596,7 +750,8 @@ const FinanceModule = (function () {
       AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
       Status: 'PendingApproval', QuorumRequired: rule.QuorumOverride || '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
-      NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: ''
+      NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
+      StageEnteredAt: now
     }, prFields);
 
     try {
@@ -635,7 +790,7 @@ const FinanceModule = (function () {
     return statusBadge('Pending approval', 'pending');
   }
 
-  function renderMine(body, container) {
+  async function renderMine(body, container) {
     const user = MVOA.getUser();
     const list = requestsCache.filter(r => r.RequestedBy === user.name)
       .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
@@ -643,18 +798,28 @@ const FinanceModule = (function () {
       body.innerHTML = `<p class="muted">You haven't submitted any requests yet.</p>`;
       return;
     }
-    body.innerHTML = list.map(r => `
+    body.innerHTML = `<p class="muted">Loading current status…</p>`;
+    let allApprovals = [];
+    try {
+      const rows = await MVOA.sheetsRead(TAB_APPROVALS);
+      allApprovals = rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+    } catch (e) { /* fall back to coarse status below if this fails */ }
+
+    body.innerHTML = list.map(r => {
+      const approvals = allApprovals.filter(a => a.RequestID === r.RequestID);
+      const badge = allApprovals.length || r.Status !== 'PendingApproval' ? stageBadgeHtml(r, approvals) : displayStatus(r);
+      return `
       <div class="mvoa-list-item" data-request-id="${escapeHtml(r.RequestID)}">
         <div class="mvoa-row">
           <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
-          ${displayStatus(r)}
+          ${badge}
         </div>
         ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted ${formatDate(r.RequestedDate)}</p>
         <button class="fin-mine-notes-toggle btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">💬 Notes</button>
         <div class="fin-mine-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
       </div>
-    `).join('');
+    `; }).join('');
 
     body.querySelectorAll('.fin-mine-notes-toggle').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -758,17 +923,21 @@ const FinanceModule = (function () {
       <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">Awaiting your action</h3>
       ${cards.length ? '' : '<p class="muted">Nothing waiting on you right now.</p>'}
       <div id="fin-queue-cards"></div>
-      <p class="muted" style="margin-top:16px;">Once a request is fully approved, its actual payment release (Expense Sheet entry → Treasurer review → Disbursement Officer) happens in the <strong>💰 Payments</strong> tab, not here.</p>
+      <p class="muted" style="margin-top:16px;">Once a request is fully approved, its actual payment release (Expense Sheet entry → Treasurer review → Disbursement Officer) happens in the <strong>₹ Payments</strong> tab, not here.</p>
     `;
 
     const cardsEl = body.querySelector('#fin-queue-cards');
+    const lastSeen = getLastSeen(LS_QUEUE_SEEN);
     cards.forEach(({ req, state }) => {
       const div = document.createElement('div');
       div.className = 'mvoa-list-item';
       div.innerHTML = `
         <div class="mvoa-row">
           <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-          <span class="mvoa-badge" style="color:#185fa5;background:#e6f1fb;">${escapeHtml(state.stage)} approval</span>
+          <span>
+            ${isNewSince(req, lastSeen) ? '<span class="mvoa-badge" style="color:#8a4b00;background:#fff1de;margin-right:4px;">🆕 New</span>' : ''}
+            <span class="mvoa-badge" style="color:#185fa5;background:#e6f1fb;">${escapeHtml(state.stage)} approval</span>
+          </span>
         </div>
         ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
         ${req.Description ? `<p class="muted" style="margin:4px 0;">${escapeHtml(req.Description)}</p>` : ''}
@@ -805,7 +974,7 @@ const FinanceModule = (function () {
         await renderNotesThread(notesBody, id, null, true);
       });
     });
-
+    markSeenNow(LS_QUEUE_SEEN); // cards just shown with "🆕 New" (if any) — reset for next visit
   }
 
   function attachmentLinksHtml(r) {
@@ -818,6 +987,10 @@ const FinanceModule = (function () {
     const user = MVOA.getUser();
     const errEl = document.querySelector(`.fin-queue-error[data-request-id="${requestId}"]`);
     try {
+      const req = requestsCache.find(r => r.RequestID === requestId);
+      const priorApprovals = await loadApprovalsFor(requestId); // BEFORE this decision is appended, for stage comparison below
+      const priorState = computeRequestState(req, priorApprovals);
+
       const existingIds = [];
       const approvalId = MVOA.nextId('APR', existingIds);
       const row = {
@@ -826,24 +999,37 @@ const FinanceModule = (function () {
       };
       await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, row));
 
-      const req = requestsCache.find(r => r.RequestID === requestId);
       let resultingStatus = req.Status;
+      const now = new Date().toISOString();
       if (decision === 'Rejected') {
-        const updated = Object.assign({}, req, { Status: 'Rejected', ClosedDate: new Date().toISOString(), ClosedBy: user.name });
+        const updated = Object.assign({}, req, { Status: 'Rejected', ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now });
         await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
         resultingStatus = 'Rejected';
       } else {
         const freshApprovals = await loadApprovalsFor(requestId);
         const state = computeRequestState(req, freshApprovals);
         if (state.fullyApproved) {
-          const updated = Object.assign({}, req, { Status: 'Approved', ECApprovalCount: state.ecCount });
+          // Now entering the payment-release chain — DisbursementStage starts
+          // blank (Accountant's "needs an Expense Sheet entry" queue), and
+          // StageEnteredAt marks the moment of full approval.
+          const updated = Object.assign({}, req, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = 'Approved';
-        } else if (stage === 'EC') {
+        } else if (state.stage === priorState.stage) {
+          // Still the same stage — either an EC vote toward quorum, or one
+          // half of an AND group (e.g. "Secretary & President") just signed
+          // off while the other hasn't yet. Not a stage change, so
+          // StageEnteredAt is left alone — the still-pending approver
+          // already knew about this one.
           const updated = Object.assign({}, req, { ECApprovalCount: state.ecCount });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
-          resultingStatus = `PendingApproval (${state.ecCount}/${state.quorum} EC)`;
+          resultingStatus = state.stage === 'EC' ? `PendingApproval (${state.ecCount}/${state.quorum} EC)` : `PendingApproval (${state.stage})`;
         } else {
+          // Moved on to a genuinely new stage (Administrative→Financial,
+          // Financial→EC, EC→AGM) — this is exactly what the 🆕 New
+          // indicator for the next approver is keyed off.
+          const updated = Object.assign({}, req, { StageEnteredAt: now });
+          await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = `PendingApproval (next: ${state.stage})`;
         }
       }
@@ -862,9 +1048,10 @@ const FinanceModule = (function () {
     const req = requestsCache.find(r => r.RequestID === requestId);
     if (!req) return;
     const user = MVOA.getUser();
+    const now = new Date().toISOString();
     const updated = Object.assign({}, req, {
-      PaymentStatus: 'Paid', PaymentDate: new Date().toISOString(), PaymentRef: paymentRef || '',
-      DisbursementStage: 'Paid', ClosedDate: new Date().toISOString(), ClosedBy: user.name
+      PaymentStatus: 'Paid', PaymentDate: now, PaymentRef: paymentRef || '',
+      DisbursementStage: 'Paid', ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now
     });
     await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
     await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Paid', comment: paymentRef || '', statusAfter: 'Paid' });
@@ -953,12 +1140,15 @@ const FinanceModule = (function () {
 
     body.querySelector('#fin-view-expense-sheet-btn').addEventListener('click', () => renderExpenseSheetBrowser(container));
 
+    const lastSeen = getLastSeen(LS_PAYMENTS_SEEN);
+    const newBadge = (req) => isNewSince(req, lastSeen) ? '<span class="mvoa-badge" style="color:#8a4b00;background:#fff1de;margin-right:4px;">🆕 New</span>' : '';
+
     function baseCard(req, extraRight) {
       return `
         <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
           <div class="mvoa-row">
             <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-            ${extraRight || ''}
+            <span>${newBadge(req)}${extraRight || ''}</span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested by ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
@@ -1014,7 +1204,7 @@ const FinanceModule = (function () {
         div.innerHTML = `
           <div class="mvoa-row">
             <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-            <span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Awaiting review</span>
+            <span>${newBadge(req)}<span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Awaiting review</span></span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           ${entry ? `
@@ -1039,7 +1229,7 @@ const FinanceModule = (function () {
         <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
           <div class="mvoa-row">
             <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-            <span class="mvoa-badge" style="color:#0f6e56;background:#eaf5ef;">Treasurer approved</span>
+            <span>${newBadge(req)}<span class="mvoa-badge" style="color:#0f6e56;background:#eaf5ef;">Treasurer approved</span></span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <div style="margin-top:8px;">
@@ -1058,6 +1248,7 @@ const FinanceModule = (function () {
         `<span class="mvoa-badge" style="color:#185fa5;background:#e6f1fb;">Paid ${req.PaymentRef ? '· ' + escapeHtml(req.PaymentRef) : ''}</span>`
       )).join('');
     }
+    markSeenNow(LS_PAYMENTS_SEEN); // cards just shown with "🆕 New" (if any) — reset for next visit
   }
 
   // ─── Accountant: Log / Edit Expense Sheet entry ───────────────
@@ -1142,7 +1333,8 @@ const FinanceModule = (function () {
       }
       const updatedReq = Object.assign({}, req, {
         DisbursementStage: 'PendingTreasurer', ExpenseTab: tabName,
-        ExpenseRow: isCorrection && existing ? existing.rowNumber : ''
+        ExpenseRow: isCorrection && existing ? existing.rowNumber : '',
+        StageEnteredAt: new Date().toISOString()
       });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({ module: 'Finance', requestId: req.RequestID, eventType: isCorrection ? 'Expense entry resubmitted' : 'Expense entry logged', comment: '', statusAfter: 'PendingTreasurer' });
@@ -1166,7 +1358,7 @@ const FinanceModule = (function () {
       if (!entry) throw new Error('Expense Sheet entry not found');
       const updatedEntry = Object.assign({}, entry.row, { PassedBy: `${user.name} · ${new Date().toLocaleDateString()}` });
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
-      const updatedReq = Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber });
+      const updatedReq = Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber, StageEnteredAt: new Date().toISOString() });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Treasurer approved', comment: '', statusAfter: 'PendingPayment' });
       await loadAll();
@@ -1188,7 +1380,7 @@ const FinanceModule = (function () {
         NoteID: noteId, RequestID: requestId, Author: user.name, Timestamp: new Date().toISOString(),
         Note: '⚠️ Sent back for correction: ' + query
       }));
-      const updatedReq = Object.assign({}, req, { DisbursementStage: 'NeedsCorrection' });
+      const updatedReq = Object.assign({}, req, { DisbursementStage: 'NeedsCorrection', StageEnteredAt: new Date().toISOString() });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Sent back for correction', comment: query, statusAfter: 'NeedsCorrection' });
       await loadAll();
