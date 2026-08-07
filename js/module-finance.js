@@ -213,6 +213,7 @@ const FinanceModule = (function () {
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue</button>
         <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments</button>
         <button data-view="budget" class="ops-tab-btn ${currentView==='budget'?'active':''}">📊 Budget</button>
+        ${currentView === 'budget' ? `<button id="fin-budget-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>` : ''}
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
@@ -220,6 +221,9 @@ const FinanceModule = (function () {
     container.querySelectorAll('.ops-tab-btn[data-view]').forEach(btn => {
       btn.addEventListener('click', () => { currentView = btn.dataset.view; render(container); });
     });
+    if (currentView === 'budget') {
+      container.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
+    }
     container.querySelector('#fin-refresh-btn').addEventListener('click', async () => {
       const btn = container.querySelector('#fin-refresh-btn');
       const original = btn.textContent;
@@ -245,7 +249,6 @@ const FinanceModule = (function () {
     const fys = [...new Set(budgetsCache.map(b => b.FYYear))].sort().reverse();
     const selectedFy = fys.includes(currentFY()) ? currentFY() : (fys[0] || currentFY());
     body.innerHTML = `
-      <button id="fin-budget-back-btn" class="btn-secondary" style="margin-bottom:12px;">← Back to Approvals &amp; Payments</button>
       <div style="margin-bottom:12px;">
         <label>Financial Year
           <select id="fin-budget-fy">
@@ -256,7 +259,6 @@ const FinanceModule = (function () {
       <div id="fin-budget-table"></div>
       ${!budgetsCache.length ? `<p class="muted" style="margin-top:12px;">No budget lines set up yet — add rows to the <strong>FinanceBudgets</strong> sheet (Category, FYYear, TotalBudget) to see them here.</p>` : ''}
     `;
-    body.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
     function draw() {
       const fy = body.querySelector('#fin-budget-fy').value;
       const rows = budgetsCache.filter(b => b.FYYear === fy);
