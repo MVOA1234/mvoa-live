@@ -1637,24 +1637,32 @@ const FinanceModule = (function () {
       return;
     }
     const namedToShow = remainingNamed.slice(0, roomLeft);
-    const pickFor = async (label) => {
-      const a = await MVOA.pickAttachment({ photoOnly: false, useCamera: false });
+    // Bug found in testing: pickAttachment({photoOnly:false, useCamera:
+    // false}) does NOT automatically offer both camera and file, as
+    // assumed — it goes straight to a document/file browser with no
+    // camera option. Fixed by giving each named document its own
+    // explicit Camera / File pair instead of one ambiguous button.
+    const pickFor = async (label, useCamera) => {
+      const a = await MVOA.pickAttachment({ photoOnly: useCamera, useCamera });
       if (a) {
         a.docLabel = label || '';
         attachments.push(a);
         renderDocAttachmentPicker(scope, chipsSelector, btnsSelector, attachments, docLabels, maxCount);
       }
     };
-    const namedBtnsHtml = namedToShow.map(label => `<button class="btn-secondary fin-att-named-pick" data-label="${escapeHtml(label)}">📎 Add ${escapeHtml(label)}</button>`).join('');
+    const pickerRow = (label) => `
+      <div class="mvoa-row" style="gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:4px;">
+        <span style="min-width:120px;">${label ? escapeHtml(label) : '➕ Additional'}:</span>
+        <button class="btn-secondary fin-att-named-pick" data-label="${escapeHtml(label || '')}" data-mode="camera" style="padding:6px 10px;margin:0;">📷 Camera</button>
+        <button class="btn-secondary fin-att-named-pick" data-label="${escapeHtml(label || '')}" data-mode="file" style="padding:6px 10px;margin:0;">📄 File</button>
+      </div>`;
     // Room for something beyond the named list, or there's no named list
     // at all (e.g. Salaries, whose doc is "-")
     const canAddMore = roomLeft > namedToShow.length || namedToShow.length === 0;
-    btnsEl.innerHTML = namedBtnsHtml + (canAddMore ? `<button class="btn-secondary fin-att-additional-pick">➕ Add Additional</button>` : '');
+    btnsEl.innerHTML = namedToShow.map(pickerRow).join('') + (canAddMore ? pickerRow(null) : '');
     btnsEl.querySelectorAll('.fin-att-named-pick').forEach(btn => {
-      btn.addEventListener('click', () => pickFor(btn.dataset.label));
+      btn.addEventListener('click', () => pickFor(btn.dataset.label, btn.dataset.mode === 'camera'));
     });
-    const addBtn = btnsEl.querySelector('.fin-att-additional-pick');
-    if (addBtn) addBtn.addEventListener('click', () => pickFor(null));
   }
 
   let isSubmitting = false;
