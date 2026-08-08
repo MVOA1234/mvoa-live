@@ -78,6 +78,12 @@ const FinanceModule = (function () {
   const TAB_NOTES = 'FinanceRequestNotes';
   const TAB_ROLES = 'Roles';
   const TAB_BUDGETS = 'FinanceBudgets';
+  // One-time-agreement registry (Schedule B contracts, Schedule C
+  // utility/insurance accounts) — lets a future "Payment Request" flow
+  // look up the vendor and check the agreement is still within its valid
+  // dates before proceeding, instead of re-approving the spend every time.
+  const TAB_CONTRACTS = 'FinanceContracts';
+  const CONTRACT_EXPIRY_LEAD_DAYS = 30;
   const EXPENSE_TAB_PREFIX = 'ExpenseSheet_';
   const DEFAULT_QUORUM = 7;
 
@@ -153,11 +159,14 @@ const FinanceModule = (function () {
   // are always computed live from FinanceRequests, never stored, so they
   // can't go stale — see budgetInfoFor().
   const BUDGET_COLS = ['BudgetID','Category','FYYear','TotalBudget','Notes'];
+  const CONTRACT_COLS = ['ContractID','Category','Vendor','VendorDetails','Nature',
+    'PO_WO_Number','PolicyNumber','StartDate','EndDate','Status','ApprovedRequestID','Notes'];
 
   let rulesCache = [];
   let requestsCache = [];
   let rolesCache = [];
   let budgetsCache = [];
+  let contractsCache = [];
   let queueCardsCache = []; // PendingApproval requests THIS user can act on right now — see computeQueueCards()
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
@@ -195,6 +204,27 @@ const FinanceModule = (function () {
     return { total, consumed, available: total - consumed, fy };
   }
 
+  // Contracts within CONTRACT_EXPIRY_LEAD_DAYS of their EndDate (or already
+  // past it) — mirrors the same "Contract Expiring Soon" pattern already
+  // built for Plant Rounds' AMC & Compliance, just with a 30-day lead
+  // instead of that module's 14. Status is computed live from EndDate, not
+  // trusted from the stored Status column (which is only meant for a
+  // manual override like "Terminated" — see FinanceContracts design notes).
+  // A blank EndDate means an open-ended commitment (e.g. a utility account
+  // with no fixed expiry) — never flagged.
+  function computeExpiringContracts() {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return contractsCache
+      .filter(c => c.EndDate && String(c.Status).toLowerCase() !== 'terminated')
+      .map(c => {
+        const end = new Date(c.EndDate);
+        const daysLeft = Math.round((end - today) / 86400000);
+        return Object.assign({}, c, { daysLeft });
+      })
+      .filter(c => c.daysLeft <= CONTRACT_EXPIRY_LEAD_DAYS)
+      .sort((a, b) => a.daysLeft - b.daysLeft);
+  }
+
   // ───────────────────────────────────────────────────────────
   // Row <-> object helpers (same pattern as module-ops.js)
   // ───────────────────────────────────────────────────────────
@@ -221,6 +251,14 @@ const FinanceModule = (function () {
       budgetsCache = budgetRows.slice(1).map((r, i) => rowToObj(BUDGET_COLS, r, i + 2)).filter(b => b.BudgetID);
     } catch (e) {
       budgetsCache = [];
+    }
+    // Optional tab — Contract Expiring Soon banner only shows once this
+    // exists; fails open so nothing breaks before it's set up.
+    try {
+      const contractRows = await MVOA.sheetsRead(TAB_CONTRACTS, force);
+      contractsCache = contractRows.slice(1).map((r, i) => rowToObj(CONTRACT_COLS, r, i + 2)).filter(c => c.ContractID);
+    } catch (e) {
+      contractsCache = [];
     }
     // Bug found in testing: the "Approval Queue" nav-tab count used to just
     // count ALL PendingApproval requests, while the tab's own "Awaiting
@@ -297,8 +335,16 @@ const FinanceModule = (function () {
     const mineCounts = countNewOpen(requestsCache.filter(r => r.RequestedBy === user.name));
     const queueCounts = countNewOpen(queueCardsCache.map(c => c.req));
     const paymentsCounts = countNewOpen(paymentsVisibleForCurrentUser());
+    const expiringContracts = computeExpiringContracts();
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
     container.innerHTML = `
+      ${expiringContracts.length ? `
+        <div class="mvoa-list-item" style="border:1px solid #b3261e;margin-bottom:12px;">
+          <p style="margin:0 0 8px;font-weight:600;color:#b3261e;">📄 Contract Expiring Soon</p>
+          ${expiringContracts.map(c => `
+            <p style="margin:2px 0;">${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)} — <strong>${c.daysLeft < 0 ? `Expired ${-c.daysLeft} day(s) ago` : `Due in ${c.daysLeft} day(s)`}</strong></p>
+          `).join('')}
+        </div>` : ''}
       <div class="ops-tabs">
         <button data-view="submit" class="ops-tab-btn ${currentView==='submit'?'active':''}">+ New Request</button>
         <button data-view="mine" class="ops-tab-btn ${currentView==='mine'?'active':''}">My Requests${countSuffix(mineCounts)}</button>
