@@ -1067,15 +1067,17 @@ const FinanceModule = (function () {
           ${rule.PresidentRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">President Approval</p>' : ''}
           ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}</p>` : ''}
         </div>`;
-      // Simplification: Schedule D's doc column mixes verification steps
-      // (not real files — those are the approval stages above) with real
-      // attachments (invoices, WCC, etc). Rather than guess which words
-      // in each doc string mean "upload a file", this requires exactly
-      // one attachment whenever MinimumDocs is meaningful (not blank/"-"
-      // like Salaries), and shows the full text as guidance on what it
-      // should be. Flagged to the user as a v1 simplification.
-      const needsAttachment = rule.MinimumDocs && rule.MinimumDocs.trim() !== '-';
-      labelEl.textContent = needsAttachment ? 'Attachments — at least 1 required (see documents needed above)' : 'Attachments (optional)';
+      // Requires an attachment for each listed document (capped at 3,
+      // matching the existing Schedule A/B/C flow's pattern) rather than
+      // a flat "1 required" regardless of how many are actually listed —
+      // bug found in testing: a payment type listing 3 documents was only
+      // asking for 1 attachment. Note: verification-type items in the
+      // list (e.g. "Service Verification") count toward this too for now,
+      // since there's no reliable way to tell those apart from real
+      // documents (invoices, WCC, delivery slips) just from the text —
+      // in practice that just means a photo can stand in as evidence.
+      const minAttachments = (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+      labelEl.textContent = minAttachments > 0 ? `Attachments — at least ${minAttachments} required (see documents needed above)` : 'Attachments (optional)';
     }
 
     typeEl.addEventListener('change', () => { refreshPreview(); });
@@ -1107,9 +1109,10 @@ const FinanceModule = (function () {
     if (!vendor) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
 
     const rule = paymentRuleFor(paymentType);
-    const needsAttachment = rule.MinimumDocs && rule.MinimumDocs.trim() !== '-';
-    if (needsAttachment && paymentPendingAttachments.length < 1) {
-      errEl.textContent = `This payment type requires at least 1 attachment: ${rule.MinimumDocs}.`;
+    const docs = requiredDocsList(rule);
+    const minAttachments = (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+    if (paymentPendingAttachments.length < minAttachments) {
+      errEl.textContent = `This payment type requires at least ${minAttachments} attachment(s): ${rule.MinimumDocs}.`;
       return;
     }
 
