@@ -1703,7 +1703,17 @@ const FinanceModule = (function () {
     }
     const refreshPayments = () => render(container);
 
-    if (needsExpenseEntry.length) {
+    // Bug found in testing: each block below only checked whether its
+    // list had items — not whether the template actually created that
+    // section's div for THIS role. A Treasurer-only user has no
+    // #fin-pay-needentry div (that's Accountant/Admin-only), but if
+    // needsExpenseEntry.length was truthy, this crashed trying to write
+    // into a div that never existed — and since that happens at the very
+    // top of the function, it silently killed everything after it too,
+    // including the Treasurer's own "Awaiting your review" section. Every
+    // guard below now matches the exact role condition used when building
+    // the template, so a role that can't see a section never touches it.
+    if ((isAcct || isAdminUser) && needsExpenseEntry.length) {
       const el = body.querySelector('#fin-pay-needentry');
       const [newOnes, openOnes] = [needsExpenseEntry.filter(isItemNew), needsExpenseEntry.filter(r => !isItemNew(r))];
       el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : '')).join('')
@@ -1715,7 +1725,7 @@ const FinanceModule = (function () {
         btn.addEventListener('click', () => openExpenseEntryDialog(btn.dataset.requestId, container, false));
       });
     }
-    if (needsCorrection.length) {
+    if ((isAcct || isAdminUser) && needsCorrection.length) {
       const el = body.querySelector('#fin-pay-correction');
       const [newOnes, openOnes] = [needsCorrection.filter(isItemNew), needsCorrection.filter(r => !isItemNew(r))];
       el.innerHTML = newOnes.map(req => newItemCardHtml(req)).join('') + openOnes.map(req => `
@@ -1744,7 +1754,7 @@ const FinanceModule = (function () {
         });
       });
     }
-    if (pendingTreasurer.length) {
+    if ((isTres || isAdminUser) && pendingTreasurer.length) {
       const el = body.querySelector('#fin-pay-treasurer');
       // Wrapped in try/catch — previously, if anything in here threw, the
       // section stayed silently blank (badge still said "1 new" with
@@ -1787,7 +1797,7 @@ const FinanceModule = (function () {
         el.innerHTML = `<p class="error-text">Could not display items awaiting review: ${escapeHtml(e.message)}. Try ↻ Refresh, or open the browser console for details.</p>`;
       }
     }
-    if (pendingPayment.length) {
+    if ((isDisb || isAdminUser) && pendingPayment.length) {
       const el = body.querySelector('#fin-pay-disburse');
       const [newOnes, openOnes] = [pendingPayment.filter(isItemNew), pendingPayment.filter(r => !isItemNew(r))];
       el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : '')).join('')
