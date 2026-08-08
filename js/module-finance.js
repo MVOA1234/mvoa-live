@@ -84,6 +84,7 @@ const FinanceModule = (function () {
   // dates before proceeding, instead of re-approving the spend every time.
   const TAB_CONTRACTS = 'FinanceContracts';
   const CONTRACT_EXPIRY_LEAD_DAYS = 30;
+  const TAB_PAYMENT_RULES = 'FinancePaymentRules';
   const EXPENSE_TAB_PREFIX = 'ExpenseSheet_';
   const DEFAULT_QUORUM = 7;
 
@@ -138,7 +139,18 @@ const FinanceModule = (function () {
     // 'Expense' (deducted from the float, no disbursement) or
     // 'Replenishment' (goes to Disbursement Officer for a real payout).
     // Blank for every other category.
-    'PettyCashType'];
+    'PettyCashType',
+    // Schedule D "New Payment Request" fields — only populated when
+    // RequestType === 'PaymentRequest'. ContractID links back to
+    // FinanceContracts when the payment was made against a looked-up
+    // existing agreement (blank if entered manually / no contract, e.g.
+    // Salaries). PaymentStageApprovals aren't stored here — they reuse
+    // the existing FinanceApprovals sheet with Stage values
+    // FM/OpsHead/Secretary/Treasurer/President instead of
+    // Administrative/Financial/EC/AGM. Category holds the Schedule D
+    // Payment Type string directly (e.g. "AMC Payments") so every
+    // existing Category-based display/report just works unchanged.
+    'ContractID'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -161,12 +173,23 @@ const FinanceModule = (function () {
   const BUDGET_COLS = ['BudgetID','Category','FYYear','TotalBudget','Notes'];
   const CONTRACT_COLS = ['ContractID','Category','Vendor','VendorDetails','Nature',
     'PO_WO_Number','PolicyNumber','StartDate','EndDate','Status','ApprovedRequestID','Notes'];
+  // Schedule D — Payment Approval Authority. A separate table from
+  // FinanceApprovalRules on purpose: Schedule A/B/C tier by AMOUNT and
+  // walk Administrative→Financial→EC→AGM; Schedule D tiers by PAYMENT
+  // TYPE only and walks a fixed FM→OpsHead→Secretary→Treasurer→President
+  // chain (each stage skippable per row) — genuinely different shapes,
+  // forcing them into one table would mean either fake amount tiers or
+  // fake approver columns. See computePaymentRequestState().
+  const PAYMENT_RULE_COLS = ['PaymentType','FMRequired','OpsHeadRequired',
+    'SecretaryRequired','TreasurerRequired','PresidentRequired','MinimumDocs',
+    'RequiresContractLookup','Notes'];
 
   let rulesCache = [];
   let requestsCache = [];
   let rolesCache = [];
   let budgetsCache = [];
   let contractsCache = [];
+  let paymentRulesCache = [];
   let queueCardsCache = []; // PendingApproval requests THIS user can act on right now — see computeQueueCards()
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
@@ -260,6 +283,14 @@ const FinanceModule = (function () {
     } catch (e) {
       contractsCache = [];
     }
+    // Optional tab — the "New Payment Request" flow only shows up once
+    // this exists; fails open like the others above.
+    try {
+      const pRuleRows = await MVOA.sheetsRead(TAB_PAYMENT_RULES, force);
+      paymentRulesCache = pRuleRows.slice(1).map((r, i) => rowToObj(PAYMENT_RULE_COLS, r, i + 2)).filter(p => p.PaymentType);
+    } catch (e) {
+      paymentRulesCache = [];
+    }
     // Bug found in testing: the "Approval Queue" nav-tab count used to just
     // count ALL PendingApproval requests, while the tab's own "Awaiting
     // your action" list correctly filtered to items THIS user can actually
@@ -298,6 +329,17 @@ const FinanceModule = (function () {
     const cards = [];
     for (const req of pending) {
       const approvals = allApprovals.filter(a => a.RequestID === req.RequestID);
+      // Schedule D Payment Requests use their own stage engine (FM→OpsHead
+      // →Secretary→Treasurer→President) — genuinely different shape from
+      // the Administrative/Financial/EC/AGM chain below, see
+      // computePaymentRequestState().
+      if (req.RequestType === 'PaymentRequest') {
+        const pState = computePaymentRequestState(req, approvals);
+        if (pState.rejected || pState.fullyApproved) continue;
+        const eligible = pState.stage && roleMatchesToken(person, PAYMENT_STAGE_ROLE_TOKEN[pState.stage]);
+        if (eligible) cards.push({ req, state: pState, approvals });
+        continue;
+      }
       const state = computeRequestState(req, approvals);
       if (state.rejected || state.fullyApproved) continue; // will settle on next refresh
       let eligible = false;
@@ -347,6 +389,7 @@ const FinanceModule = (function () {
         </div>` : ''}
       <div class="ops-tabs">
         <button data-view="submit" class="ops-tab-btn ${currentView==='submit'?'active':''}">+ New Request</button>
+        <button data-view="payreq" class="ops-tab-btn ${currentView==='payreq'?'active':''}">💵 New Payment Request</button>
         <button data-view="mine" class="ops-tab-btn ${currentView==='mine'?'active':''}">My Requests${countSuffix(mineCounts)}</button>
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue${countSuffix(queueCounts)}</button>
         <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments${countSuffix(paymentsCounts)}</button>
@@ -374,6 +417,7 @@ const FinanceModule = (function () {
     });
     const body = container.querySelector('#fin-view-body');
     if (currentView === 'submit') renderSubmitForm(body, container);
+    else if (currentView === 'payreq') renderPaymentRequestForm(body, container);
     else if (currentView === 'queue') renderQueue(body, container);
     else if (currentView === 'payments') renderPayments(body, container);
     else if (currentView === 'budget') renderBudgetStatus(body, container);
@@ -655,6 +699,40 @@ const FinanceModule = (function () {
     return { stage: null, rejected: false, fullyApproved: true, ecCount: ecApprovers.size };
   }
 
+  // ───────────────────────────────────────────────────────────
+  // Schedule D — Payment Request stage engine. Separate from
+  // computeRequestState() above on purpose (see PAYMENT_RULE_COLS
+  // comment) — walks a FIXED FM→OpsHead→Secretary→Treasurer→President
+  // chain, skipping any stage this PaymentType doesn't require. No
+  // amount tiers, no EC/AGM — Schedule D doesn't use either.
+  // ───────────────────────────────────────────────────────────
+  const PAYMENT_STAGE_ROLE_TOKEN = { FM: 'fm', OpsHead: 'operations head', Secretary: 'secretary', Treasurer: 'treasurer', President: 'president' };
+  function paymentRuleFor(paymentType) {
+    return paymentRulesCache.find(r => r.PaymentType === paymentType) || {};
+  }
+  function computePaymentRequestState(request, approvals) {
+    if (approvals.some(a => a.Decision === 'Rejected')) {
+      return { stage: null, rejected: true, fullyApproved: false };
+    }
+    const rule = paymentRuleFor(request.Category);
+    const order = ['FM', 'OpsHead', 'Secretary', 'Treasurer', 'President'];
+    const requiredCol = { FM: 'FMRequired', OpsHead: 'OpsHeadRequired', Secretary: 'SecretaryRequired', Treasurer: 'TreasurerRequired', President: 'PresidentRequired' };
+    for (const stage of order) {
+      if (rule[requiredCol[stage]] !== 'Yes') continue; // this PaymentType skips this stage entirely
+      const done = approvals.some(a => a.Stage === stage && a.Decision === 'Approved');
+      if (!done) return { stage, rejected: false, fullyApproved: false };
+    }
+    return { stage: null, rejected: false, fullyApproved: true };
+  }
+  // A Payment Request with NO required stages at all (shouldn't normally
+  // happen — every real Schedule D row needs at least Treasurer — but
+  // guards the same way the Schedule A/B/C zero-approver case does)
+  function paymentHasNoApprovalStages(paymentType) {
+    const rule = paymentRuleFor(paymentType);
+    return ['FMRequired', 'OpsHeadRequired', 'SecretaryRequired', 'TreasurerRequired', 'PresidentRequired']
+      .every(col => rule[col] !== 'Yes');
+  }
+
   function isEligibleForRequest(user, request) {
     // Cheap check used only for the Home-tile badge count — full per-stage
     // eligibility is recomputed properly inside renderQueue().
@@ -670,6 +748,11 @@ const FinanceModule = (function () {
   function stageDescription(request, approvals) {
     if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
     if (request.Status === 'PendingApproval') {
+      if (request.RequestType === 'PaymentRequest') {
+        const state = computePaymentRequestState(request, approvals);
+        const label = { FM: 'FM Verification', OpsHead: 'Operations Head approval', Secretary: 'Secretary approval', Treasurer: 'Treasurer approval', President: 'President approval' };
+        return { text: state.stage ? `Awaiting ${label[state.stage]}` : 'Pending approval', cls: 'pending' };
+      }
       const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
       const state = computeRequestState(request, approvals);
       if (state.stage === 'Administrative') return { text: `Awaiting ${rule.AdministrativeApprover || 'Administrative'} approval`, cls: 'pending' };
@@ -751,6 +834,200 @@ const FinanceModule = (function () {
         onOpened();
       });
     });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SUBMIT — Schedule D "New Payment Request" form. Separate from
+  // renderSubmitForm() below (Schedule A/B/C spend requests) — this one
+  // picks a Payment Type (not an amount-tiered Category), optionally
+  // looks up an existing FinanceContracts row to pull in the vendor and
+  // check it's still valid, and routes through the FM→OpsHead→Secretary
+  // →Treasurer→President chain instead of Administrative/Financial/EC/AGM.
+  // ───────────────────────────────────────────────────────────
+  let paymentPendingAttachments = [];
+  let selectedContractId = '';
+
+  function renderPaymentRequestForm(body, container) {
+    if (!paymentRulesCache.length) {
+      body.innerHTML = `<p class="muted">Payment Requests aren't set up yet — add rows to the <strong>FinancePaymentRules</strong> sheet (one per Schedule D Payment Type) to enable this.</p>`;
+      return;
+    }
+    const paymentTypes = [...new Set(paymentRulesCache.map(r => r.PaymentType))];
+    body.innerHTML = `
+      <div class="card" style="max-width:560px;margin:0;">
+        <label>Payment Type
+          <select id="pr-type">
+            <option value="">— Select —</option>
+            ${paymentTypes.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}
+          </select>
+        </label>
+        <div id="pr-contract-wrap"></div>
+        <label>Amount (₹)
+          <input id="pr-amount" type="number" min="0" step="1" placeholder="0" style="-moz-appearance:textfield;" onwheel="this.blur()">
+        </label>
+        <label>Vendor / Payee
+          <input id="pr-vendor" type="text" placeholder="e.g. ABC Electricals">
+        </label>
+        <label>Description
+          <textarea id="pr-desc" rows="2" placeholder="What is this payment for?"></textarea>
+        </label>
+        <div id="pr-rule-preview"></div>
+        <div style="margin-top:12px;">
+          <p class="muted" id="pr-attachments-label" style="margin:0 0 6px;">Attachments</p>
+          <div id="pr-attachment-chips"></div>
+          <div id="pr-attachment-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"></div>
+        </div>
+        <button id="pr-submit-btn" class="btn-primary">Submit Payment Request</button>
+        <p class="error-text" id="pr-form-error"></p>
+      </div>
+    `;
+    paymentPendingAttachments = [];
+    selectedContractId = '';
+    renderAttachmentChips(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, 3);
+
+    const typeEl = body.querySelector('#pr-type');
+    const amtEl = body.querySelector('#pr-amount');
+    const vendorEl = body.querySelector('#pr-vendor');
+    const contractWrap = body.querySelector('#pr-contract-wrap');
+    const previewEl = body.querySelector('#pr-rule-preview');
+    const labelEl = body.querySelector('#pr-attachments-label');
+
+    function refreshContractPicker() {
+      if (!contractsCache.length) { contractWrap.innerHTML = ''; return; }
+      contractWrap.innerHTML = `
+        <label>Link to an existing Contract (optional)
+          <select id="pr-contract">
+            <option value="">— None / enter vendor manually —</option>
+            ${contractsCache.map(c => `<option value="${escapeHtml(c.ContractID)}">${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)}${c.EndDate ? ' (valid to ' + escapeHtml(c.EndDate) + ')' : ' (open-ended)'}</option>`).join('')}
+          </select>
+        </label>
+        <div id="pr-contract-status"></div>`;
+      const sel = contractWrap.querySelector('#pr-contract');
+      const statusEl = contractWrap.querySelector('#pr-contract-status');
+      sel.addEventListener('change', () => {
+        selectedContractId = sel.value;
+        const c = contractsCache.find(x => x.ContractID === selectedContractId);
+        if (!c) { statusEl.innerHTML = ''; return; }
+        vendorEl.value = c.Vendor;
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const expired = c.EndDate && new Date(c.EndDate) < today;
+        const terminated = String(c.Status).toLowerCase() === 'terminated';
+        statusEl.innerHTML = (expired || terminated) ? `
+          <p class="error-text" style="margin:4px 0;">⚠️ This contract ${terminated ? 'is marked Terminated' : `expired on ${escapeHtml(c.EndDate)}`}. Per Schedule D, payment requires an approved commitment — check with the Secretary/Treasurer before proceeding, or renew the contract via New Request first.</p>
+        ` : `<p class="muted" style="margin:4px 0;color:green;">✓ Contract valid${c.EndDate ? ' until ' + escapeHtml(c.EndDate) : ' (open-ended)'}.</p>`;
+      });
+    }
+
+    function refreshPreview() {
+      body.querySelector('#pr-form-error').textContent = '';
+      const type = typeEl.value;
+      if (!type) { previewEl.innerHTML = ''; labelEl.textContent = 'Attachments'; return; }
+      const rule = paymentRuleFor(type);
+      const docs = requiredDocsList(rule);
+      previewEl.innerHTML = `
+        <div class="mvoa-list-item" style="margin-top:10px;">
+          <p style="margin:0 0 6px;font-weight:600;">This payment will need:</p>
+          ${rule.FMRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">FM Verification (Receipt / Service Verification)</p>' : ''}
+          ${rule.OpsHeadRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Operations Head — Technical Acceptance</p>' : ''}
+          ${rule.SecretaryRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Secretary — Admin Approval</p>' : ''}
+          ${rule.TreasurerRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Treasurer — Financial Approval</p>' : ''}
+          ${rule.PresidentRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">President Approval</p>' : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}</p>` : ''}
+        </div>`;
+      // Simplification: Schedule D's doc column mixes verification steps
+      // (not real files — those are the approval stages above) with real
+      // attachments (invoices, WCC, etc). Rather than guess which words
+      // in each doc string mean "upload a file", this requires exactly
+      // one attachment whenever MinimumDocs is meaningful (not blank/"-"
+      // like Salaries), and shows the full text as guidance on what it
+      // should be. Flagged to the user as a v1 simplification.
+      const needsAttachment = rule.MinimumDocs && rule.MinimumDocs.trim() !== '-';
+      labelEl.textContent = needsAttachment ? 'Attachments — at least 1 required (see documents needed above)' : 'Attachments (optional)';
+    }
+
+    typeEl.addEventListener('change', () => { refreshPreview(); });
+    amtEl.addEventListener('input', refreshPreview);
+    refreshContractPicker();
+
+    body.querySelector('#pr-submit-btn').addEventListener('click', () => submitPaymentRequest(body, container));
+  }
+
+  let isPaymentSubmitting = false;
+  async function submitPaymentRequest(body, container) {
+    if (isPaymentSubmitting) return;
+    isPaymentSubmitting = true;
+    try { await doSubmitPaymentRequest(body, container); }
+    finally { isPaymentSubmitting = false; }
+  }
+
+  async function doSubmitPaymentRequest(body, container) {
+    const submitBtn = body.querySelector('#pr-submit-btn');
+    const errEl = body.querySelector('#pr-form-error');
+    errEl.textContent = '';
+    const paymentType = body.querySelector('#pr-type').value;
+    const amount = Number(body.querySelector('#pr-amount').value) || 0;
+    const vendor = body.querySelector('#pr-vendor').value.trim();
+    const desc = body.querySelector('#pr-desc').value.trim();
+
+    if (!paymentType) { errEl.textContent = 'Please select a Payment Type.'; return; }
+    if (amount <= 0) { errEl.textContent = 'Please enter an amount greater than zero.'; return; }
+    if (!vendor) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
+
+    const rule = paymentRuleFor(paymentType);
+    const needsAttachment = rule.MinimumDocs && rule.MinimumDocs.trim() !== '-';
+    if (needsAttachment && paymentPendingAttachments.length < 1) {
+      errEl.textContent = `This payment type requires at least 1 attachment: ${rule.MinimumDocs}.`;
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+
+    const user = MVOA.getUser();
+    const existingIds = requestsCache.map(r => r.RequestID);
+    const requestId = MVOA.nextId('FIN', existingIds);
+    const now = new Date().toISOString();
+
+    const attachmentUrls = ['', '', ''];
+    if (paymentPendingAttachments.length) {
+      for (let i = 0; i < Math.min(paymentPendingAttachments.length, 3); i++) {
+        const att = paymentPendingAttachments[i];
+        try {
+          attachmentUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_att${i+1}_${att.name}`);
+        } catch (e) {
+          errEl.textContent = `Attachment ${i+1} upload failed: ${e.message}`;
+          submitBtn.disabled = false; submitBtn.textContent = 'Submit Payment Request';
+          return;
+        }
+      }
+    }
+
+    const initialStatus = paymentHasNoApprovalStages(paymentType) ? 'Approved' : 'PendingApproval';
+    const row = {
+      RequestID: requestId, RuleID: '', Category: paymentType, BudgetStatus: '',
+      Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
+      RequestType: 'PaymentRequest', AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
+      AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
+      Status: initialStatus, QuorumRequired: '', ECApprovalCount: 0,
+      ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
+      NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
+      StageEnteredAt: now, StageOpenedAt: '', PettyCashType: '', ContractID: selectedContractId
+    };
+
+    try {
+      await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Payment Request Submitted', comment: `${paymentType} — ${formatAmount(amount)}`, statusAfter: initialStatus });
+    } catch (e) {
+      errEl.textContent = 'Could not save request: ' + e.message;
+      submitBtn.disabled = false; submitBtn.textContent = 'Submit Payment Request';
+      return;
+    }
+
+    paymentPendingAttachments = [];
+    selectedContractId = '';
+    await loadAll(true);
+    currentView = 'mine';
+    render(container);
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1552,13 +1829,20 @@ const FinanceModule = (function () {
     return links ? `<p class="muted" style="font-size:0.8rem;">${links}</p>` : '';
   }
 
+  // Picks the right stage engine by RequestType — Schedule A/B/C spend
+  // requests vs Schedule D Payment Requests use genuinely different
+  // engines (see computePaymentRequestState comment).
+  function computeAnyRequestState(req, approvals) {
+    return req.RequestType === 'PaymentRequest' ? computePaymentRequestState(req, approvals) : computeRequestState(req, approvals);
+  }
+
   async function decide(requestId, stage, decision, container, comment) {
     const user = MVOA.getUser();
     const errEl = document.querySelector(`.fin-queue-error[data-request-id="${requestId}"]`);
     try {
       const req = requestsCache.find(r => r.RequestID === requestId);
       const priorApprovals = await loadApprovalsFor(requestId); // BEFORE this decision is appended, for stage comparison below
-      const priorState = computeRequestState(req, priorApprovals);
+      const priorState = computeAnyRequestState(req, priorApprovals);
 
       const existingIds = [];
       const approvalId = MVOA.nextId('APR', existingIds);
@@ -1576,7 +1860,7 @@ const FinanceModule = (function () {
         resultingStatus = 'Rejected';
       } else {
         const freshApprovals = await loadApprovalsFor(requestId);
-        const state = computeRequestState(req, freshApprovals);
+        const state = computeAnyRequestState(req, freshApprovals);
         if (state.fullyApproved) {
           // Now entering the payment-release chain — DisbursementStage starts
           // blank (Accountant's "needs an Expense Sheet entry" queue), and
