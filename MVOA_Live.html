@@ -57,7 +57,7 @@
         <select id="login-name"><option value="">Loading…</option></select>
       </label>
       <label>Enter PIN
-        <input id="login-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="8">
+        <input id="login-pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="8">
       </label>
       <button id="login-btn" class="btn-primary">Login</button>
       <p class="error-text" id="login-error"></p>
@@ -344,6 +344,20 @@
     // ---- Login ----
     document.getElementById('login-btn').addEventListener('click', doLogin);
     document.getElementById('login-pin').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    // Bug found in testing: the browser's saved-password autofill was
+    // dropping a value straight into this field (dots already showing on
+    // load) without selecting it, so typing inserted a digit alongside
+    // the old value instead of replacing it — autocomplete="off" above is
+    // widely ignored by browsers specifically for login-style forms, and
+    // "new-password" is the value browsers actually respect for that. As
+    // a second layer, selecting the whole field on focus/click means even
+    // if something autofills it, the very next keystroke overwrites it
+    // cleanly instead of inserting next to it.
+    const loginPinEl = document.getElementById('login-pin');
+    ['focus', 'click'].forEach(evt => loginPinEl.addEventListener(evt, () => loginPinEl.select()));
+    // Switching who's logging in should never carry over a PIN typed (or
+    // autofilled) for a different person.
+    document.getElementById('login-name').addEventListener('change', () => { loginPinEl.value = ''; });
 
     async function doLogin() {
       const name = document.getElementById('login-name').value;
