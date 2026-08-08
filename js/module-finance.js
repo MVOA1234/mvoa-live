@@ -513,6 +513,17 @@ const FinanceModule = (function () {
   function isPettyCashExpense(r) {
     return r.Category === 'Petty Cash' && r.PettyCashType === 'Expense';
   }
+  // Bug found in testing: nothing stopped a second Replenishment request
+  // from being submitted while an earlier one was still in flight (not yet
+  // Approved, or Approved but not yet actually Paid out) — so the float
+  // could get "double-replenished" on paper, or simply confuse whoever's
+  // tracking it, since the real cash top-up for the first request hadn't
+  // arrived yet. Returns the existing in-flight Replenishment request, or
+  // undefined if there isn't one.
+  function inFlightReplenishment() {
+    return requestsCache.find(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Replenishment' &&
+      r.Status !== 'Rejected' && !(r.Status === 'Approved' && r.DisbursementStage === 'Paid'));
+  }
 
   // ───────────────────────────────────────────────────────────
   // Approver matching — parses strings like "Secretary & President"
@@ -751,6 +762,14 @@ const FinanceModule = (function () {
         return;
       }
       const balance = computeFloatBalance();
+      const inFlight = inFlightReplenishment();
+      // If an earlier Replenishment hasn't actually been paid out yet, its
+      // amount is already "spoken for" — letting a second one through
+      // would double-count against the same shortfall (and confuse
+      // whoever's tracking the float, since the real cash top-up for the
+      // first one hasn't arrived). Force back to Expense if Replenishment
+      // was selected before this became true.
+      if (inFlight && pettyCashType === 'Replenishment') pettyCashType = 'Expense';
       // One-time setup reminder — shown only until the very first Petty
       // Cash request of any kind has been logged. The live float
       // calculation assumes a fresh ₹15,000 float with nothing spent yet;
@@ -766,12 +785,13 @@ const FinanceModule = (function () {
           </div>` : ''}
         <div class="mvoa-list-item" style="margin:6px 0;">
           <p style="margin:0 0 6px;font-weight:600;">Float Balance: <span style="color:${balance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : 'green'};">${formatAmount(balance)}</span> of ${formatAmount(PETTY_CASH_FLOAT_TARGET)}</p>
-          ${balance < PETTY_CASH_OPERATIONAL_MIN ? `<p class="error-text" style="margin:0 0 6px;">⚠️ Below the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum — a Replenishment request is due.</p>` : ''}
+          ${balance < PETTY_CASH_OPERATIONAL_MIN && !inFlight ? `<p class="error-text" style="margin:0 0 6px;">⚠️ Below the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum — a Replenishment request is due.</p>` : ''}
+          ${inFlight ? `<p class="error-text" style="margin:0 0 6px;">⚠️ A Replenishment request (${formatAmount(inFlight.Amount)}) is already in progress — please wait for it to be fully paid out before submitting another.</p>` : ''}
           <label style="display:flex;align-items:center;gap:6px;margin:4px 0;">
             <input type="radio" name="fin-pc-type" value="Expense" ${pettyCashType === 'Expense' ? 'checked' : ''}> Log an Expense
           </label>
-          <label style="display:flex;align-items:center;gap:6px;margin:4px 0;">
-            <input type="radio" name="fin-pc-type" value="Replenishment" ${pettyCashType === 'Replenishment' ? 'checked' : ''}> Replenish the Float
+          <label style="display:flex;align-items:center;gap:6px;margin:4px 0;opacity:${inFlight ? '0.5' : '1'};">
+            <input type="radio" name="fin-pc-type" value="Replenishment" ${pettyCashType === 'Replenishment' ? 'checked' : ''} ${inFlight ? 'disabled' : ''}> Replenish the Float
           </label>
         </div>`;
       pcTypeWrap.querySelectorAll('input[name="fin-pc-type"]').forEach(r => r.addEventListener('change', (e) => {
@@ -1096,6 +1116,13 @@ const FinanceModule = (function () {
     // anyone).
     const isReplenishment = category === 'Petty Cash' && pettyCashType === 'Replenishment';
     if (!vendor && !isReplenishment) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
+    if (isReplenishment) {
+      const inFlight = inFlightReplenishment();
+      if (inFlight) {
+        errEl.textContent = `A Replenishment request (${formatAmount(inFlight.Amount)}, submitted ${formatDate(inFlight.RequestedDate)}) is already in progress — please wait for it to be fully paid out before submitting another.`;
+        return;
+      }
+    }
 
     const result = resolveRule(category, budgetStatus, amount, pettyCashType);
     if (result.blocked) { errEl.textContent = result.message; return; }
