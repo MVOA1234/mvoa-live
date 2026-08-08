@@ -207,9 +207,9 @@ const FinanceModule = (function () {
 
   async function loadAll(force) {
     const [ruleRows, reqRows, roleRows] = await Promise.all([
-      MVOA.sheetsRead(TAB_RULES),
-      MVOA.sheetsRead(TAB_REQUESTS),
-      MVOA.sheetsRead(TAB_ROLES)
+      MVOA.sheetsRead(TAB_RULES, force),
+      MVOA.sheetsRead(TAB_REQUESTS, force),
+      MVOA.sheetsRead(TAB_ROLES, force)
     ]);
     rulesCache = ruleRows.slice(1).map((r, i) => rowToObj(RULE_COLS, r, i + 2)).filter(r => r.RuleID);
     requestsCache = reqRows.slice(1).map((r, i) => rowToObj(REQUEST_COLS, r, i + 2)).filter(r => r.RequestID);
@@ -217,7 +217,7 @@ const FinanceModule = (function () {
     // Optional tab — Budget Available/Consumed only shows once this exists;
     // fails open so a fresh install without it yet doesn't break anything else.
     try {
-      const budgetRows = await MVOA.sheetsRead(TAB_BUDGETS);
+      const budgetRows = await MVOA.sheetsRead(TAB_BUDGETS, force);
       budgetsCache = budgetRows.slice(1).map((r, i) => rowToObj(BUDGET_COLS, r, i + 2)).filter(b => b.BudgetID);
     } catch (e) {
       budgetsCache = [];
@@ -229,8 +229,18 @@ const FinanceModule = (function () {
     // "Nothing waiting on you right now" whenever that one item needed a
     // different approver. Both now read from this single cache so they can
     // never disagree.
+    //
+    // A second bug found alongside it: `force` was accepted by this
+    // function but never actually passed to any of the sheetsRead() calls
+    // above OR into computeQueueCards() below — so a read immediately
+    // after a write (approve/reject/submit/etc.) could still be served a
+    // cached snapshot from just before that write, making the count and
+    // list BOTH wrong together (consistent with each other, but stale) —
+    // exactly the symptom of it clearing up only after leaving and
+    // re-entering the module, which forces a genuinely fresh load. Every
+    // internal loadAll() call after a mutation now also passes true.
     try {
-      queueCardsCache = await computeQueueCards();
+      queueCardsCache = await computeQueueCards(force);
     } catch (e) {
       queueCardsCache = []; // fail closed on the count rather than showing a wrong number
     }
@@ -240,12 +250,12 @@ const FinanceModule = (function () {
   // One bulk Approvals read (instead of one read per pending request) to
   // work out which PendingApproval requests the CURRENT user can act on
   // right now — same eligibility rules as the Approval Queue view itself.
-  async function computeQueueCards() {
+  async function computeQueueCards(force) {
     const user = MVOA.getUser();
     const person = rolesCache.find(p => p.Name === user.name) || {};
     const pending = requestsCache.filter(r => r.Status === 'PendingApproval');
     if (!pending.length) return [];
-    const approvalRows = await MVOA.sheetsRead(TAB_APPROVALS);
+    const approvalRows = await MVOA.sheetsRead(TAB_APPROVALS, force);
     const allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
     const cards = [];
     for (const req of pending) {
@@ -274,7 +284,7 @@ const FinanceModule = (function () {
   async function mount(container) {
     container.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      await loadAll();
+      await loadAll(true);
     } catch (e) {
       container.innerHTML = `<p class="error-text">Could not load Approvals &amp; Payments: ${escapeHtml(e.message)}</p>`;
       return;
@@ -1232,7 +1242,7 @@ const FinanceModule = (function () {
     fillPrInApp = false;
     fillCsInApp = false;
     pettyCashType = 'Expense';
-    await loadAll();
+    await loadAll(true);
     currentView = 'mine';
     render(container);
   }
@@ -1520,7 +1530,7 @@ const FinanceModule = (function () {
         }
       }
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: `${stage} ${decision}`, comment: comment || '', statusAfter: resultingStatus });
-      await loadAll();
+      await loadAll(true);
       render(container);
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not save decision: ' + e.message;
@@ -1835,7 +1845,7 @@ const FinanceModule = (function () {
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({ module: 'Finance', requestId: req.RequestID, eventType: isCorrection ? 'Expense entry resubmitted' : 'Expense entry logged', comment: '', statusAfter: 'PendingTreasurer' });
       modal.remove();
-      await loadAll();
+      await loadAll(true);
       render(container);
     } catch (err) {
       errEl.textContent = 'Could not save: ' + err.message;
@@ -1857,7 +1867,7 @@ const FinanceModule = (function () {
       const updatedReq = Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber, StageEnteredAt: new Date().toISOString(), StageOpenedAt: '' });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Treasurer approved', comment: '', statusAfter: 'PendingPayment' });
-      await loadAll();
+      await loadAll(true);
       render(container);
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not approve: ' + e.message;
@@ -1879,7 +1889,7 @@ const FinanceModule = (function () {
       const updatedReq = Object.assign({}, req, { DisbursementStage: 'NeedsCorrection', StageEnteredAt: new Date().toISOString(), StageOpenedAt: '' });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Sent back for correction', comment: query, statusAfter: 'NeedsCorrection' });
-      await loadAll();
+      await loadAll(true);
       render(container);
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not send back: ' + e.message;
@@ -1900,7 +1910,7 @@ const FinanceModule = (function () {
       const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: new Date().toLocaleDateString() });
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
       await markPaid(requestId, udNumber);
-      await loadAll();
+      await loadAll(true);
       render(container);
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not release payment: ' + e.message;
