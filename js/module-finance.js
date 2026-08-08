@@ -418,7 +418,14 @@ const FinanceModule = (function () {
   // combined with something else (a quote, a comparative statement),
   // that other item still needs a real attachment.
   function isJustificationOnly(docs) {
-    return docs.length === 1 && /justification/i.test(docs[0]);
+    // Only a PURE justification requirement qualifies — "FM Justification"
+    // or "Emergency Justification Note" write straight into Description.
+    // A doc like "Quote / Justification" (R02) mentions justification too,
+    // but the "/" pairs it with something that genuinely needs attaching —
+    // bug found in testing: this used to match on "justification" alone
+    // and silently skipped the required quote attachment.
+    return docs.length === 1 && /justification/i.test(docs[0]) &&
+      !/quote|invoice|comparative|purchase request|rationale|receipt/i.test(docs[0]);
   }
   // Petty Cash Replenishment's requirement ("Original Documents Submitted
   // to Accountant") isn't a file to attach OR text to type — it's a
@@ -1196,6 +1203,25 @@ const FinanceModule = (function () {
     return `<span class="mvoa-badge" style="color:${c.split(';')[0]};background:${c.split('background:')[1]};">${escapeHtml(text)}</span>`;
   }
 
+  // Who rejected a request and why — shown on the requester's own "My
+  // Requests" card. request.ClosedBy is always present (set at rejection
+  // time) even if the Approvals sheet read fails; the Stage/Comment come
+  // from the matching Approvals row when available, so the requester
+  // knows not just THAT it was rejected but by whom, at which stage
+  // (rejection can happen at Secretary OR Treasurer level, even after an
+  // earlier stage already approved), and what reason was given.
+  function rejectionDetailHtml(request, approvals) {
+    const rejection = (approvals || []).find(a => a.Decision === 'Rejected');
+    const by = (rejection && rejection.ApproverName) || request.ClosedBy || 'Unknown';
+    const stage = rejection ? rejection.Stage : '';
+    const comment = rejection ? (rejection.Comment || '').trim() : '';
+    return `
+      <div class="mvoa-list-item" style="margin:6px 0 0;background:#fbeaea;">
+        <p style="margin:0;font-weight:600;color:#b3261e;">Rejected by ${escapeHtml(by)}${stage ? ' (' + escapeHtml(stage) + ' stage)' : ''}</p>
+        <p class="muted" style="margin:4px 0 0;">${comment ? `"${escapeHtml(comment)}"` : 'No reason given.'}</p>
+      </div>`;
+  }
+
   function displayStatus(request) {
     if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
     if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge('Settled — Petty Cash Float', 'paid');
@@ -1241,6 +1267,7 @@ const FinanceModule = (function () {
         </div>
         ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted ${formatDate(r.RequestedDate)}</p>
+        ${r.Status === 'Rejected' ? rejectionDetailHtml(r, approvals) : ''}
         <button class="fin-mine-notes-toggle btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">💬 Notes</button>
         <div class="fin-mine-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
       </div>
