@@ -296,7 +296,7 @@ const FinanceModule = (function () {
     const user = MVOA.getUser();
     const mineCounts = countNewOpen(requestsCache.filter(r => r.RequestedBy === user.name));
     const queueCounts = countNewOpen(queueCardsCache.map(c => c.req));
-    const paymentsCounts = countNewOpen(requestsCache.filter(r => r.Status === 'Approved' && r.DisbursementStage !== 'Paid' && !isPettyCashExpense(r)));
+    const paymentsCounts = countNewOpen(paymentsVisibleForCurrentUser());
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
     container.innerHTML = `
       <div class="ops-tabs">
@@ -1602,6 +1602,33 @@ const FinanceModule = (function () {
   function currentPerson() {
     const user = MVOA.getUser();
     return rolesCache.find(p => p.Name === user.name) || { Name: user.name, Role: user.role, Title: user.title };
+  }
+
+  // Bug found in testing: the "Payments" nav-tab count used to tally EVERY
+  // request sitting anywhere in the payment pipeline, regardless of which
+  // stage — but Accountant/Treasurer/Disbursement Officer each only see
+  // their OWN stage's section in the tab itself. A Treasurer could see
+  // "(2 open · 1 new)" while "Awaiting your review" was correctly empty,
+  // because those 2 were still sitting at the Accountant's stage. This
+  // returns exactly the set of requests THIS role can actually see across
+  // the sections rendered in renderPayments, so the badge can't disagree
+  // with the tab's own content again.
+  function paymentsVisibleForCurrentUser() {
+    const person = currentPerson();
+    const isAcct = isAccountantPerson(person);
+    const isTres = isTreasurerPerson(person);
+    const isDisb = isDisbursementOfficerPerson(person);
+    const isAdminUser = isAdmin(person);
+    const seen = new Set();
+    const list = [];
+    const add = (arr) => arr.forEach(r => { if (!seen.has(r.RequestID)) { seen.add(r.RequestID); list.push(r); } });
+    if (isAcct || isAdminUser) {
+      add(requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r)));
+      add(requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection'));
+    }
+    if (isTres || isAdminUser) add(requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer'));
+    if (isDisb || isAdminUser) add(requestsCache.filter(r => r.DisbursementStage === 'PendingPayment'));
+    return list;
   }
 
   function expenseTabForDate(d) {
