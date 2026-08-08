@@ -394,13 +394,18 @@ const FinanceModule = (function () {
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue${countSuffix(queueCounts)}</button>
         <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments${countSuffix(paymentsCounts)}</button>
         <button data-view="budget" class="ops-tab-btn ${currentView==='budget'?'active':''}">📊 Budget</button>
+        <button data-view="contracts" class="ops-tab-btn ${currentView==='contracts'?'active':''}">📄 Contracts</button>
         <button id="fin-budget-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
     `;
     container.querySelectorAll('.ops-tab-btn[data-view]').forEach(btn => {
-      btn.addEventListener('click', () => { currentView = btn.dataset.view; render(container); });
+      btn.addEventListener('click', () => {
+        currentView = btn.dataset.view;
+        if (currentView === 'contracts') contractsSubView = 'list'; // fresh tab click always starts at the list
+        render(container);
+      });
     });
     container.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
     container.querySelector('#fin-refresh-btn').addEventListener('click', async () => {
@@ -421,6 +426,7 @@ const FinanceModule = (function () {
     else if (currentView === 'queue') renderQueue(body, container);
     else if (currentView === 'payments') renderPayments(body, container);
     else if (currentView === 'budget') renderBudgetStatus(body, container);
+    else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
     else renderMine(body, container);
   }
 
@@ -463,6 +469,133 @@ const FinanceModule = (function () {
     }
     body.querySelector('#fin-budget-fy').addEventListener('change', draw);
     draw();
+  }
+
+  // ─── Contracts registry — list + one form used for BOTH registering a
+  // brand-new agreement going forward AND backfilling an existing one.
+  // Same form either way; the only difference is whether ApprovedRequestID
+  // gets pre-filled (a fresh Schedule B/C approval) or left blank (a
+  // legacy agreement that predates the app). ───────────────────────
+  let contractsSubView = 'list'; // 'list' | 'form'
+  let contractFormPrefill = null;
+
+  function renderContractsList(body, container) {
+    contractsSubView = 'list';
+    const rows = contractsCache.slice().sort((a, b) => (a.Vendor || '').localeCompare(b.Vendor || ''));
+    body.innerHTML = `
+      <div style="margin-bottom:12px;">
+        <button id="fin-add-contract-btn" class="btn-primary">+ Add Contract</button>
+      </div>
+      ${rows.length ? `<div id="fin-contracts-table"></div>` : `<p class="muted">No contracts registered yet. Use "+ Add Contract" to register a new agreement, or backfill your existing ones (AMC contracts, utility accounts, insurance policies).</p>`}
+    `;
+    body.querySelector('#fin-add-contract-btn').addEventListener('click', () => {
+      contractFormPrefill = null;
+      contractsSubView = 'form';
+      renderContractForm(body, container);
+    });
+    if (rows.length) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      body.querySelector('#fin-contracts-table').innerHTML = `
+        <table class="mvoa-table">
+          <thead><tr><th>Vendor</th><th>Category</th><th>Nature</th><th>Valid To</th><th>Status</th></tr></thead>
+          <tbody>
+            ${rows.map(c => {
+              const expired = c.EndDate && new Date(c.EndDate) < today;
+              const terminated = String(c.Status).toLowerCase() === 'terminated';
+              return `<tr>
+                <td>${escapeHtml(c.Vendor)}</td>
+                <td>${escapeHtml(c.Category)}</td>
+                <td>${escapeHtml(c.Nature)}</td>
+                <td>${c.EndDate ? escapeHtml(c.EndDate) : 'Open-ended'}</td>
+                <td style="color:${(expired || terminated) ? '#b3261e' : 'green'};font-weight:600;">${terminated ? 'Terminated' : expired ? 'Expired' : 'Active'}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`;
+    }
+  }
+
+  function renderContractForm(body, container) {
+    contractsSubView = 'form';
+    const p = contractFormPrefill || {};
+    const categories = selectableCategories(); // same live list New Request already uses, from FinanceApprovalRules
+    body.innerHTML = `
+      <button id="fin-contract-back-btn" class="btn-secondary" style="margin-bottom:12px;">← Back to Contracts</button>
+      <div class="card" style="max-width:560px;margin:0;">
+        ${p.ApprovedRequestID ? `<p class="muted" style="margin:0 0 10px;">Registering the agreement just approved as ${escapeHtml(p.ApprovedRequestID)}.</p>` : ''}
+        <label>Category
+          <select id="fc-category">
+            <option value="">— Select —</option>
+            ${categories.map(c => `<option value="${escapeHtml(c)}" ${c === p.Category ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+          </select>
+        </label>
+        <label>Vendor <input id="fc-vendor" type="text" value="${escapeHtml(p.Vendor || '')}"></label>
+        <label>Vendor Details <input id="fc-vendordetails" type="text" placeholder="Phone, contact person, account/consumer no. etc."></label>
+        <label>Nature of Contract <input id="fc-nature" type="text" placeholder="e.g. Annual AMC - DG Set"></label>
+        <label>PO / Work Order Number <input id="fc-po" type="text"></label>
+        <label>Policy Number <input id="fc-policy" type="text" placeholder="For Insurance — leave blank otherwise"></label>
+        <label>Start Date <input id="fc-start" type="date"></label>
+        <label>End Date <input id="fc-end" type="date"></label>
+        <p class="muted" style="margin:-8px 0 10px;">Leave End Date blank for an open-ended commitment (e.g. an ongoing utility account with no fixed expiry) — it will never be flagged as expiring.</p>
+        <label>Status
+          <select id="fc-status">
+            <option value="Active">Active</option>
+            <option value="Terminated">Terminated</option>
+          </select>
+        </label>
+        <label>Notes <textarea id="fc-notes" rows="2"></textarea></label>
+        <button id="fc-submit-btn" class="btn-primary">Save Contract</button>
+        <p class="error-text" id="fc-form-error"></p>
+      </div>
+    `;
+    body.querySelector('#fin-contract-back-btn').addEventListener('click', () => renderContractsList(body, container));
+    body.querySelector('#fc-submit-btn').addEventListener('click', () => submitContract(body, container, p.ApprovedRequestID || ''));
+  }
+
+  let isContractSubmitting = false;
+  async function submitContract(body, container, approvedRequestId) {
+    if (isContractSubmitting) return;
+    isContractSubmitting = true;
+    try { await doSubmitContract(body, container, approvedRequestId); }
+    finally { isContractSubmitting = false; }
+  }
+
+  async function doSubmitContract(body, container, approvedRequestId) {
+    const submitBtn = body.querySelector('#fc-submit-btn');
+    const errEl = body.querySelector('#fc-form-error');
+    errEl.textContent = '';
+    const val = id => body.querySelector(id).value.trim();
+    const category = val('#fc-category');
+    const vendor = val('#fc-vendor');
+    if (!category) { errEl.textContent = 'Please select a Category.'; return; }
+    if (!vendor) { errEl.textContent = 'Please enter a Vendor.'; return; }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving…';
+
+    const existingIds = contractsCache.map(c => c.ContractID);
+    const contractId = MVOA.nextId('AGR', existingIds);
+    const row = {
+      ContractID: contractId, Category: category, Vendor: vendor,
+      VendorDetails: val('#fc-vendordetails'), Nature: val('#fc-nature'),
+      PO_WO_Number: val('#fc-po'), PolicyNumber: val('#fc-policy'),
+      StartDate: val('#fc-start'), EndDate: val('#fc-end'),
+      Status: val('#fc-status') || 'Active', ApprovedRequestID: approvedRequestId || '',
+      Notes: val('#fc-notes')
+    };
+
+    try {
+      await MVOA.sheetsEnsureTab(TAB_CONTRACTS, CONTRACT_COLS);
+      await MVOA.sheetsAppend(TAB_CONTRACTS, objToRow(CONTRACT_COLS, row));
+    } catch (e) {
+      errEl.textContent = 'Could not save contract: ' + e.message;
+      submitBtn.disabled = false; submitBtn.textContent = 'Save Contract';
+      return;
+    }
+
+    await loadAll(true);
+    contractFormPrefill = null;
+    renderContractsList(body, container);
   }
 
   function escapeHtml(s) {
@@ -1839,6 +1972,7 @@ const FinanceModule = (function () {
   async function decide(requestId, stage, decision, container, comment) {
     const user = MVOA.getUser();
     const errEl = document.querySelector(`.fin-queue-error[data-request-id="${requestId}"]`);
+    let justApprovedForContractPrompt = null;
     try {
       const req = requestsCache.find(r => r.RequestID === requestId);
       const priorApprovals = await loadApprovalsFor(requestId); // BEFORE this decision is appended, for stage comparison below
@@ -1868,6 +2002,17 @@ const FinanceModule = (function () {
           const updated = Object.assign({}, req, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now, StageOpenedAt: '' });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = 'Approved';
+          // Offer to register this as a contract so future payments can
+          // reference it (Schedule B/C annual agreements) — skipped for
+          // Payment Requests (nothing new to register, they pay AGAINST
+          // an existing agreement) and Petty Cash (its own dedicated
+          // float mechanism, no contract concept). Deliberately asked for
+          // every OTHER approval rather than trying to guess which
+          // categories are "recurring commitments" vs one-time
+          // purchases — a one-time buy just gets a quick Cancel.
+          if (req.RequestType !== 'PaymentRequest' && req.Category !== 'Petty Cash') {
+            justApprovedForContractPrompt = { Category: req.Category, Vendor: req.Vendor, RequestID: req.RequestID };
+          }
         } else if (state.stage === priorState.stage) {
           // Still the same stage — either an EC vote toward quorum, or one
           // half of an AND group (e.g. "Secretary & President") just signed
@@ -1889,6 +2034,16 @@ const FinanceModule = (function () {
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: `${stage} ${decision}`, comment: comment || '', statusAfter: resultingStatus });
       await loadAll(true);
       render(container);
+      if (justApprovedForContractPrompt) {
+        const p = justApprovedForContractPrompt;
+        const wantsContract = confirm(`"${p.Category}" for ${p.Vendor || 'this vendor'} is now fully approved. Register it as a contract so future payments can reference it? (Choose Cancel for a one-time purchase.)`);
+        if (wantsContract) {
+          contractFormPrefill = { Category: p.Category, Vendor: p.Vendor, ApprovedRequestID: p.RequestID };
+          currentView = 'contracts';
+          contractsSubView = 'form';
+          render(container);
+        }
+      }
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not save decision: ' + e.message;
     }
