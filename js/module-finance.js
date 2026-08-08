@@ -1746,38 +1746,46 @@ const FinanceModule = (function () {
     }
     if (pendingTreasurer.length) {
       const el = body.querySelector('#fin-pay-treasurer');
-      const [newOnes, openOnes] = [pendingTreasurer.filter(isItemNew), pendingTreasurer.filter(r => !isItemNew(r))];
-      el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : '')).join('');
-      wireNewItemCards(el, refreshPayments);
-      openOnes.forEach(async req => {
-        const div = document.createElement('div');
-        div.className = 'mvoa-list-item';
-        div.dataset.requestId = req.RequestID;
-        div.innerHTML = `<p class="muted">Loading entry…</p>`;
-        el.appendChild(div);
-        let entry = null;
-        try { entry = req.ExpenseTab ? await readExpenseRow(req.ExpenseTab, req.RequestID) : null; } catch (e) { /* fall through */ }
-        div.innerHTML = `
-          <div class="mvoa-row">
-            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-            <span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Awaiting review</span>
-          </div>
-          ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
-          ${entry ? `
-            <p class="muted" style="margin:4px 0;font-size:0.85rem;">Invoice ${escapeHtml(entry.row.InvoiceNumber || '—')} · Gross ${formatAmount(entry.row.GrossAmount)} · GST ${escapeHtml(entry.row.GST || '0')} · TDS ${escapeHtml(entry.row.TDS || '0')} · Net ${formatAmount(entry.row.NetAmount)}</p>
-          ` : '<p class="error-text" style="font-size:0.85rem;">Could not load the Expense Sheet entry.</p>'}
-          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn-primary fin-treasurer-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Approve</button>
-            <button class="btn-secondary fin-treasurer-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Back with Query</button>
-          </div>
-          <p class="error-text fin-treasurer-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
-        `;
-        div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', () => treasurerApprove(req.RequestID, container));
-        div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', () => {
-          const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
-          if (q && q.trim()) treasurerSendBack(req.RequestID, q.trim(), container);
+      // Wrapped in try/catch — previously, if anything in here threw, the
+      // section stayed silently blank (badge still said "1 new" with
+      // nothing visible to act on, no error shown). Now at minimum an
+      // error message appears instead of nothing.
+      try {
+        const [newOnes, openOnes] = [pendingTreasurer.filter(isItemNew), pendingTreasurer.filter(r => !isItemNew(r))];
+        el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : '')).join('');
+        wireNewItemCards(el, refreshPayments);
+        openOnes.forEach(async req => {
+          const div = document.createElement('div');
+          div.className = 'mvoa-list-item';
+          div.dataset.requestId = req.RequestID;
+          div.innerHTML = `<p class="muted">Loading entry…</p>`;
+          el.appendChild(div);
+          let entry = null;
+          try { entry = req.ExpenseTab ? await readExpenseRow(req.ExpenseTab, req.RequestID) : null; } catch (e) { /* fall through */ }
+          div.innerHTML = `
+            <div class="mvoa-row">
+              <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+              <span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Awaiting review</span>
+            </div>
+            ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+            ${entry ? `
+              <p class="muted" style="margin:4px 0;font-size:0.85rem;">Invoice ${escapeHtml(entry.row.InvoiceNumber || '—')} · Gross ${formatAmount(entry.row.GrossAmount)} · GST ${escapeHtml(entry.row.GST || '0')} · TDS ${escapeHtml(entry.row.TDS || '0')} · Net ${formatAmount(entry.row.NetAmount)}</p>
+            ` : '<p class="error-text" style="font-size:0.85rem;">Could not load the Expense Sheet entry.</p>'}
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn-primary fin-treasurer-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Approve</button>
+              <button class="btn-secondary fin-treasurer-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Back with Query</button>
+            </div>
+            <p class="error-text fin-treasurer-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+          `;
+          div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', () => treasurerApprove(req.RequestID, container));
+          div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', () => {
+            const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
+            if (q && q.trim()) treasurerSendBack(req.RequestID, q.trim(), container);
+          });
         });
-      });
+      } catch (e) {
+        el.innerHTML = `<p class="error-text">Could not display items awaiting review: ${escapeHtml(e.message)}. Try ↻ Refresh, or open the browser console for details.</p>`;
+      }
     }
     if (pendingPayment.length) {
       const el = body.querySelector('#fin-pay-disburse');
