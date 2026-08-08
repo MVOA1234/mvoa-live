@@ -840,6 +840,8 @@ const FinanceModule = (function () {
   // amount tiers, no EC/AGM — Schedule D doesn't use either.
   // ───────────────────────────────────────────────────────────
   const PAYMENT_STAGE_ROLE_TOKEN = { FM: 'fm', OpsHead: 'operations head', Secretary: 'secretary', Treasurer: 'treasurer', President: 'president' };
+  const PAYMENT_STAGE_REQUIRED_COL = { FM: 'FMRequired', OpsHead: 'OpsHeadRequired', Secretary: 'SecretaryRequired', Treasurer: 'TreasurerRequired', President: 'PresidentRequired' };
+  const PAYMENT_STAGE_LABEL = { FM: 'FM Verification', OpsHead: 'Operations Head — Technical Acceptance', Secretary: 'Secretary — Admin Approval', Treasurer: 'Treasurer — Financial Approval', President: 'President Approval' };
   function paymentRuleFor(paymentType) {
     return paymentRulesCache.find(r => r.PaymentType === paymentType) || {};
   }
@@ -868,7 +870,7 @@ const FinanceModule = (function () {
     }
     const rule = paymentRuleFor(request.Category);
     const order = ['FM', 'OpsHead', 'Secretary', 'Treasurer', 'President'];
-    const requiredCol = { FM: 'FMRequired', OpsHead: 'OpsHeadRequired', Secretary: 'SecretaryRequired', Treasurer: 'TreasurerRequired', President: 'PresidentRequired' };
+    const requiredCol = PAYMENT_STAGE_REQUIRED_COL;
     for (const stage of order) {
       if (rule[requiredCol[stage]] !== 'Yes') continue; // this PaymentType skips this stage entirely
       const done = approvals.some(a => a.Stage === stage && a.Decision === 'Approved');
@@ -1895,6 +1897,65 @@ const FinanceModule = (function () {
       </div>`;
   }
 
+  // Full workflow trail for a single request — every stage this
+  // request's rule actually requires, in order, with who acted on it and
+  // when (or "still pending"), plus the attachments uploaded and, once
+  // Approved, where it stands in the Payments pipeline. Shown on "My
+  // Requests" so the requester can see the whole picture, not just the
+  // current stage.
+  function renderRequestTrailHtml(request, approvals) {
+    const stages = [];
+    if (request.RequestType === 'PaymentRequest') {
+      const rule = paymentRuleFor(request.Category);
+      ['FM', 'OpsHead', 'Secretary', 'Treasurer', 'President'].forEach(key => {
+        if (rule[PAYMENT_STAGE_REQUIRED_COL[key]] === 'Yes') stages.push({ key, label: PAYMENT_STAGE_LABEL[key] });
+      });
+    } else {
+      const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
+      if (rule.AdministrativeApprover) stages.push({ key: 'Administrative', label: `Administrative — ${rule.AdministrativeApprover}` });
+      if (rule.FinancialApprover) stages.push({ key: 'Financial', label: `Financial — ${rule.FinancialApprover}` });
+      if (rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification') stages.push({ key: 'EC', label: 'EC Approval' });
+      if (rule.AGMApprovalRequired === 'Yes') stages.push({ key: 'AGM', label: 'AGM Approval' });
+    }
+    const stageRowsHtml = stages.length ? stages.map(s => {
+      const acts = approvals.filter(a => a.Stage === s.key);
+      if (!acts.length) {
+        return `<p class="muted" style="margin:3px 0;">⏳ ${escapeHtml(s.label)} — pending</p>`;
+      }
+      return acts.map(a => {
+        const ok = a.Decision === 'Approved';
+        return `<p style="margin:3px 0;color:${ok ? 'green' : '#b3261e'};">${ok ? '✅' : '❌'} ${escapeHtml(s.label)} — ${a.Decision} by ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${a.Comment ? ` — "${escapeHtml(a.Comment)}"` : ''}</p>`;
+      }).join('');
+    }).join('') : '<p class="muted" style="margin:3px 0;">No approval stages required for this request.</p>';
+
+    // Once Approved, the request moves into the Payments pipeline —
+    // show that half of the journey too, same trail-style formatting.
+    let paymentsTrailHtml = '';
+    if (request.Status === 'Approved' && !isPettyCashExpense(request)) {
+      const stage = request.DisbursementStage;
+      const steps = [
+        { done: !!stage, label: 'Expense Sheet entry logged (Accountant)' },
+        { done: stage === 'PendingPayment' || stage === 'Paid', label: 'Treasurer review' },
+        { done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}` }
+      ];
+      paymentsTrailHtml = `
+        <p style="margin:10px 0 3px;font-weight:600;">Payment release:</p>
+        ${stage === 'NeedsCorrection' ? '<p style="margin:3px 0;color:#b3261e;">🔁 Sent back by Treasurer for correction — waiting on Accountant</p>' : ''}
+        ${steps.map(s => `<p style="margin:3px 0;color:${s.done ? 'green' : 'inherit'};" class="${s.done ? '' : 'muted'}">${s.done ? '✅' : '⏳'} ${s.label}</p>`).join('')}`;
+    } else if (isPettyCashExpense(request) && request.Status === 'Approved') {
+      paymentsTrailHtml = `<p style="margin:10px 0 3px;color:green;">✅ Adjusted against Petty Cash Float — no separate payment release needed</p>`;
+    }
+
+    return `
+      <div class="mvoa-list-item" style="margin:8px 0 0;background:var(--bg);">
+        ${request.Description ? `<p style="margin:0 0 8px;">${escapeHtml(request.Description)}</p>` : ''}
+        <p style="margin:0 0 3px;font-weight:600;">Approval trail:</p>
+        ${stageRowsHtml}
+        ${paymentsTrailHtml}
+        ${attachmentLinksHtml(request) || '<p class="muted" style="margin:8px 0 0;">No attachments.</p>'}
+      </div>`;
+  }
+
   function displayStatus(request) {
     if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
     if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge('Settled — Petty Cash Float', 'paid');
@@ -1934,18 +1995,39 @@ const FinanceModule = (function () {
       }
       return `
       <div class="mvoa-list-item" data-request-id="${escapeHtml(r.RequestID)}">
-        <div class="mvoa-row">
+        <div class="mvoa-row fin-mine-trail-toggle" data-request-id="${escapeHtml(r.RequestID)}" style="cursor:pointer;">
           <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
           ${badge}
         </div>
         ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted ${formatDate(r.RequestedDate)}</p>
         ${r.Status === 'Rejected' ? rejectionDetailHtml(r, approvals) : ''}
-        <button class="fin-mine-notes-toggle btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">💬 Notes</button>
+        <div style="display:flex;gap:8px;margin-top:6px;">
+          <button class="fin-mine-trail-toggle-btn btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">🔍 View Details</button>
+          <button class="fin-mine-notes-toggle btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">💬 Notes</button>
+        </div>
+        <div class="fin-mine-trail-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
         <div class="fin-mine-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
       </div>
     `; }).join('');
     wireNewItemCards(body, () => render(container));
+
+    function toggleTrail(id) {
+      const trailBody = body.querySelector(`.fin-mine-trail-body[data-request-id="${id}"]`);
+      const isHidden = trailBody.classList.contains('hidden');
+      if (!isHidden) { trailBody.classList.add('hidden'); return; }
+      const r = list.find(x => x.RequestID === id);
+      const approvals = allApprovals.filter(a => a.RequestID === id);
+      try {
+        trailBody.innerHTML = renderRequestTrailHtml(r, approvals);
+      } catch (e) {
+        trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
+      }
+      trailBody.classList.remove('hidden');
+    }
+    body.querySelectorAll('.fin-mine-trail-toggle, .fin-mine-trail-toggle-btn').forEach(el => {
+      el.addEventListener('click', () => toggleTrail(el.dataset.requestId));
+    });
 
     body.querySelectorAll('.fin-mine-notes-toggle').forEach(btn => {
       btn.addEventListener('click', async () => {
