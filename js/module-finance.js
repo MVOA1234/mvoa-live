@@ -54,9 +54,12 @@
 //
 // Approval routing is data-driven from FinanceApprovalRules (the DoFA
 // matrix), not hardcoded — see resolveRule() and the approver-matching
-// helpers below. Petty Cash is modelled as a single "reimbursement claim"
-// request (no separate no-approval "spend" record — see FIN-A-001
-// Payment Authority table vs. Financial Approval Matrix discussion).
+// helpers below. Petty Cash is one category ("Petty Cash") with an
+// internal Type toggle — Expense (deducted live from a ₹15,000 float,
+// settles as soon as Approved, never enters Payments/Disbursement) vs
+// Replenishment (Secretary admin approval → Payments tab: Accountant
+// logs → Treasurer reviews → Disbursement Officer pays out). See
+// computeFloatBalance() / isPettyCashExpense().
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('finance', {
@@ -80,7 +83,12 @@ const FinanceModule = (function () {
 
   const RULE_COLS = ['RuleID','ExpenseCategory','BudgetStatus','MinAmount','MaxAmount',
     'InitiatedByRole','TechnicalVerificationRole','AdministrativeApprover','FinancialApprover',
-    'ECApprovalRequired','AGMApprovalRequired','QuorumOverride','MinimumDocs','Notes'];
+    'ECApprovalRequired','AGMApprovalRequired','QuorumOverride','MinimumDocs','Notes',
+    // Added after the fact, appended at the very end (matches sheet column
+    // order) — distinguishes Petty Cash's two internal request types
+    // (Expense / Replenishment) since they share one ExpenseCategory but
+    // need different approval routing. Blank for every other category.
+    'PettyCashType'];
 
   const REQUEST_COLS = ['RequestID','RuleID','Category','BudgetStatus','Amount','Vendor',
     'Description','RequestedBy','RequestedDate','RequestType','AttachmentURL_1','AttachmentURL_2',
@@ -119,7 +127,12 @@ const FinanceModule = (function () {
     'CS_Vendor2TechCompliance','CS_Vendor2PrevPerformance','CS_Vendor2PaymentTerms','CS_Vendor2OverallAssessment',
     'CS_Vendor3Name','CS_Vendor3Amount','CS_Vendor3Delivery','CS_Vendor3Warranty',
     'CS_Vendor3TechCompliance','CS_Vendor3PrevPerformance','CS_Vendor3PaymentTerms','CS_Vendor3OverallAssessment',
-    'CS_RecommendedVendor','CS_RecommendationReason'];
+    'CS_RecommendedVendor','CS_RecommendationReason',
+    // Which of Petty Cash's two internal request types this row is —
+    // 'Expense' (deducted from the float, no disbursement) or
+    // 'Replenishment' (goes to Disbursement Officer for a real payout).
+    // Blank for every other category.
+    'PettyCashType'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -149,6 +162,7 @@ const FinanceModule = (function () {
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
   let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
   let fillCsInApp = false; // Submit form: Comparative Statement fill-in-app toggle
+  let pettyCashType = 'Expense'; // Submit form: Petty Cash's internal Type toggle
 
   // Financial Year runs Apr–Mar (Indian society/RWA convention) — flag to
   // the user if this assumption doesn't match how MVOA actually budgets.
@@ -231,7 +245,7 @@ const FinanceModule = (function () {
     const user = MVOA.getUser();
     const mineCounts = countNewOpen(requestsCache.filter(r => r.RequestedBy === user.name));
     const queueCounts = countNewOpen(requestsCache.filter(r => r.Status === 'PendingApproval'));
-    const paymentsCounts = countNewOpen(requestsCache.filter(r => r.Status === 'Approved' && r.DisbursementStage !== 'Paid'));
+    const paymentsCounts = countNewOpen(requestsCache.filter(r => r.Status === 'Approved' && r.DisbursementStage !== 'Paid' && !isPettyCashExpense(r)));
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
     container.innerHTML = `
       <div class="ops-tabs">
@@ -341,11 +355,14 @@ const FinanceModule = (function () {
     return real.length > 1 ? real : null; // null = no selector needed, rule doesn't branch on budget status
   }
 
-  function resolveRule(category, budgetStatus, amount) {
+  function resolveRule(category, budgetStatus, amount, pettyCashType) {
     const amt = Number(amount) || 0;
     const candidates = rulesCache.filter(r =>
       r.ExpenseCategory === category && r.RuleID !== 'R03' &&
-      (!budgetStatus || !r.BudgetStatus || r.BudgetStatus === budgetStatus || r.BudgetStatus.indexOf('/') !== -1)
+      (!budgetStatus || !r.BudgetStatus || r.BudgetStatus === budgetStatus || r.BudgetStatus.indexOf('/') !== -1) &&
+      // Petty Cash rows carry a PettyCashType (Expense/Replenishment); every
+      // other category leaves it blank, so this filter is a no-op for them.
+      (!r.PettyCashType || r.PettyCashType === pettyCashType)
     );
     const match = candidates.find(r => {
       const min = Number(r.MinAmount) || 0;
@@ -354,8 +371,8 @@ const FinanceModule = (function () {
     });
     if (match) return { blocked: false, rule: match };
 
-    // Petty Cash over the reimbursement ceiling is explicitly blocked (R03)
-    if (category === 'Petty Cash Reimbursement') {
+    // Petty Cash Expense over the float ceiling is explicitly blocked (R03)
+    if (category === 'Petty Cash' && pettyCashType === 'Expense') {
       const blockRule = rulesCache.find(r => r.RuleID === 'R03');
       if (blockRule && amt >= (Number(blockRule.MinAmount) || 0)) {
         return { blocked: true, message: blockRule.Notes };
@@ -402,6 +419,41 @@ const FinanceModule = (function () {
   // that other item still needs a real attachment.
   function isJustificationOnly(docs) {
     return docs.length === 1 && /justification/i.test(docs[0]);
+  }
+  // Petty Cash Replenishment's requirement ("Original Documents Submitted
+  // to Accountant") isn't a file to attach OR text to type — it's a
+  // physical hand-off that already happened outside the app (the soft
+  // copies are already on file from when each expense was logged). The
+  // requester just confirms it via checkbox.
+  function isDocsConfirmationOnly(docs) {
+    return docs.length === 1 && /original documents submitted/i.test(docs[0]);
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Petty Cash Float — live balance, never stored. Expense requests
+  // deduct once Approved (no disbursement step — the FM already paid
+  // from the float); Replenishment requests add back only once actually
+  // paid out (DisbursementStage === 'Paid'), since that's when real cash
+  // re-enters the float.
+  // ───────────────────────────────────────────────────────────
+  const PETTY_CASH_FLOAT_TARGET = 15000;
+  const PETTY_CASH_OPERATIONAL_MIN = 2000;
+  function computeFloatBalance() {
+    const expenseSum = requestsCache
+      .filter(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Expense' && r.Status === 'Approved')
+      .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
+    const replenishedSum = requestsCache
+      .filter(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Replenishment' && r.Status === 'Approved' && r.DisbursementStage === 'Paid')
+      .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
+    return PETTY_CASH_FLOAT_TARGET - expenseSum + replenishedSum;
+  }
+  // A Petty Cash Expense is fully settled the moment it's Approved — the
+  // FM already paid it out of the float, so unlike every other category
+  // it never enters the Payments/Disbursement pipeline. (Replenishment
+  // requests DO go through Payments as normal — this only excludes
+  // Expense.)
+  function isPettyCashExpense(r) {
+    return r.Category === 'Petty Cash' && r.PettyCashType === 'Expense';
   }
 
   // ───────────────────────────────────────────────────────────
@@ -511,6 +563,9 @@ const FinanceModule = (function () {
       if (state.stage === 'AGM') return { text: 'Awaiting AGM approval', cls: 'pending' };
       return { text: 'Pending approval', cls: 'pending' };
     }
+    // Petty Cash Expense is fully settled the moment it's Approved — no
+    // Payments/Disbursement chain follows (already paid from the float).
+    if (isPettyCashExpense(request)) return { text: 'Approved — adjusted against Petty Cash Float', cls: 'paid' };
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
       case 'PendingTreasurer': return { text: 'Awaiting Treasurer review (payment release)', cls: 'approved' };
@@ -597,6 +652,7 @@ const FinanceModule = (function () {
           </select>
         </label>
         <div id="fin-budget-status-wrap"></div>
+        <div id="fin-pettycash-type-wrap"></div>
         <label>Amount (₹)
           <input id="fin-amount" type="number" min="0" step="1" placeholder="0" style="-moz-appearance:textfield;" onwheel="this.blur()">
           <style>#fin-amount::-webkit-outer-spin-button, #fin-amount::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }</style>
@@ -628,6 +684,48 @@ const FinanceModule = (function () {
     const catEl = body.querySelector('#fin-category');
     const amtEl = body.querySelector('#fin-amount');
     const bsWrap = body.querySelector('#fin-budget-status-wrap');
+    const pcTypeWrap = body.querySelector('#fin-pettycash-type-wrap');
+
+    function refreshPettyCashTypeSelector() {
+      if (catEl.value !== 'Petty Cash') {
+        pcTypeWrap.innerHTML = '';
+        pettyCashType = 'Expense';
+        return;
+      }
+      const balance = computeFloatBalance();
+      // One-time setup reminder — shown only until the very first Petty
+      // Cash request of any kind has been logged. The live float
+      // calculation assumes a fresh ₹15,000 float with nothing spent yet;
+      // if the real physical balance on go-live day is already lower, that
+      // gap needs a one-off "opening adjustment" Expense entry first, or
+      // every balance shown afterwards will be wrong by that amount.
+      const isFirstEverPettyCashUse = !requestsCache.some(r => r.Category === 'Petty Cash');
+      pcTypeWrap.innerHTML = `
+        ${isFirstEverPettyCashUse ? `
+          <div class="mvoa-list-item" style="margin:6px 0;background:#fff8e1;">
+            <p style="margin:0;font-weight:600;">⚙️ First-time setup</p>
+            <p class="muted" style="margin:4px 0 0;">This assumes the float starts at a fresh ₹15,000. If the real physical balance right now is already lower, log a one-off "Log an Expense" entry first for the gap (e.g. "Opening balance adjustment — pre-app float usage") before relying on the balance below.</p>
+          </div>` : ''}
+        <div class="mvoa-list-item" style="margin:6px 0;">
+          <p style="margin:0 0 6px;font-weight:600;">Float Balance: <span style="color:${balance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : 'green'};">${formatAmount(balance)}</span> of ${formatAmount(PETTY_CASH_FLOAT_TARGET)}</p>
+          ${balance < PETTY_CASH_OPERATIONAL_MIN ? `<p class="error-text" style="margin:0 0 6px;">⚠️ Below the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum — a Replenishment request is due.</p>` : ''}
+          <label style="display:flex;align-items:center;gap:6px;margin:4px 0;">
+            <input type="radio" name="fin-pc-type" value="Expense" ${pettyCashType === 'Expense' ? 'checked' : ''}> Log an Expense
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;margin:4px 0;">
+            <input type="radio" name="fin-pc-type" value="Replenishment" ${pettyCashType === 'Replenishment' ? 'checked' : ''}> Replenish the Float
+          </label>
+        </div>`;
+      pcTypeWrap.querySelectorAll('input[name="fin-pc-type"]').forEach(r => r.addEventListener('change', (e) => {
+        pettyCashType = e.target.value;
+        if (pettyCashType === 'Replenishment') {
+          amtEl.value = Math.max(0, PETTY_CASH_FLOAT_TARGET - computeFloatBalance());
+        } else {
+          amtEl.value = '';
+        }
+        refreshRulePreview();
+      }));
+    }
 
     function refreshBudgetStatusSelector() {
       const opts = budgetStatusOptionsFor(catEl.value);
@@ -652,9 +750,9 @@ const FinanceModule = (function () {
     function refreshAttachmentsLabel() {
       const category = catEl.value;
       const amount = Number(amtEl.value) || 0;
-      const result = resolveRule(category, currentBudgetStatus(), amount);
+      const result = resolveRule(category, currentBudgetStatus(), amount, pettyCashType);
       const docs = result.rule ? requiredDocsList(result.rule) : [];
-      const docsMin = (docs.length && !isJustificationOnly(docs)) ? Math.min(docs.length, 3) : 0;
+      const docsMin = (docs.length && !isJustificationOnly(docs) && !isDocsConfirmationOnly(docs)) ? Math.min(docs.length, 3) : 0;
       const methodEl = body.querySelector('#fin-pr-method');
       const quoteMin = (fillPrInApp && methodEl) ? quotationCountFor(methodEl.value) : 0;
       const min = Math.max(docsMin, quoteMin);
@@ -675,7 +773,7 @@ const FinanceModule = (function () {
       const category = catEl.value;
       const amount = Number(amtEl.value) || 0;
       if (!category) { previewEl.innerHTML = ''; return; }
-      const result = resolveRule(category, currentBudgetStatus(), amount);
+      const result = resolveRule(category, currentBudgetStatus(), amount, pettyCashType);
       if (result.blocked) {
         previewEl.innerHTML = `<p class="error-text" style="margin-top:10px;">${escapeHtml(result.message)}</p>`;
         return;
@@ -688,9 +786,9 @@ const FinanceModule = (function () {
       const docs = requiredDocsList(rule);
       const budgetStatus = currentBudgetStatus();
       const fy = currentFY();
-      const info = budgetStatus === 'Budgeted' ? budgetInfoFor(category, fy) : null;
+      const info = (budgetStatus === 'Budgeted' && category !== 'Petty Cash') ? budgetInfoFor(category, fy) : null;
       previewEl.innerHTML = `
-        ${budgetStatus === 'Budgeted' ? (info ? `
+        ${(budgetStatus === 'Budgeted' && category !== 'Petty Cash') ? (info ? `
           <div class="mvoa-list-item" style="margin-top:10px;background:${info.available - amount < 0 ? '#fbeaea' : 'var(--card-bg)'};">
             <p style="margin:0;font-weight:600;">Budget Available (FY ${escapeHtml(fy)}): <span style="color:${info.available - amount < 0 ? '#b3261e' : 'green'};">${formatAmount(info.available)}</span> of ${formatAmount(info.total)}</p>
             ${amount > 0 && info.available - amount < 0 ? `<p class="error-text" style="margin:4px 0 0;">⚠️ This request (${formatAmount(amount)}) would exceed the remaining budget for this category.</p>` : ''}
@@ -698,6 +796,10 @@ const FinanceModule = (function () {
           <div class="mvoa-list-item" style="margin-top:10px;">
             <p class="muted" style="margin:0;">No budget line set up yet for "${escapeHtml(category)}" in FY ${escapeHtml(fy)}.</p>
           </div>`) : ''}
+        ${category === 'Petty Cash' && pettyCashType === 'Expense' && amount > 0 && amount > computeFloatBalance() ? `
+          <div class="mvoa-list-item" style="margin-top:10px;background:#fbeaea;">
+            <p class="error-text" style="margin:0;">⚠️ This expense (${formatAmount(amount)}) exceeds the current float balance (${formatAmount(computeFloatBalance())}).</p>
+          </div>` : ''}
         <div class="mvoa-list-item" style="margin-top:10px;">
           <p style="margin:0 0 6px;font-weight:600;">This request will need:</p>
           <p class="muted" style="margin:2px 0;">Administrative approval: ${escapeHtml(rule.AdministrativeApprover || '—')}</p>
@@ -705,7 +807,12 @@ const FinanceModule = (function () {
           ${rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification'
             ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — quorum ${rule.QuorumOverride || DEFAULT_QUORUM}</p>` : ''}
           ${rule.AGMApprovalRequired === 'Yes' ? `<p class="muted" style="margin:2px 0;">AGM approval required</p>` : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field above, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field above, no attachment needed.' : isDocsConfirmationOnly(docs) ? ' — confirm with the checkbox below, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
+          ${isDocsConfirmationOnly(docs) ? `
+            <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+              <input type="checkbox" id="fin-pc-docs-confirmed">
+              ✅ Original documents submitted to Accountant
+            </label>` : ''}
         </div>`;
       refreshAttachmentsLabel();
 
@@ -856,11 +963,13 @@ const FinanceModule = (function () {
       refreshAttachmentsLabel();
     }
 
-    catEl.addEventListener('change', () => { refreshBudgetStatusSelector(); refreshRulePreview(); });
+    catEl.addEventListener('change', () => { refreshBudgetStatusSelector(); refreshPettyCashTypeSelector(); refreshRulePreview(); });
     amtEl.addEventListener('input', refreshRulePreview);
     refreshBudgetStatusSelector();
+    refreshPettyCashTypeSelector();
     fillPrInApp = false;
     fillCsInApp = false;
+    pettyCashType = 'Expense';
 
     body.querySelector('#fin-submit-btn').addEventListener('click', () => submitRequest(body, container));
   }
@@ -923,17 +1032,25 @@ const FinanceModule = (function () {
     if (!category) { errEl.textContent = 'Please select a category.'; return; }
     if (amount <= 0) { errEl.textContent = 'Please enter an amount greater than zero.'; return; }
 
-    const result = resolveRule(category, budgetStatus, amount);
+    const result = resolveRule(category, budgetStatus, amount, pettyCashType);
     if (result.blocked) { errEl.textContent = result.message; return; }
     if (!result.rule) { errEl.textContent = 'No approval rule matches this category/amount combination — contact your Developer.'; return; }
     const rule = result.rule;
     const docs = requiredDocsList(rule);
     const justificationOnly = isJustificationOnly(docs);
+    const docsConfirmationOnly = isDocsConfirmationOnly(docs);
+    if (docsConfirmationOnly) {
+      const confirmBox = body.querySelector('#fin-pc-docs-confirmed');
+      if (!confirmBox || !confirmBox.checked) {
+        errEl.textContent = 'Please confirm that the original documents have been submitted to the Accountant.';
+        return;
+      }
+    }
     // If the Purchase Requisition is being filled in-app, it no longer needs
     // to be one of the uploaded attachments — the in-app fields below stand
     // in for FIN-F-004 directly. Same for a Justification-only requirement —
     // that's written straight into the Description field, no file needed.
-    const docsNeedingUpload = justificationOnly ? [] : docs.filter(d => {
+    const docsNeedingUpload = (justificationOnly || docsConfirmationOnly) ? [] : docs.filter(d => {
       if (fillPrInApp && /purchase request/i.test(d)) return false;
       if (fillCsInApp && /comparative statement/i.test(d)) return false;
       return true;
@@ -1023,23 +1140,33 @@ const FinanceModule = (function () {
       }
     }
 
-    const requestType = category === 'Petty Cash Reimbursement' ? 'PettyCashReimbursement'
+    const requestType = category === 'Petty Cash' ? (pettyCashType === 'Replenishment' ? 'PettyCashReplenishment' : 'PettyCashExpense')
       : category === 'Emergency Expenditure' ? 'Emergency' : 'Standard';
+
+    // A rule with no Administrative/Financial/EC/AGM requirement at all
+    // (e.g. Petty Cash Expense ≤₹1,000) has nothing left for anyone to
+    // click "Approve" on — settle it as Approved immediately rather than
+    // leaving it stuck at PendingApproval forever with no path forward.
+    const hasNoApprovalStages = parseApproverGroups(rule.AdministrativeApprover).length === 0 &&
+      parseApproverGroups(rule.FinancialApprover).length === 0 &&
+      rule.ECApprovalRequired !== 'Yes' && rule.ECApprovalRequired !== 'Ratification' &&
+      rule.AGMApprovalRequired !== 'Yes';
+    const initialStatus = hasNoApprovalStages ? 'Approved' : 'PendingApproval';
 
     const row = Object.assign({
       RequestID: requestId, RuleID: rule.RuleID, Category: category, BudgetStatus: budgetStatus,
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
       RequestType: requestType, AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
       AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
-      Status: 'PendingApproval', QuorumRequired: rule.QuorumOverride || '', ECApprovalCount: 0,
+      Status: initialStatus, QuorumRequired: rule.QuorumOverride || '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
-      StageEnteredAt: now, StageOpenedAt: ''
+      StageEnteredAt: now, StageOpenedAt: '', PettyCashType: category === 'Petty Cash' ? pettyCashType : ''
     }, prFields, csFields);
 
     try {
       await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
-      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Submitted', comment: `${category} — ${formatAmount(amount)}`, statusAfter: 'PendingApproval' });
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Submitted', comment: `${category} — ${formatAmount(amount)}`, statusAfter: initialStatus });
     } catch (e) {
       errEl.textContent = 'Could not save request: ' + e.message;
       submitBtn.disabled = false; submitBtn.textContent = 'Submit Request';
@@ -1049,6 +1176,7 @@ const FinanceModule = (function () {
     pendingAttachments = [];
     fillPrInApp = false;
     fillCsInApp = false;
+    pettyCashType = 'Expense';
     await loadAll();
     currentView = 'mine';
     render(container);
@@ -1070,6 +1198,7 @@ const FinanceModule = (function () {
 
   function displayStatus(request) {
     if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
+    if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge('Settled — Petty Cash Float', 'paid');
     if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return statusBadge('Paid', 'paid');
     if (request.Status === 'Approved') return statusBadge('Approved — awaiting payment', 'approved');
     return statusBadge('Pending approval', 'pending');
@@ -1408,7 +1537,7 @@ const FinanceModule = (function () {
       return;
     }
 
-    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage);
+    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r));
     const needsCorrection = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
     const pendingTreasurer = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
     const pendingPayment = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
