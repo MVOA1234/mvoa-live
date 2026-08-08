@@ -897,32 +897,41 @@ const FinanceModule = (function () {
   // DisbursementStage) so the requester always has one clear answer,
   // whichever half of the pipeline the request is currently in.
   // ───────────────────────────────────────────────────────────
+  // "Since when" — appended to every ongoing (non-final) stage badge so a
+  // requester can see how long something's been sitting, not just where.
+  // Uses StageEnteredAt (the moment it entered its CURRENT stage, not
+  // when it was first submitted) since that's what actually answers
+  // "how long has whoever's turn it is had this."
+  function sinceText(request) {
+    return request.StageEnteredAt ? ` — since ${formatDate(request.StageEnteredAt)}` : '';
+  }
+
   function stageDescription(request, approvals) {
     if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
     if (request.Status === 'PendingApproval') {
       if (request.RequestType === 'PaymentRequest') {
         const state = computePaymentRequestState(request, approvals);
         const label = { FM: 'FM Verification', OpsHead: 'Operations Head approval', Secretary: 'Secretary approval', Treasurer: 'Treasurer approval', President: 'President approval' };
-        return { text: state.stage ? `Awaiting ${label[state.stage]}` : 'Pending approval', cls: 'pending' };
+        return { text: (state.stage ? `Awaiting ${label[state.stage]}` : 'Pending approval') + sinceText(request), cls: 'pending' };
       }
       const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
       const state = computeRequestState(request, approvals);
-      if (state.stage === 'Administrative') return { text: `Awaiting ${rule.AdministrativeApprover || 'Administrative'} approval`, cls: 'pending' };
-      if (state.stage === 'Financial') return { text: `Awaiting ${rule.FinancialApprover || 'Financial'} approval`, cls: 'pending' };
-      if (state.stage === 'EC') return { text: `Awaiting EC approval (${state.ecCount} of ${state.quorum})`, cls: 'pending' };
-      if (state.stage === 'AGM') return { text: 'Awaiting AGM approval', cls: 'pending' };
-      return { text: 'Pending approval', cls: 'pending' };
+      if (state.stage === 'Administrative') return { text: `Awaiting ${rule.AdministrativeApprover || 'Administrative'} approval${sinceText(request)}`, cls: 'pending' };
+      if (state.stage === 'Financial') return { text: `Awaiting ${rule.FinancialApprover || 'Financial'} approval${sinceText(request)}`, cls: 'pending' };
+      if (state.stage === 'EC') return { text: `Awaiting EC approval (${state.ecCount} of ${state.quorum})${sinceText(request)}`, cls: 'pending' };
+      if (state.stage === 'AGM') return { text: `Awaiting AGM approval${sinceText(request)}`, cls: 'pending' };
+      return { text: `Pending approval${sinceText(request)}`, cls: 'pending' };
     }
     // Petty Cash Expense is fully settled the moment it's Approved — no
     // Payments/Disbursement chain follows (already paid from the float).
     if (isPettyCashExpense(request)) return { text: 'Approved — adjusted against Petty Cash Float', cls: 'paid' };
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
-      case 'PendingTreasurer': return { text: 'Awaiting Treasurer review (payment release)', cls: 'approved' };
-      case 'NeedsCorrection': return { text: "Sent back by Treasurer for correction — waiting on Accountant", cls: 'rejected' };
-      case 'PendingPayment': return { text: 'Treasurer approved — awaiting Disbursement Officer', cls: 'approved' };
+      case 'PendingTreasurer': return { text: `Awaiting Treasurer review (payment release)${sinceText(request)}`, cls: 'approved' };
+      case 'NeedsCorrection': return { text: `Sent back by Treasurer for correction — waiting on Accountant${sinceText(request)}`, cls: 'rejected' };
+      case 'PendingPayment': return { text: `Treasurer approved — awaiting Disbursement Officer${sinceText(request)}`, cls: 'approved' };
       case 'Paid': return { text: 'Paid' + (request.PaymentRef ? ` (Ref: ${request.PaymentRef})` : ''), cls: 'paid' };
-      default: return { text: 'Approved — awaiting Expense Sheet entry (Accountant)', cls: 'approved' };
+      default: return { text: `Approved — awaiting Expense Sheet entry (Accountant)${sinceText(request)}`, cls: 'approved' };
     }
   }
   function stageBadgeHtml(request, approvals) {
@@ -1890,8 +1899,8 @@ const FinanceModule = (function () {
     if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
     if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge('Settled — Petty Cash Float', 'paid');
     if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return statusBadge('Paid', 'paid');
-    if (request.Status === 'Approved') return statusBadge('Approved — awaiting payment', 'approved');
-    return statusBadge('Pending approval', 'pending');
+    if (request.Status === 'Approved') return statusBadge(`Approved — awaiting payment${sinceText(request)}`, 'approved');
+    return statusBadge(`Pending approval${sinceText(request)}`, 'pending');
   }
 
   async function renderMine(body, container) {
