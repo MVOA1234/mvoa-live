@@ -158,6 +158,7 @@ const FinanceModule = (function () {
   let requestsCache = [];
   let rolesCache = [];
   let budgetsCache = [];
+  let queueCardsCache = []; // PendingApproval requests THIS user can act on right now — see computeQueueCards()
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
   let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
@@ -221,7 +222,47 @@ const FinanceModule = (function () {
     } catch (e) {
       budgetsCache = [];
     }
+    // Bug found in testing: the "Approval Queue" nav-tab count used to just
+    // count ALL PendingApproval requests, while the tab's own "Awaiting
+    // your action" list correctly filtered to items THIS user can actually
+    // act on — so the count could show "1 open" while the list said
+    // "Nothing waiting on you right now" whenever that one item needed a
+    // different approver. Both now read from this single cache so they can
+    // never disagree.
+    try {
+      queueCardsCache = await computeQueueCards();
+    } catch (e) {
+      queueCardsCache = []; // fail closed on the count rather than showing a wrong number
+    }
     updateBadge();
+  }
+
+  // One bulk Approvals read (instead of one read per pending request) to
+  // work out which PendingApproval requests the CURRENT user can act on
+  // right now — same eligibility rules as the Approval Queue view itself.
+  async function computeQueueCards() {
+    const user = MVOA.getUser();
+    const person = rolesCache.find(p => p.Name === user.name) || {};
+    const pending = requestsCache.filter(r => r.Status === 'PendingApproval');
+    if (!pending.length) return [];
+    const approvalRows = await MVOA.sheetsRead(TAB_APPROVALS);
+    const allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+    const cards = [];
+    for (const req of pending) {
+      const approvals = allApprovals.filter(a => a.RequestID === req.RequestID);
+      const state = computeRequestState(req, approvals);
+      if (state.rejected || state.fullyApproved) continue; // will settle on next refresh
+      let eligible = false;
+      if (state.stage === 'Administrative' || state.stage === 'Financial') {
+        eligible = (state.groups || []).some(g => personMatchesAndGroup(person, g));
+      } else if (state.stage === 'EC') {
+        eligible = isEcMember(person) && !approvals.some(a => a.Stage === 'EC' && a.ApproverName === user.name);
+      } else if (state.stage === 'AGM') {
+        eligible = isAdmin(person);
+      }
+      if (eligible) cards.push({ req, state, approvals });
+    }
+    return cards;
   }
 
   function updateBadge() {
@@ -244,7 +285,7 @@ const FinanceModule = (function () {
   function render(container) {
     const user = MVOA.getUser();
     const mineCounts = countNewOpen(requestsCache.filter(r => r.RequestedBy === user.name));
-    const queueCounts = countNewOpen(requestsCache.filter(r => r.Status === 'PendingApproval'));
+    const queueCounts = countNewOpen(queueCardsCache.map(c => c.req));
     const paymentsCounts = countNewOpen(requestsCache.filter(r => r.Status === 'Approved' && r.DisbursementStage !== 'Paid' && !isPettyCashExpense(r)));
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
     container.innerHTML = `
@@ -1038,6 +1079,13 @@ const FinanceModule = (function () {
 
     if (!category) { errEl.textContent = 'Please select a category.'; return; }
     if (amount <= 0) { errEl.textContent = 'Please enter an amount greater than zero.'; return; }
+    // Vendor/Payee was previously optional in the UI but not actually
+    // enforced, so a request could be submitted with it blank — required
+    // for every category except Petty Cash Replenishment, which has no
+    // vendor (it's an internal top-up of the float, not a payment to
+    // anyone).
+    const isReplenishment = category === 'Petty Cash' && pettyCashType === 'Replenishment';
+    if (!vendor && !isReplenishment) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
 
     const result = resolveRule(category, budgetStatus, amount, pettyCashType);
     if (result.blocked) { errEl.textContent = result.message; return; }
@@ -1350,27 +1398,10 @@ const FinanceModule = (function () {
   // APPROVAL QUEUE
   // ───────────────────────────────────────────────────────────
   async function renderQueue(body, container) {
-    body.innerHTML = `<p class="muted">Loading queue…</p>`;
-    const user = MVOA.getUser();
-    const person = rolesCache.find(p => p.Name === user.name) || {};
-    const pending = requestsCache.filter(r => r.Status === 'PendingApproval');
-    const approved = requestsCache.filter(r => r.Status === 'Approved' && r.PaymentStatus !== 'Paid');
-
-    const cards = [];
-    for (const req of pending) {
-      const approvals = await loadApprovalsFor(req.RequestID);
-      const state = computeRequestState(req, approvals);
-      if (state.rejected || state.fullyApproved) continue; // will settle on next refresh
-      let eligible = false;
-      if (state.stage === 'Administrative' || state.stage === 'Financial') {
-        eligible = (state.groups || []).some(g => personMatchesAndGroup(person, g));
-      } else if (state.stage === 'EC') {
-        eligible = isEcMember(person) && !approvals.some(a => a.Stage === 'EC' && a.ApproverName === user.name);
-      } else if (state.stage === 'AGM') {
-        eligible = isAdmin(person);
-      }
-      if (eligible) cards.push({ req, state, approvals });
-    }
+    // Uses the same queueCardsCache the nav-tab count reads (refreshed in
+    // loadAll) so the count and this list can never disagree — see the
+    // comment in loadAll for the bug this fixes.
+    const cards = queueCardsCache;
 
     body.innerHTML = `
       <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">Awaiting your action</h3>
