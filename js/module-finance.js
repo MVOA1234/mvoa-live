@@ -843,6 +843,25 @@ const FinanceModule = (function () {
   function paymentRuleFor(paymentType) {
     return paymentRulesCache.find(r => r.PaymentType === paymentType) || {};
   }
+  // WCC (FIN-F-002) threshold — per Governance Note 5: mandatory for
+  // Repairs & Maintenance / CAPEX works above ₹50,000 per expense, but
+  // does NOT apply to procurement of GOODS (as opposed to works/
+  // services) where delivery was verified via FIN-F-005 Goods Receipt /
+  // Material Receipt instead. This needs its own logic rather than a
+  // static MinimumDocs string, since the actual requirement depends on
+  // amount AND on whether this is a goods purchase — both only known
+  // once the person is filling out the form, not from the rule alone.
+  const WCC_THRESHOLD = 50000;
+  const WCC_PAYMENT_TYPES = ['Repairs & Maintenance Payments', 'Capital Expenditure (CAPEX) Payments'];
+  function isWccPaymentType(paymentType) {
+    return WCC_PAYMENT_TYPES.includes(paymentType);
+  }
+  function effectiveDocsForPayment(paymentType, amount, isGoodsProcurement) {
+    if (!isWccPaymentType(paymentType)) return requiredDocsList(paymentRuleFor(paymentType));
+    if (isGoodsProcurement) return ['FIN-F-005 Goods Receipt / Material Receipt', 'Vendor Invoice'];
+    if ((Number(amount) || 0) > WCC_THRESHOLD) return ['WCC (FIN-F-002)', 'Vendor Invoice'];
+    return ['Vendor Invoice'];
+  }
   function computePaymentRequestState(request, approvals) {
     if (approvals.some(a => a.Decision === 'Rejected')) {
       return { stage: null, rejected: true, fullyApproved: false };
@@ -979,6 +998,7 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   let paymentPendingAttachments = [];
   let selectedContractId = '';
+  let paymentIsGoodsProcurement = false;
 
   function renderPaymentRequestForm(body, container) {
     if (!paymentRulesCache.length) {
@@ -1004,6 +1024,7 @@ const FinanceModule = (function () {
         <label>Description
           <textarea id="pr-desc" rows="2" placeholder="What is this payment for?"></textarea>
         </label>
+        <div id="pr-wcc-wrap"></div>
         <div id="pr-rule-preview"></div>
         <div style="margin-top:12px;">
           <p class="muted" id="pr-attachments-label" style="margin:0 0 6px;">Attachments</p>
@@ -1016,7 +1037,8 @@ const FinanceModule = (function () {
     `;
     paymentPendingAttachments = [];
     selectedContractId = '';
-    renderAttachmentChips(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, 3);
+    paymentIsGoodsProcurement = false;
+    renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, [], 3);
 
     const typeEl = body.querySelector('#pr-type');
     const amtEl = body.querySelector('#pr-amount');
@@ -1054,9 +1076,28 @@ const FinanceModule = (function () {
     function refreshPreview() {
       body.querySelector('#pr-form-error').textContent = '';
       const type = typeEl.value;
-      if (!type) { previewEl.innerHTML = ''; labelEl.textContent = 'Attachments'; return; }
+      const wccWrap = body.querySelector('#pr-wcc-wrap');
+      if (!type) { previewEl.innerHTML = ''; labelEl.textContent = 'Attachments'; wccWrap.innerHTML = ''; return; }
       const rule = paymentRuleFor(type);
-      const docs = requiredDocsList(rule);
+      const amount = Number(amtEl.value) || 0;
+
+      // R&M/CAPEX only: goods-procurement toggle changes which documents
+      // apply (see effectiveDocsForPayment/Governance Note 5).
+      if (isWccPaymentType(type)) {
+        wccWrap.innerHTML = `
+          <label style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+            <input type="checkbox" id="pr-goods-procurement" ${paymentIsGoodsProcurement ? 'checked' : ''}>
+            This is procurement of goods (not works/services), verified via Goods Receipt / Material Receipt (FIN-F-005)
+          </label>`;
+        wccWrap.querySelector('#pr-goods-procurement').addEventListener('change', (e) => {
+          paymentIsGoodsProcurement = e.target.checked;
+          refreshPreview();
+        });
+      } else {
+        wccWrap.innerHTML = '';
+        paymentIsGoodsProcurement = false;
+      }
+      const docs = effectiveDocsForPayment(type, amount, paymentIsGoodsProcurement);
       previewEl.innerHTML = `
         <div class="mvoa-list-item" style="margin-top:10px;">
           <p style="margin:0 0 6px;font-weight:600;">This payment will need:</p>
@@ -1065,7 +1106,7 @@ const FinanceModule = (function () {
           ${rule.SecretaryRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Secretary — Admin Approval</p>' : ''}
           ${rule.TreasurerRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Treasurer — Financial Approval</p>' : ''}
           ${rule.PresidentRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">President Approval</p>' : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isWccPaymentType(type) && !paymentIsGoodsProcurement ? (amount > WCC_THRESHOLD ? ' (WCC required — over ₹50,000)' : ' (WCC not required — ₹50,000 or under)') : ''}</p>` : ''}
         </div>`;
       // Requires an attachment for each listed document (capped at 3,
       // matching the existing Schedule A/B/C flow's pattern) rather than
@@ -1078,6 +1119,7 @@ const FinanceModule = (function () {
       // in practice that just means a photo can stand in as evidence.
       const minAttachments = (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
       labelEl.textContent = minAttachments > 0 ? `Attachments — at least ${minAttachments} required (see documents needed above)` : 'Attachments (optional)';
+      renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, docs, 3);
     }
 
     typeEl.addEventListener('change', () => { refreshPreview(); });
@@ -1109,10 +1151,10 @@ const FinanceModule = (function () {
     if (!vendor) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
 
     const rule = paymentRuleFor(paymentType);
-    const docs = requiredDocsList(rule);
+    const docs = effectiveDocsForPayment(paymentType, amount, paymentIsGoodsProcurement);
     const minAttachments = (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
     if (paymentPendingAttachments.length < minAttachments) {
-      errEl.textContent = `This payment type requires at least ${minAttachments} attachment(s): ${rule.MinimumDocs}.`;
+      errEl.textContent = `This payment type requires at least ${minAttachments} attachment(s): ${docs.join(', ')}.`;
       return;
     }
 
@@ -1143,7 +1185,7 @@ const FinanceModule = (function () {
       RequestID: requestId, RuleID: '', Category: paymentType, BudgetStatus: '',
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
       RequestType: 'PaymentRequest', AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
-      AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
+      AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: docs.join(' + '),
       Status: initialStatus, QuorumRequired: '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
@@ -1161,6 +1203,7 @@ const FinanceModule = (function () {
 
     paymentPendingAttachments = [];
     selectedContractId = '';
+    paymentIsGoodsProcurement = false;
     await loadAll(true);
     currentView = 'mine';
     render(container);
@@ -1207,7 +1250,7 @@ const FinanceModule = (function () {
       </div>
     `;
     pendingAttachments = [];
-    renderAttachmentChips(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, 3);
+    renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, [], 3);
 
     const catEl = body.querySelector('#fin-category');
     const amtEl = body.querySelector('#fin-amount');
@@ -1289,7 +1332,15 @@ const FinanceModule = (function () {
       const amount = Number(amtEl.value) || 0;
       const result = resolveRule(category, currentBudgetStatus(), amount, pettyCashType);
       const docs = result.rule ? requiredDocsList(result.rule) : [];
-      const docsMin = (docs.length && !isJustificationOnly(docs) && !isDocsConfirmationOnly(docs)) ? Math.min(docs.length, 3) : 0;
+      // Same filtering as doSubmitRequest — a doc covered by the in-app
+      // Purchase Requisition/Comparative Statement toggle isn't a real
+      // attachment to name a button after.
+      const docsNeedingUpload = (isJustificationOnly(docs) || isDocsConfirmationOnly(docs)) ? [] : docs.filter(d => {
+        if (fillPrInApp && /purchase request/i.test(d)) return false;
+        if (fillCsInApp && /comparative statement/i.test(d)) return false;
+        return true;
+      });
+      const docsMin = Math.min(docsNeedingUpload.length, 3);
       const methodEl = body.querySelector('#fin-pr-method');
       const quoteMin = (fillPrInApp && methodEl) ? quotationCountFor(methodEl.value) : 0;
       const min = Math.max(docsMin, quoteMin);
@@ -1302,6 +1353,13 @@ const FinanceModule = (function () {
       } else {
         label.textContent = 'Attachments (optional — up to 3)';
       }
+      // Named-button picker: quotation labels take priority when the
+      // Purchase Requisition's Procurement Method calls for more of them
+      // than the DoFA Matrix's own document list does.
+      const docLabels = quoteMin > docsMin
+        ? Array.from({ length: quoteMin }, (_, i) => `Quotation ${i + 1}`)
+        : docsNeedingUpload;
+      renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, docLabels, 3);
     }
 
     function refreshRulePreview() {
@@ -1543,6 +1601,60 @@ const FinanceModule = (function () {
     } else {
       btnsEl.innerHTML = `<p class="muted" style="margin:0;">Maximum ${maxCount} attachments reached.</p>`;
     }
+  }
+
+  // Named-document attachment picker — each required document gets its
+  // own button (e.g. "📎 Add Vendor Invoice") instead of generic
+  // "Add Photo"/"Add Document", so it's clear exactly what each upload is
+  // for. One button covers both a camera photo and a file — pickAttachment
+  // itself decides how the device offers those options; there's no
+  // separate photo-only path here since a named document could reasonably
+  // be provided as either. "➕ Add Additional" covers anything beyond the
+  // named list (only shown while there's still room under maxCount).
+  // Used by both New Request (Schedule A/B/C) and New Payment Request
+  // (Schedule D) now that both know their exact required document names.
+  function renderDocAttachmentPicker(scope, chipsSelector, btnsSelector, attachments, docLabels, maxCount) {
+    const chipsEl = scope.querySelector(chipsSelector);
+    const btnsEl = scope.querySelector(btnsSelector);
+    if (!chipsEl || !btnsEl) return;
+    chipsEl.innerHTML = attachments.map((a, i) => `
+      <div class="mvoa-row" style="margin-bottom:4px;">
+        <span>${a.isPhoto ? '📷' : '📄'} <strong>${escapeHtml(a.docLabel || 'Additional')}:</strong> ${escapeHtml(a.name)} <span class="muted">(${formatKB(a.compressedSizeBytes)})</span></span>
+        <button class="btn-secondary fin-att-remove" data-idx="${i}" style="padding:4px 10px;margin:0;">✕</button>
+      </div>
+    `).join('');
+    chipsEl.querySelectorAll('.fin-att-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        attachments.splice(parseInt(btn.dataset.idx), 1);
+        renderDocAttachmentPicker(scope, chipsSelector, btnsSelector, attachments, docLabels, maxCount);
+      });
+    });
+    const filledLabels = new Set(attachments.map(a => a.docLabel).filter(Boolean));
+    const remainingNamed = (docLabels || []).filter(l => l && l.trim() !== '-' && !filledLabels.has(l));
+    const roomLeft = maxCount - attachments.length;
+    if (roomLeft <= 0) {
+      btnsEl.innerHTML = `<p class="muted" style="margin:0;">Maximum ${maxCount} attachments reached.</p>`;
+      return;
+    }
+    const namedToShow = remainingNamed.slice(0, roomLeft);
+    const pickFor = async (label) => {
+      const a = await MVOA.pickAttachment({ photoOnly: false, useCamera: false });
+      if (a) {
+        a.docLabel = label || '';
+        attachments.push(a);
+        renderDocAttachmentPicker(scope, chipsSelector, btnsSelector, attachments, docLabels, maxCount);
+      }
+    };
+    const namedBtnsHtml = namedToShow.map(label => `<button class="btn-secondary fin-att-named-pick" data-label="${escapeHtml(label)}">📎 Add ${escapeHtml(label)}</button>`).join('');
+    // Room for something beyond the named list, or there's no named list
+    // at all (e.g. Salaries, whose doc is "-")
+    const canAddMore = roomLeft > namedToShow.length || namedToShow.length === 0;
+    btnsEl.innerHTML = namedBtnsHtml + (canAddMore ? `<button class="btn-secondary fin-att-additional-pick">➕ Add Additional</button>` : '');
+    btnsEl.querySelectorAll('.fin-att-named-pick').forEach(btn => {
+      btn.addEventListener('click', () => pickFor(btn.dataset.label));
+    });
+    const addBtn = btnsEl.querySelector('.fin-att-additional-pick');
+    if (addBtn) addBtn.addEventListener('click', () => pickFor(null));
   }
 
   let isSubmitting = false;
