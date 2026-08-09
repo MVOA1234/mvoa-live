@@ -2120,30 +2120,46 @@ const FinanceModule = (function () {
   // Requests" so the requester can see the whole picture, not just the
   // current stage.
   function renderRequestTrailHtml(request, approvals) {
-    const stages = [];
+    // Rebuilt as a true CHRONOLOGICAL event log rather than grouped by
+    // stage — bug found in testing: grouping by stage bunched every
+    // Secretary action together even when a Treasurer send-back
+    // genuinely happened in between them chronologically, making a
+    // correct sequence look wrong. This also naturally surfaces
+    // Resubmitted events (previously invisible, since 'Initiator' isn't
+    // a real approval stage), which were the missing piece explaining
+    // "why did this jump."
+    const stageLabels = {};
     if (request.RequestType === 'PaymentRequest') {
       const rule = paymentRuleFor(request.Category);
       ['FM', 'OpsHead', 'Secretary', 'Treasurer', 'President'].forEach(key => {
-        if (rule[PAYMENT_STAGE_REQUIRED_COL[key]] === 'Yes') stages.push({ key, label: PAYMENT_STAGE_LABEL[key] });
+        if (rule[PAYMENT_STAGE_REQUIRED_COL[key]] === 'Yes') stageLabels[key] = PAYMENT_STAGE_LABEL[key];
       });
     } else {
       const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
-      if (rule.AdministrativeApprover) stages.push({ key: 'Administrative', label: `Administrative — ${rule.AdministrativeApprover}` });
-      if (rule.FinancialApprover) stages.push({ key: 'Financial', label: `Financial — ${rule.FinancialApprover}` });
-      if (rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification') stages.push({ key: 'EC', label: 'EC Approval' });
-      if (rule.AGMApprovalRequired === 'Yes') stages.push({ key: 'AGM', label: 'AGM Approval' });
+      if (rule.AdministrativeApprover) stageLabels['Administrative'] = `Administrative — ${rule.AdministrativeApprover}`;
+      if (rule.FinancialApprover) stageLabels['Financial'] = `Financial — ${rule.FinancialApprover}`;
+      if (rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification') stageLabels['EC'] = 'EC Approval';
+      if (rule.AGMApprovalRequired === 'Yes') stageLabels['AGM'] = 'AGM Approval';
     }
-    const stageRowsHtml = stages.length ? stages.map(s => {
-      const acts = approvals.filter(a => a.Stage === s.key);
-      if (!acts.length) {
-        return `<p class="muted" style="margin:3px 0;">⏳ ${escapeHtml(s.label)} — pending</p>`;
-      }
-      return acts.map(a => {
-        const icon = a.Decision === 'Approved' ? '✅' : a.Decision === 'SentBack' ? '🔁' : '❌';
-        const color = a.Decision === 'Approved' ? 'green' : a.Decision === 'SentBack' ? '#8a6d00' : '#b3261e';
-        return `<p style="margin:3px 0;color:${color};">${icon} ${escapeHtml(s.label)} — ${a.Decision} by ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${a.Comment ? ` — "${escapeHtml(a.Comment)}"` : ''}</p>`;
-      }).join('');
-    }).join('') : '<p class="muted" style="margin:3px 0;">No approval stages required for this request.</p>';
+    stageLabels['Initiator'] = 'With Requester';
+
+    const sortedApprovals = approvals.slice().sort((a, b) => (a.Timestamp || '').localeCompare(b.Timestamp || ''));
+    const eventRowsHtml = sortedApprovals.map(a => {
+      const label = stageLabels[a.Stage] || a.Stage;
+      const icon = a.Decision === 'Approved' ? '✅' : a.Decision === 'SentBack' ? '🔁' : a.Decision === 'Resubmitted' ? '📤' : '❌';
+      const color = a.Decision === 'Approved' ? 'green' : a.Decision === 'SentBack' ? '#8a6d00' : a.Decision === 'Resubmitted' ? '#185fa5' : '#b3261e';
+      const verb = a.Decision === 'Resubmitted' ? 'Resubmitted by' : `${a.Decision} by`;
+      return `<p style="margin:3px 0;color:${color};">${icon} ${escapeHtml(label)} — ${verb} ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${a.Comment ? ` — "${escapeHtml(a.Comment)}"` : ''}</p>`;
+    }).join('');
+
+    // Whatever's currently pending, from the same state engine every
+    // other view uses — guarantees this always matches reality rather
+    // than being independently (and now correctly) re-derived here.
+    const state = request.RequestType === 'PaymentRequest' ? computePaymentRequestState(request, approvals) : computeRequestState(request, approvals);
+    const pendingHtml = (!state.rejected && !state.fullyApproved && state.stage)
+      ? `<p class="muted" style="margin:3px 0;">⏳ ${escapeHtml(stageLabels[state.stage] || state.stage)} — pending</p>` : '';
+
+    const stageRowsHtml = (eventRowsHtml || pendingHtml) ? (eventRowsHtml + pendingHtml) : '<p class="muted" style="margin:3px 0;">No approval stages required for this request.</p>';
 
     // Once Approved, the request moves into the Payments pipeline —
     // show that half of the journey too, same trail-style formatting.
