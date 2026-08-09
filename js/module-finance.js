@@ -2934,7 +2934,7 @@ const FinanceModule = (function () {
     return { row: rowToObj(EXPENSE_COLS, rows[idx], idx + 1), rowNumber: idx + 1 };
   }
 
-  function renderPayments(body, container) {
+  async function renderPayments(body, container) {
     const person = currentPerson();
     const isAcct = isAccountantPerson(person);
     const isTres = isTreasurerPerson(person);
@@ -2952,6 +2952,17 @@ const FinanceModule = (function () {
     const pendingPayment = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
     const paid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
       .sort((a, b) => (b.ClosedDate || '').localeCompare(a.ClosedDate || '')).slice(0, 10);
+    body.innerHTML = `<p class="muted">Loading…</p>`;
+    // Gap found in testing: "Sent back for correction" was the one
+    // section in the whole app without a new-note flag — its Treasurer
+    // query IS a Notes-thread entry same as everywhere else, it just
+    // wasn't showing the flag proactively (only once opened). Bulk
+    // fetch once here, reused by that section below.
+    let allNotes = [];
+    try {
+      const noteRows = await MVOA.sheetsRead(TAB_NOTES);
+      allNotes = noteRows.slice(1).map((r, i) => rowToObj(NOTE_COLS, r, i + 2));
+    } catch (e) { /* flag just won't show if this fails, non-critical */ }
 
     body.innerHTML = `
       <div style="margin-bottom:14px;">
@@ -3015,17 +3026,21 @@ const FinanceModule = (function () {
     if ((isAcct || isAdminUser) && needsCorrection.length) {
       const el = body.querySelector('#fin-pay-correction');
       const [newOnes, openOnes] = [needsCorrection.filter(isItemNew), needsCorrection.filter(r => !isItemNew(r))];
-      el.innerHTML = newOnes.map(req => newItemCardHtml(req)).join('') + openOnes.map(req => `
+      el.innerHTML = newOnes.map(req => newItemCardHtml(req)).join('') + openOnes.map(req => {
+        const noteCount = allNotes.filter(n => n.RequestID === req.RequestID).length;
+        return `
         <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
           <div class="mvoa-row">
             <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
             <span class="mvoa-badge" style="color:#a32d2d;background:#fbeaea;">Needs correction</span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
-          <button class="btn-secondary fin-corr-notes-toggle" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 6px 0 0;">💬 See Treasurer's query</button>
+          ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
+          ${notesButtonHtml(req, noteCount, 'fin-corr-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}" style="margin:6px 6px 0 0;"`)}
           <button class="btn-primary fin-edit-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 0 0 0;">Edit &amp; Resubmit</button>
           <div class="fin-corr-notes-body hidden" data-request-id="${escapeHtml(req.RequestID)}"></div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
       wireNewItemCards(el, refreshPayments);
       el.querySelectorAll('.fin-edit-entry-btn').forEach(btn => {
         btn.addEventListener('click', () => openExpenseEntryDialog(btn.dataset.requestId, container, true));
@@ -3037,7 +3052,7 @@ const FinanceModule = (function () {
           const isHidden = notesBody.classList.contains('hidden');
           if (!isHidden) { notesBody.classList.add('hidden'); return; }
           notesBody.classList.remove('hidden');
-          await renderNotesThread(notesBody, id, null, true);
+          await renderNotesThread(notesBody, id, btn, true);
         });
       });
     }
