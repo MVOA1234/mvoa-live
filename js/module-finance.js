@@ -340,7 +340,7 @@ const FinanceModule = (function () {
       if (req.RequestType === 'PaymentRequest') {
         const pState = computePaymentRequestState(req, approvals);
         if (pState.rejected || pState.fullyApproved) continue;
-        const eligible = pState.stage && roleMatchesToken(person, PAYMENT_STAGE_ROLE_TOKEN[pState.stage]);
+        const eligible = pState.stage && pState.stage !== 'Initiator' && roleMatchesToken(person, PAYMENT_STAGE_ROLE_TOKEN[pState.stage]);
         if (eligible) cards.push({ req, state: pState, approvals });
         continue;
       }
@@ -388,11 +388,13 @@ const FinanceModule = (function () {
     if (topTab === 'spend') return [
       { view: 'submit', label: '+ New Request' },
       { view: 'mine', label: 'My Requests' },
+      { view: 'sentback', label: '🔁 Sent Back' },
       { view: 'queue', label: 'Approval Queue' }
     ];
     if (topTab === 'payment') return [
       { view: 'payreq', label: '💵 New Payment Request' },
       { view: 'mine', label: 'My Requests' },
+      { view: 'sentback', label: '🔁 Sent Back' },
       { view: 'myapprovals', label: '✅ My Approvals' },
       { view: 'queue', label: 'Approval Queue' },
       { view: 'payments', label: '₹ Payments' }
@@ -403,7 +405,9 @@ const FinanceModule = (function () {
 
   function render(container) {
     const user = MVOA.getUser();
-    const mineCounts = countNewOpen(requestsCache.filter(r => r.RequestedBy === user.name));
+    const myRequests = requestsCache.filter(r => r.RequestedBy === user.name);
+    const mineCountsSpend = countNewOpen(myRequests.filter(r => r.RequestType !== 'PaymentRequest'));
+    const mineCountsPayment = countNewOpen(myRequests.filter(r => r.RequestType === 'PaymentRequest'));
     const queueCardsSpend = queueCardsCache.filter(c => c.req.RequestType !== 'PaymentRequest');
     const queueCardsPayment = queueCardsCache.filter(c => c.req.RequestType === 'PaymentRequest');
     const queueCountsSpend = countNewOpen(queueCardsSpend.map(c => c.req));
@@ -412,7 +416,7 @@ const FinanceModule = (function () {
     const expiringContracts = computeExpiringContracts();
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
     const countFor = (view) => {
-      if (view === 'mine') return mineCounts;
+      if (view === 'mine') return currentTopTab === 'spend' ? mineCountsSpend : mineCountsPayment;
       if (view === 'queue') return currentTopTab === 'spend' ? queueCountsSpend : queueCountsPayment;
       if (view === 'payments') return paymentsCounts;
       return { open: 0, newCount: 0 };
@@ -487,11 +491,12 @@ const FinanceModule = (function () {
     if (currentView === 'submit') renderSubmitForm(body, container);
     else if (currentView === 'payreq') renderPaymentRequestForm(body, container);
     else if (currentView === 'myapprovals') renderMyApprovals(body, container);
+    else if (currentView === 'sentback') renderSentBack(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'queue') renderQueue(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'payments') renderPayments(body, container);
     else if (currentView === 'budget') renderBudgetStatus(body, container);
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
-    else renderMine(body, container);
+    else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
   }
 
   // ─── Budget Status — Category × FY: Total / Consumed / Available ─
@@ -882,41 +887,85 @@ const FinanceModule = (function () {
       .filter(a => a.RequestID === requestId);
   }
 
-  function andGroupSatisfied(approvals, orGroup, stage) {
-    return approvals.some(a => {
-      if (a.Stage !== stage || a.Decision !== 'Approved') return false;
-      const person = rolesCache.find(p => p.Name === a.ApproverName) || { Role: a.ApproverRole, Title: a.ApproverRole };
-      return personMatchesAndGroup(person, orGroup);
-    });
+  // ───────────────────────────────────────────────────────────
+  // Generic stage-chain walker — replays every approval EVENT
+  // (Approved / Rejected / SentBack) in chronological order against an
+  // ordered list of stage definitions, so "Send Back" can move the
+  // pointer backward by exactly one required stage (or to the
+  // Initiator, before the first stage) — and if that stage later
+  // approves again, walk forward again from there. This is what makes
+  // cascading send-backs "one level at a time, however many times"
+  // work correctly without a separate stored position field: position
+  // is always fully re-derivable from the approvals log, same
+  // philosophy as everything else in this module.
+  // stageDefs: ordered array of { key, isDone(approvalsAtThisVisit) }.
+  // Returns { position, rejected, fullyApproved, sentBackAt,
+  // approvalsAtPosition } — position is a stage key, the literal
+  // string 'Initiator', or null (only meaningful when
+  // rejected/fullyApproved). sentBackAt is the most recent SentBack
+  // event (kept for display even after later events at the SAME
+  // position). approvalsAtPosition is whatever's accumulated at the
+  // CURRENT stage since last arriving there (e.g. for EC quorum count).
+  // ───────────────────────────────────────────────────────────
+  function walkStageChain(stageDefs, approvals) {
+    if (!stageDefs.length) return { position: null, rejected: false, fullyApproved: true, sentBackAt: null, approvalsAtPosition: [] };
+    const sorted = approvals.slice().sort((a, b) => (a.Timestamp || '').localeCompare(b.Timestamp || ''));
+    let idx = 0; // index into stageDefs; -1 = with Initiator; stageDefs.length = fully approved
+    let rejected = false;
+    let approvalsSinceEntry = [];
+    let sentBackAt = null;
+    for (const a of sorted) {
+      if (rejected || idx >= stageDefs.length) continue;
+      if (idx < 0) {
+        // With the Initiator — only a Resubmitted event moves this forward again.
+        if (a.Stage === 'Initiator' && a.Decision === 'Resubmitted') { idx = 0; approvalsSinceEntry = []; }
+        continue;
+      }
+      const def = stageDefs[idx];
+      if (a.Stage !== def.key) continue;
+      if (a.Decision === 'Rejected') { rejected = true; continue; }
+      if (a.Decision === 'SentBack') { sentBackAt = a; idx -= 1; approvalsSinceEntry = []; continue; }
+      if (a.Decision === 'Approved') {
+        approvalsSinceEntry.push(a);
+        if (def.isDone(approvalsSinceEntry)) { idx += 1; approvalsSinceEntry = []; }
+      }
+    }
+    if (rejected) return { position: null, rejected: true, fullyApproved: false, sentBackAt, approvalsAtPosition: [] };
+    if (idx >= stageDefs.length) return { position: null, rejected: false, fullyApproved: true, sentBackAt, approvalsAtPosition: [] };
+    if (idx < 0) return { position: 'Initiator', rejected: false, fullyApproved: false, sentBackAt, approvalsAtPosition: [] };
+    return { position: stageDefs[idx].key, rejected: false, fullyApproved: false, sentBackAt, approvalsAtPosition: approvalsSinceEntry };
+  }
+  function approvalMatchesGroup(a, orGroup) {
+    const person = rolesCache.find(p => p.Name === a.ApproverName) || { Role: a.ApproverRole, Title: a.ApproverRole };
+    return personMatchesAndGroup(person, orGroup);
   }
 
   // Computes the current status of a request from its rule + approvals log.
-  // Returns { stage, eligibleCheck, ecCount, rejected, fullyApproved }
+  // Returns { stage, groups, ecCount, quorum, rejected, fullyApproved, sentBackAt }
+  // stage may be 'Administrative' | 'Financial' | 'EC' | 'AGM' | 'Initiator' | null
   function computeRequestState(request, approvals) {
-    if (approvals.some(a => a.Decision === 'Rejected')) {
-      return { stage: null, rejected: true, fullyApproved: false, ecCount: 0 };
-    }
     const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
     const adminGroups = parseApproverGroups(rule.AdministrativeApprover);
-    const adminDone = adminGroups.every(g => andGroupSatisfied(approvals, g, 'Administrative'));
-    if (!adminDone) return { stage: 'Administrative', groups: adminGroups, rejected: false, fullyApproved: false, ecCount: 0 };
-
     const finGroups = parseApproverGroups(rule.FinancialApprover);
-    const finDone = finGroups.length === 0 || finGroups.every(g => andGroupSatisfied(approvals, g, 'Financial'));
-    if (!finDone) return { stage: 'Financial', groups: finGroups, rejected: false, fullyApproved: false, ecCount: 0 };
-
     const ecRequired = rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification';
-    const ecApprovers = new Set(approvals.filter(a => a.Stage === 'EC' && a.Decision === 'Approved').map(a => a.ApproverName));
-    const quorum = Number(request.QuorumRequired) || Number(rule.QuorumOverride) || DEFAULT_QUORUM;
-    if (ecRequired && ecApprovers.size < quorum) {
-      return { stage: 'EC', rejected: false, fullyApproved: false, ecCount: ecApprovers.size, quorum };
-    }
-
     const agmRequired = rule.AGMApprovalRequired === 'Yes';
-    const agmDone = !agmRequired || approvals.some(a => a.Stage === 'AGM' && a.Decision === 'Approved');
-    if (!agmDone) return { stage: 'AGM', rejected: false, fullyApproved: false, ecCount: ecApprovers.size };
+    const quorum = Number(request.QuorumRequired) || Number(rule.QuorumOverride) || DEFAULT_QUORUM;
 
-    return { stage: null, rejected: false, fullyApproved: true, ecCount: ecApprovers.size };
+    const stageDefs = [];
+    if (adminGroups.length) stageDefs.push({ key: 'Administrative',
+      isDone: (visit) => adminGroups.every(g => visit.some(a => approvalMatchesGroup(a, g))) });
+    if (finGroups.length) stageDefs.push({ key: 'Financial',
+      isDone: (visit) => finGroups.every(g => visit.some(a => approvalMatchesGroup(a, g))) });
+    if (ecRequired) stageDefs.push({ key: 'EC',
+      isDone: (visit) => new Set(visit.map(a => a.ApproverName)).size >= quorum });
+    if (agmRequired) stageDefs.push({ key: 'AGM', isDone: () => true });
+
+    const result = walkStageChain(stageDefs, approvals);
+    const ecCount = result.position === 'EC' ? new Set(result.approvalsAtPosition.map(a => a.ApproverName)).size : 0;
+    return {
+      stage: result.position, groups: result.position === 'Administrative' ? adminGroups : result.position === 'Financial' ? finGroups : undefined,
+      rejected: result.rejected, fullyApproved: result.fullyApproved, ecCount, quorum, sentBackAt: result.sentBackAt
+    };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -952,18 +1001,12 @@ const FinanceModule = (function () {
     return ['Vendor Invoice'];
   }
   function computePaymentRequestState(request, approvals) {
-    if (approvals.some(a => a.Decision === 'Rejected')) {
-      return { stage: null, rejected: true, fullyApproved: false };
-    }
     const rule = paymentRuleFor(request.Category);
     const order = ['FM', 'OpsHead', 'Secretary', 'Treasurer', 'President'];
-    const requiredCol = PAYMENT_STAGE_REQUIRED_COL;
-    for (const stage of order) {
-      if (rule[requiredCol[stage]] !== 'Yes') continue; // this PaymentType skips this stage entirely
-      const done = approvals.some(a => a.Stage === stage && a.Decision === 'Approved');
-      if (!done) return { stage, rejected: false, fullyApproved: false };
-    }
-    return { stage: null, rejected: false, fullyApproved: true };
+    const stageDefs = order.filter(k => rule[PAYMENT_STAGE_REQUIRED_COL[k]] === 'Yes')
+      .map(k => ({ key: k, isDone: (visit) => visit.length > 0 }));
+    const result = walkStageChain(stageDefs, approvals);
+    return { stage: result.position, rejected: result.rejected, fullyApproved: result.fullyApproved, sentBackAt: result.sentBackAt };
   }
   // A Payment Request with NO required stages at all (shouldn't normally
   // happen — every real Schedule D row needs at least Treasurer — but
@@ -1000,11 +1043,13 @@ const FinanceModule = (function () {
     if (request.Status === 'PendingApproval') {
       if (request.RequestType === 'PaymentRequest') {
         const state = computePaymentRequestState(request, approvals);
+        if (state.stage === 'Initiator') return { text: `🔁 Sent back to you${state.sentBackAt && state.sentBackAt.Comment ? ' — "' + escapeHtml(state.sentBackAt.Comment) + '"' : ''}${sinceText(request)}`, cls: 'rejected' };
         const label = { FM: 'FM Verification', OpsHead: 'Operations Head approval', Secretary: 'Secretary approval', Treasurer: 'Treasurer approval', President: 'President approval' };
         return { text: (state.stage ? `Awaiting ${label[state.stage]}` : 'Pending approval') + sinceText(request), cls: 'pending' };
       }
       const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
       const state = computeRequestState(request, approvals);
+      if (state.stage === 'Initiator') return { text: `🔁 Sent back to you${state.sentBackAt && state.sentBackAt.Comment ? ' — "' + escapeHtml(state.sentBackAt.Comment) + '"' : ''}${sinceText(request)}`, cls: 'rejected' };
       if (state.stage === 'Administrative') return { text: `Awaiting ${rule.AdministrativeApprover || 'Administrative'} approval${sinceText(request)}`, cls: 'pending' };
       if (state.stage === 'Financial') return { text: `Awaiting ${rule.FinancialApprover || 'Financial'} approval${sinceText(request)}`, cls: 'pending' };
       if (state.stage === 'EC') return { text: `Awaiting EC approval (${state.ecCount} of ${state.quorum})${sinceText(request)}`, cls: 'pending' };
@@ -2069,8 +2114,9 @@ const FinanceModule = (function () {
         return `<p class="muted" style="margin:3px 0;">⏳ ${escapeHtml(s.label)} — pending</p>`;
       }
       return acts.map(a => {
-        const ok = a.Decision === 'Approved';
-        return `<p style="margin:3px 0;color:${ok ? 'green' : '#b3261e'};">${ok ? '✅' : '❌'} ${escapeHtml(s.label)} — ${a.Decision} by ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${a.Comment ? ` — "${escapeHtml(a.Comment)}"` : ''}</p>`;
+        const icon = a.Decision === 'Approved' ? '✅' : a.Decision === 'SentBack' ? '🔁' : '❌';
+        const color = a.Decision === 'Approved' ? 'green' : a.Decision === 'SentBack' ? '#8a6d00' : '#b3261e';
+        return `<p style="margin:3px 0;color:${color};">${icon} ${escapeHtml(s.label)} — ${a.Decision} by ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${a.Comment ? ` — "${escapeHtml(a.Comment)}"` : ''}</p>`;
       }).join('');
     }).join('') : '<p class="muted" style="margin:3px 0;">No approval stages required for this request.</p>';
 
@@ -2171,9 +2217,10 @@ const FinanceModule = (function () {
     });
   }
 
-  async function renderMine(body, container) {
+  async function renderMine(body, container, filterMode) {
     const user = MVOA.getUser();
     const list = requestsCache.filter(r => r.RequestedBy === user.name)
+      .filter(r => !filterMode || (filterMode === 'spend' ? r.RequestType !== 'PaymentRequest' : r.RequestType === 'PaymentRequest'))
       .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
     if (!list.length) {
       body.innerHTML = `<p class="muted">You haven't submitted any requests yet.</p>`;
@@ -2351,6 +2398,7 @@ const FinanceModule = (function () {
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>
+          <button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>
           ${state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
           <button class="btn-secondary fin-queue-notes-toggle" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">💬 Ask a question</button>
         </div>
@@ -2362,6 +2410,12 @@ const FinanceModule = (function () {
 
     cardsEl.querySelectorAll('.fin-approve-btn').forEach(btn => {
       btn.addEventListener('click', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Approved', container));
+    });
+    cardsEl.querySelectorAll('.fin-sendback-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const comment = prompt('Reason for sending this back one level (required) — e.g. "need one more quotation", "please clarify the invoice date":');
+        if (comment && comment.trim()) decide(btn.dataset.requestId, btn.dataset.stage, 'SentBack', container, comment.trim());
+      });
     });
     cardsEl.querySelectorAll('.fin-reject-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -2473,6 +2527,85 @@ const FinanceModule = (function () {
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not save decision: ' + e.message;
     }
+  }
+
+  // Requester's action once a request lands back at 'Initiator' (see
+  // walkStageChain) — logs a Resubmitted event that moves the pointer
+  // forward to the first stage again. Doesn't attempt to support
+  // editing the request's fields/attachments in-place; the requester is
+  // expected to have already addressed the reason (visible via the
+  // Notes thread or the sent-back comment itself) before resubmitting.
+  async function resubmitRequest(requestId, container, errElSelector) {
+    const errEl = errElSelector ? document.querySelector(errElSelector) : null;
+    try {
+      const req = requestsCache.find(r => r.RequestID === requestId);
+      if (!req) return;
+      const user = MVOA.getUser();
+      const existingIds = [];
+      const approvalId = MVOA.nextId('APR', existingIds);
+      const row = {
+        ApprovalID: approvalId, RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
+        Stage: 'Initiator', Decision: 'Resubmitted', Comment: '', Timestamp: new Date().toISOString()
+      };
+      await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, row));
+      const now = new Date().toISOString();
+      const updated = Object.assign({}, req, { StageEnteredAt: now, StageOpenedAt: '' });
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Resubmitted', comment: '', statusAfter: 'PendingApproval' });
+      await loadAll(true);
+      render(container);
+    } catch (e) {
+      if (errEl) errEl.textContent = 'Could not resubmit: ' + e.message;
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SENT BACK — items currently sitting at 'Initiator' (see
+  // walkStageChain/decide's Send Back action), scoped to the current
+  // user's own requests, with a Resubmit action. filterMode ('spend' |
+  // 'payment') mirrors the Approval Queue split.
+  // ───────────────────────────────────────────────────────────
+  async function renderSentBack(body, container, filterMode) {
+    const user = MVOA.getUser();
+    body.innerHTML = `<p class="muted">Loading…</p>`;
+    let allApprovals = [];
+    try {
+      const rows = await MVOA.sheetsRead(TAB_APPROVALS);
+      allApprovals = rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+    } catch (e) {
+      body.innerHTML = `<p class="error-text">Could not load: ${escapeHtml(e.message)}</p>`;
+      return;
+    }
+    const candidates = requestsCache.filter(r => r.RequestedBy === user.name && r.Status === 'PendingApproval')
+      .filter(r => filterMode === 'spend' ? r.RequestType !== 'PaymentRequest' : r.RequestType === 'PaymentRequest');
+    const sentBack = candidates.map(r => {
+      const approvals = allApprovals.filter(a => a.RequestID === r.RequestID);
+      const state = computeAnyRequestState(r, approvals);
+      return { r, state };
+    }).filter(x => x.state.stage === 'Initiator');
+
+    if (!sentBack.length) {
+      body.innerHTML = `<p class="muted">Nothing sent back to you right now.</p>`;
+      return;
+    }
+    body.innerHTML = sentBack.map(({ r, state }) => `
+      <div class="mvoa-list-item" style="border:1px solid #b3261e;">
+        <div class="mvoa-row">
+          <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
+          <span class="mvoa-badge" style="color:#b3261e;background:#fbeaea;">🔁 Sent back</span>
+        </div>
+        ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
+        <p style="margin:4px 0;color:#b3261e;">${state.sentBackAt && state.sentBackAt.Comment ? `"${escapeHtml(state.sentBackAt.Comment)}"` : 'No reason given.'}</p>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${state.sentBackAt ? escapeHtml(state.sentBackAt.ApproverName) : 'unknown'}${state.sentBackAt ? ' · ' + formatDate(state.sentBackAt.Timestamp) : ''}</p>
+        <div style="margin-top:8px;">
+          <button class="btn-primary fin-resubmit-btn" data-request-id="${escapeHtml(r.RequestID)}" style="margin:0;">Resubmit</button>
+        </div>
+        <p class="error-text fin-resubmit-error" data-request-id="${escapeHtml(r.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+      </div>
+    `).join('');
+    body.querySelectorAll('.fin-resubmit-btn').forEach(btn => {
+      btn.addEventListener('click', () => resubmitRequest(btn.dataset.requestId, container, `.fin-resubmit-error[data-request-id="${btn.dataset.requestId}"]`));
+    });
   }
 
   // Final step of the Schedule D workflow — called by the Disbursement
