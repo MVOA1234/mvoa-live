@@ -389,6 +389,7 @@ const FinanceModule = (function () {
       { view: 'submit', label: '+ New Request' },
       { view: 'mine', label: 'My Requests' },
       { view: 'sentback', label: '🔁 Sent Back' },
+      { view: 'myapprovals', label: '✅ My Approvals' },
       { view: 'queue', label: 'Approval Queue' }
     ];
     if (topTab === 'payment') return [
@@ -459,8 +460,10 @@ const FinanceModule = (function () {
     }
 
     const subTabs = subTabsFor(currentTopTab);
+    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'budget' ? '📊 Budget' : '📄 Contracts';
     container.innerHTML = `
       ${headerHtml}
+      <p style="margin:0 0 8px;font-weight:600;color:var(--mvoa-blue);">${groupLabel}</p>
       <div class="ops-tabs">
         ${subTabs.map(t => `<button data-view="${t.view}" class="ops-tab-btn ${currentView===t.view?'active':''}">${t.label}${countSuffix(countFor(t.view))}</button>`).join('')}
         <button id="fin-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
@@ -490,7 +493,7 @@ const FinanceModule = (function () {
     const body = container.querySelector('#fin-view-body');
     if (currentView === 'submit') renderSubmitForm(body, container);
     else if (currentView === 'payreq') renderPaymentRequestForm(body, container);
-    else if (currentView === 'myapprovals') renderMyApprovals(body, container);
+    else if (currentView === 'myapprovals') renderMyApprovals(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'sentback') renderSentBack(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'queue') renderQueue(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'payments') renderPayments(body, container);
@@ -2204,7 +2207,7 @@ const FinanceModule = (function () {
   // Schedule D), newest first. Read-only history — same visual language
   // as My Requests, but from the approver's side of the transaction.
   // ───────────────────────────────────────────────────────────
-  async function renderMyApprovals(body, container) {
+  async function renderMyApprovals(body, container, filterMode) {
     const user = MVOA.getUser();
     body.innerHTML = `<p class="muted">Loading your approval history…</p>`;
     let allApprovals = [];
@@ -2216,6 +2219,12 @@ const FinanceModule = (function () {
       return;
     }
     const mine = allApprovals.filter(a => a.ApproverName === user.name)
+      .filter(a => {
+        if (!filterMode) return true;
+        const req = requestsCache.find(r => r.RequestID === a.RequestID);
+        if (!req) return true; // don't hide history just because the request record can't be found
+        return filterMode === 'spend' ? req.RequestType !== 'PaymentRequest' : req.RequestType === 'PaymentRequest';
+      })
       .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
     if (!mine.length) {
       body.innerHTML = `<p class="muted">You haven't approved or rejected anything yet.</p>`;
@@ -2234,7 +2243,9 @@ const FinanceModule = (function () {
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
           ${a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : ''}
           ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
+          ${req ? `<button class="fin-myapproval-notes-toggle btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">💬 Notes</button>` : ''}
           <div class="fin-myapproval-trail-body hidden" data-idx="${i}"></div>
+          <div class="fin-myapproval-notes-body hidden" data-idx="${i}"></div>
         </div>`;
     }).join('');
 
@@ -2255,6 +2266,21 @@ const FinanceModule = (function () {
     }
     body.querySelectorAll('.fin-myapproval-trail-toggle, .fin-myapproval-trail-toggle-btn').forEach(el => {
       el.addEventListener('click', () => toggleTrail(el.dataset.idx));
+    });
+    // Bug found in testing: My Approvals had no way to see or add Notes —
+    // an approver who acted on something earlier had no path back to a
+    // question someone left later (e.g. Treasurer asking Secretary
+    // something after Secretary's part was already done), since it's not
+    // in their Approval Queue anymore and they didn't request it either.
+    body.querySelectorAll('.fin-myapproval-notes-toggle').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = btn.dataset.idx;
+        const notesBody = body.querySelector(`.fin-myapproval-notes-body[data-idx="${idx}"]`);
+        const isHidden = notesBody.classList.contains('hidden');
+        if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
+        notesBody.classList.remove('hidden');
+        await renderNotesThread(notesBody, mine[idx].RequestID, btn, true);
+      });
     });
   }
 
