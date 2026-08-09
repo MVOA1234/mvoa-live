@@ -1178,7 +1178,7 @@ const FinanceModule = (function () {
       const vendorLabel = body.querySelector('#pr-vendor-label');
       if (!type) { previewEl.innerHTML = ''; labelEl.textContent = 'Attachments'; wccWrap.innerHTML = ''; if (vendorLabel) vendorLabel.style.display = ''; return; }
       const rule = paymentRuleFor(type);
-      const amount = Number(amtEl.value) || 0;
+      let amount = Number(amtEl.value) || 0;
       const isReplenishment = type === PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE;
 
       // Petty Cash Replenishment: no vendor (internal float top-up), and
@@ -1190,27 +1190,49 @@ const FinanceModule = (function () {
       if (isReplenishment) {
         const balance = computeFloatBalance();
         const inFlight = inFlightReplenishment();
+        const maxAllowed = Math.max(0, PETTY_CASH_FLOAT_TARGET - balance);
+        // Bug found in testing: the amount was only auto-filled once and
+        // stayed freely editable afterward, so someone could type in
+        // ₹17,000 against a ₹15,000 float — there's no legitimate reason
+        // for this to be anything other than exactly the shortfall, so
+        // it's now always recomputed and the field disabled rather than
+        // just suggested. Also enforces the real trigger condition —
+        // Replenishment isn't due at all while the float is still at or
+        // above the ₹2,000 operational minimum, not just "whatever amount
+        // someone feels like submitting."
         if (inFlight) {
+          amtEl.disabled = true;
           wccWrap.innerHTML = `<p class="error-text" style="margin:8px 0;">⚠️ A Replenishment request (${formatAmount(inFlight.Amount)}) is already in progress — please wait for it to be fully paid out before submitting another.</p>`;
+        } else if (balance >= PETTY_CASH_OPERATIONAL_MIN) {
+          amtEl.disabled = true;
+          amtEl.value = '';
+          wccWrap.innerHTML = `<p class="error-text" style="margin:8px 0;">⚠️ Float Balance is ${formatAmount(balance)} — still at or above the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum. Replenishment isn't due yet.</p>`;
         } else {
-          wccWrap.innerHTML = `<p class="muted" style="margin:8px 0;">Float Balance: <strong style="color:${balance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : 'green'};">${formatAmount(balance)}</strong> of ${formatAmount(PETTY_CASH_FLOAT_TARGET)}</p>`;
-          if (!amtEl.value) amtEl.value = Math.max(0, PETTY_CASH_FLOAT_TARGET - balance);
+          amtEl.disabled = true;
+          amtEl.value = maxAllowed;
+          amount = maxAllowed;
+          wccWrap.innerHTML = `
+            <p class="muted" style="margin:8px 0;">Float Balance: <strong style="color:#b3261e;">${formatAmount(balance)}</strong> of ${formatAmount(PETTY_CASH_FLOAT_TARGET)}</p>
+            <p class="muted" style="margin:8px 0;">Amount is fixed at the shortfall needed to restore the float to ${formatAmount(PETTY_CASH_FLOAT_TARGET)} — not editable.</p>`;
         }
-      } else if (isWccPaymentType(type)) {
-        // R&M/CAPEX only: goods-procurement toggle changes which documents
-        // apply (see effectiveDocsForPayment/Governance Note 5).
-        wccWrap.innerHTML = `
-          <label style="display:flex;align-items:center;gap:8px;margin:8px 0;">
-            <input type="checkbox" id="pr-goods-procurement" ${paymentIsGoodsProcurement ? 'checked' : ''}>
-            This is procurement of goods (not works/services), verified via Goods Receipt / Material Receipt (FIN-F-005)
-          </label>`;
-        wccWrap.querySelector('#pr-goods-procurement').addEventListener('change', (e) => {
-          paymentIsGoodsProcurement = e.target.checked;
-          refreshPreview();
-        });
       } else {
-        wccWrap.innerHTML = '';
-        paymentIsGoodsProcurement = false;
+        amtEl.disabled = false;
+        if (isWccPaymentType(type)) {
+          // R&M/CAPEX only: goods-procurement toggle changes which documents
+          // apply (see effectiveDocsForPayment/Governance Note 5).
+          wccWrap.innerHTML = `
+            <label style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+              <input type="checkbox" id="pr-goods-procurement" ${paymentIsGoodsProcurement ? 'checked' : ''}>
+              This is procurement of goods (not works/services), verified via Goods Receipt / Material Receipt (FIN-F-005)
+            </label>`;
+          wccWrap.querySelector('#pr-goods-procurement').addEventListener('change', (e) => {
+            paymentIsGoodsProcurement = e.target.checked;
+            refreshPreview();
+          });
+        } else {
+          wccWrap.innerHTML = '';
+          paymentIsGoodsProcurement = false;
+        }
       }
       const docs = effectiveDocsForPayment(type, amount, paymentIsGoodsProcurement);
       previewEl.innerHTML = `
@@ -1274,9 +1296,19 @@ const FinanceModule = (function () {
     const isReplenishment = paymentType === PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE;
     if (!vendor && !isReplenishment) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
     if (isReplenishment) {
+      const balance = computeFloatBalance();
+      const maxAllowed = Math.max(0, PETTY_CASH_FLOAT_TARGET - balance);
       const inFlight = inFlightReplenishment();
       if (inFlight) {
         errEl.textContent = `A Replenishment request (${formatAmount(inFlight.Amount)}, submitted ${formatDate(inFlight.RequestedDate)}) is already in progress — please wait for it to be fully paid out before submitting another.`;
+        return;
+      }
+      if (balance >= PETTY_CASH_OPERATIONAL_MIN) {
+        errEl.textContent = `Float Balance is ${formatAmount(balance)} — still at or above the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum. Replenishment isn't due yet.`;
+        return;
+      }
+      if (amount !== maxAllowed) {
+        errEl.textContent = `Replenishment amount must restore the float to exactly ${formatAmount(PETTY_CASH_FLOAT_TARGET)} — that's ${formatAmount(maxAllowed)}, not ${formatAmount(amount)}.`;
         return;
       }
     }
