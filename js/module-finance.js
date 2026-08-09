@@ -798,8 +798,20 @@ const FinanceModule = (function () {
   // what stage is next, who may act on it, and whether the whole
   // request is now fully approved or rejected.
   // ───────────────────────────────────────────────────────────
-  async function loadApprovalsFor(requestId) {
-    const rows = await MVOA.sheetsRead(TAB_APPROVALS);
+  // Bug found in testing: this didn't accept/pass a `force` param, unlike
+  // loadAll() (fixed earlier this session for the exact same reason) — a
+  // read immediately after appending a fresh Approval row (right below,
+  // in decide()) could return a stale cached snapshot missing that very
+  // row, so computeRequestState() would wrongly think the stage wasn't
+  // done yet and Status never flipped to Approved even though the
+  // approval genuinely went through. This is why two Petty Cash
+  // Replenishments stayed stuck at PendingApproval despite their trail
+  // correctly showing both stages Approved — a later, unrelated read (My
+  // Requests, minutes afterward) no longer hit the stale window and
+  // showed the truth, which is what made this look like a display bug
+  // rather than a data one.
+  async function loadApprovalsFor(requestId, force) {
+    const rows = await MVOA.sheetsRead(TAB_APPROVALS, force);
     return rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2))
       .filter(a => a.RequestID === requestId);
   }
@@ -2238,7 +2250,7 @@ const FinanceModule = (function () {
     let justApprovedForContractPrompt = null;
     try {
       const req = requestsCache.find(r => r.RequestID === requestId);
-      const priorApprovals = await loadApprovalsFor(requestId); // BEFORE this decision is appended, for stage comparison below
+      const priorApprovals = await loadApprovalsFor(requestId, true); // BEFORE this decision is appended, for stage comparison below
       const priorState = computeAnyRequestState(req, priorApprovals);
 
       const existingIds = [];
@@ -2256,7 +2268,7 @@ const FinanceModule = (function () {
         await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
         resultingStatus = 'Rejected';
       } else {
-        const freshApprovals = await loadApprovalsFor(requestId);
+        const freshApprovals = await loadApprovalsFor(requestId, true);
         const state = computeAnyRequestState(req, freshApprovals);
         if (state.fullyApproved) {
           // Now entering the payment-release chain — DisbursementStage starts
