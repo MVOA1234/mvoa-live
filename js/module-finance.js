@@ -362,6 +362,24 @@ const FinanceModule = (function () {
     return { spend, payment };
   }
 
+  // Recomputes the badge and patches just its DOM text — deliberately
+  // NOT a full render(container), which would blow away whatever notes
+  // panel the person just opened to trigger this in the first place.
+  async function refreshMyApprovalsBadge(container) {
+    try {
+      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(true);
+    } catch (e) {
+      return; // leave the badge as-is if this fails — best-effort
+    }
+    if (currentTopTab !== 'spend' && currentTopTab !== 'payment') return;
+    const btn = container.querySelector('.ops-tab-btn[data-view="myapprovals"]');
+    if (!btn) return;
+    const t = subTabsFor(currentTopTab).find(x => x.view === 'myapprovals');
+    if (!t) return;
+    const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
+    btn.innerHTML = `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`;
+  }
+
   // One bulk Approvals read (instead of one read per pending request) to
   // work out which PendingApproval requests the CURRENT user can act on
   // right now — same eligibility rules as the Approval Queue view itself.
@@ -2368,7 +2386,7 @@ const FinanceModule = (function () {
         const isHidden = notesBody.classList.contains('hidden');
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
         notesBody.classList.remove('hidden');
-        await renderNotesThread(notesBody, mine[idx].RequestID, btn, true);
+        await renderNotesThread(notesBody, mine[idx].RequestID, btn, true, container);
       });
     });
   }
@@ -2453,12 +2471,12 @@ const FinanceModule = (function () {
         const isHidden = notesBody.classList.contains('hidden');
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
         notesBody.classList.remove('hidden');
-        await renderNotesThread(notesBody, id, btn, true);
+        await renderNotesThread(notesBody, id, btn, true, container);
       });
     });
   }
 
-  async function renderNotesThread(notesBody, requestId, toggleBtn, canWrite, markOpened = true) {
+  async function renderNotesThread(notesBody, requestId, toggleBtn, canWrite, container, markOpened = true) {
     notesBody.innerHTML = `<p class="muted" style="font-size:0.8rem;padding:8px 0;">Loading notes…</p>`;
     let notes;
     try {
@@ -2472,7 +2490,16 @@ const FinanceModule = (function () {
     // on the recursive refresh right after posting a note (that call
     // passes markOpened=false), or the poster's own view would
     // immediately clear the flag before anyone else ever saw it.
-    if (markOpened && notes.length) await markNotesOpened(requestId);
+    if (markOpened && notes.length) {
+      await markNotesOpened(requestId);
+      // Bug found in testing: the "My Approvals" nav badge only gets
+      // recomputed inside loadAll() — opening a notes thread never
+      // triggered that, so the badge count stayed stuck even after
+      // every flagged item had been viewed. Patches just the badge's
+      // DOM text directly (not a full render()), so it doesn't disrupt
+      // the notes panel that was just opened.
+      if (container) await refreshMyApprovalsBadge(container);
+    }
     if (toggleBtn) toggleBtn.textContent = `💬 Notes (${notes.length})`;
     const notesHtml = notes.length
       ? notes.map(n => `
@@ -2515,7 +2542,7 @@ const FinanceModule = (function () {
           await MVOA.sheetsAppend(TAB_NOTES, objToRow(NOTE_COLS, row));
           await markNotesUnread(requestId);
           textarea.value = '';
-          await renderNotesThread(notesBody, requestId, toggleBtn, canWrite, false);
+          await renderNotesThread(notesBody, requestId, toggleBtn, canWrite, container, false);
         } catch (e) {
           errEl.textContent = 'Could not save note: ' + escapeHtml(e.message);
           submitBtn.disabled = false; submitBtn.textContent = 'Add Note';
@@ -2607,7 +2634,7 @@ const FinanceModule = (function () {
         const isHidden = notesBody.classList.contains('hidden');
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Ask a question'; return; }
         notesBody.classList.remove('hidden');
-        await renderNotesThread(notesBody, id, null, true);
+        await renderNotesThread(notesBody, id, btn, true, container);
       });
     });
   }
@@ -3052,7 +3079,7 @@ const FinanceModule = (function () {
           const isHidden = notesBody.classList.contains('hidden');
           if (!isHidden) { notesBody.classList.add('hidden'); return; }
           notesBody.classList.remove('hidden');
-          await renderNotesThread(notesBody, id, btn, true);
+          await renderNotesThread(notesBody, id, btn, true, container);
         });
       });
     }
