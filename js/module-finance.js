@@ -202,6 +202,7 @@ const FinanceModule = (function () {
   let contractsCache = [];
   let paymentRulesCache = [];
   let queueCardsCache = []; // PendingApproval requests THIS user can act on right now — see computeQueueCards()
+  let myApprovalsNewNoteCounts = { spend: 0, payment: 0 }; // see computeMyApprovalsNewNoteCounts()
   let currentTopTab = 'home'; // 'home' | 'spend' | 'payment' | 'budget' | 'contracts'
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
@@ -325,7 +326,40 @@ const FinanceModule = (function () {
     } catch (e) {
       queueCardsCache = []; // fail closed on the count rather than showing a wrong number
     }
+    // Live count for the "✅ My Approvals" nav button itself — how many
+    // requests this user previously approved/rejected now have an
+    // unread note (see NotesOpenedAt/hasUnreadNote). Safe to show as a
+    // real number here (unlike Sent Back, deliberately left uncounted
+    // earlier) since it's now backed by genuine shared tracking, not a
+    // heuristic — same underlying data the tab itself displays, so
+    // count and content can't disagree.
+    try {
+      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(force);
+    } catch (e) {
+      myApprovalsNewNoteCounts = { spend: 0, payment: 0 };
+    }
     updateBadge();
+  }
+
+  async function computeMyApprovalsNewNoteCounts(force) {
+    const user = MVOA.getUser();
+    const [approvalRows, noteRows] = await Promise.all([
+      MVOA.sheetsRead(TAB_APPROVALS, force),
+      MVOA.sheetsRead(TAB_NOTES, force)
+    ]);
+    const allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+    const allNotes = noteRows.slice(1).map((r, i) => rowToObj(NOTE_COLS, r, i + 2));
+    const myRequestIds = new Set(allApprovals.filter(a => a.ApproverName === user.name).map(a => a.RequestID));
+    let spend = 0, payment = 0;
+    myRequestIds.forEach(id => {
+      const req = requestsCache.find(r => r.RequestID === id);
+      if (!req) return;
+      const noteCount = allNotes.filter(n => n.RequestID === id).length;
+      if (hasUnreadNote(req, noteCount)) {
+        if (req.RequestType === 'PaymentRequest') payment++; else spend++;
+      }
+    });
+    return { spend, payment };
   }
 
   // One bulk Approvals read (instead of one read per pending request) to
@@ -469,11 +503,15 @@ const FinanceModule = (function () {
 
     const subTabs = subTabsFor(currentTopTab);
     const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'budget' ? '📊 Budget' : '📄 Contracts';
+    const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
+    const tabLabelHtml = (t) => t.view === 'myapprovals'
+      ? `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`
+      : `${t.label}${countSuffix(countFor(t.view))}`;
     container.innerHTML = `
       ${headerHtml}
       <p style="margin:0 0 8px;font-weight:600;color:var(--mvoa-blue);">${groupLabel}</p>
       <div class="ops-tabs">
-        ${subTabs.map(t => `<button data-view="${t.view}" class="ops-tab-btn ${currentView===t.view?'active':''}">${t.label}${countSuffix(countFor(t.view))}</button>`).join('')}
+        ${subTabs.map(t => `<button data-view="${t.view}" class="ops-tab-btn ${currentView===t.view?'active':''}">${tabLabelHtml(t)}</button>`).join('')}
         <button id="fin-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
