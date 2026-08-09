@@ -388,7 +388,6 @@ const FinanceModule = (function () {
     if (topTab === 'spend') return [
       { view: 'submit', label: '+ New Request' },
       { view: 'mine', label: 'My Requests' },
-      { view: 'myapprovals', label: '✅ My Approvals' },
       { view: 'queue', label: 'Approval Queue' }
     ];
     if (topTab === 'payment') return [
