@@ -1395,7 +1395,12 @@ const FinanceModule = (function () {
       }
     }
 
-    const initialStatus = paymentHasNoApprovalStages(paymentType) ? 'Approved' : 'PendingApproval';
+    // If FM is the only thing this PaymentType requires, auto-approving
+    // it above (see below) means there's genuinely nothing left pending
+    // — settle straight to Approved. No current Payment Type is FM-only,
+    // but this keeps the logic correct if one ever is.
+    const onlyFmRequired = rule.FMRequired === 'Yes' && ['OpsHeadRequired', 'SecretaryRequired', 'TreasurerRequired', 'PresidentRequired'].every(c => rule[c] !== 'Yes');
+    const initialStatus = (paymentHasNoApprovalStages(paymentType) || onlyFmRequired) ? 'Approved' : 'PendingApproval';
     const row = {
       RequestID: requestId, RuleID: '', Category: paymentType, BudgetStatus: '',
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
@@ -1410,6 +1415,25 @@ const FinanceModule = (function () {
     try {
       await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Payment Request Submitted', comment: `${paymentType} — ${formatAmount(amount)}`, statusAfter: initialStatus });
+      // FM Verification (Receipt/Service Verification) isn't a separate
+      // approval-queue hop requiring someone to log in and click Approve
+      // — per Governance Note 3, it's satisfied by the photographic/
+      // document evidence itself. Bug found in testing: this was
+      // wrongly modeled as its own stage needing a distinct FM-role
+      // click, so a request could sit at "Awaiting FM Verification"
+      // forever even with the attachment already provided (even when
+      // the submitter WAS the FM). Auto-approving it here — crediting
+      // whoever submitted, since providing the evidence IS the
+      // verification act — means the chain moves straight to Secretary
+      // next, while still leaving a real entry in the trail showing
+      // who verified and when.
+      if (rule.FMRequired === 'Yes') {
+        const fmRow = {
+          ApprovalID: MVOA.nextId('APR', []), RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
+          Stage: 'FM', Decision: 'Approved', Comment: 'Verified via attachment at submission', Timestamp: now
+        };
+        await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, fmRow));
+      }
     } catch (e) {
       errEl.textContent = 'Could not save request: ' + e.message;
       submitBtn.disabled = false; submitBtn.textContent = 'Submit Payment Request';
