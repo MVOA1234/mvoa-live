@@ -150,7 +150,15 @@ const FinanceModule = (function () {
     // Administrative/Financial/EC/AGM. Category holds the Schedule D
     // Payment Type string directly (e.g. "AMC Payments") so every
     // existing Category-based display/report just works unchanged.
-    'ContractID'];
+    'ContractID',
+    // Shared (not per-user) tracking for the Notes thread's "new" flag —
+    // same philosophy as StageOpenedAt but kept as its own field since
+    // "a new note was added" and "this moved to a new approval stage"
+    // are genuinely different kinds of newness and shouldn't clear each
+    // other. Blank = an unread note exists (once at least one note has
+    // been added); reset to blank every time a note is appended; set to
+    // now the first time anyone opens the Notes thread after that.
+    'NotesOpenedAt'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -692,13 +700,13 @@ const FinanceModule = (function () {
   // DoFA matrix rather than hardcoded thresholds.
   // ───────────────────────────────────────────────────────────
   function selectableCategories() {
-    return [...new Set(rulesCache.filter(r => r.RuleID !== 'R03').map(r => r.ExpenseCategory))];
+    return [...new Set(rulesCache.filter(r => r.RuleID !== 'R03').map(r => r.ExpenseCategory))].sort((a, b) => a.localeCompare(b));
   }
 
   function budgetStatusOptionsFor(category) {
     const opts = [...new Set(rulesCache.filter(r => r.ExpenseCategory === category && r.RuleID !== 'R03').map(r => r.BudgetStatus))];
     const real = opts.filter(o => o === 'Budgeted' || o === 'Unbudgeted');
-    return real.length > 1 ? real : null; // null = no selector needed, rule doesn't branch on budget status
+    return real.length > 1 ? real.sort((a, b) => a.localeCompare(b)) : null; // null = no selector needed, rule doesn't branch on budget status
   }
 
   function resolveRule(category, budgetStatus, amount, pettyCashType) {
@@ -1111,6 +1119,37 @@ const FinanceModule = (function () {
       // again on next full refresh, which is a safe direction to fail in.
     }
   }
+  // Same shared-state philosophy as StageOpenedAt, kept as its own field
+  // (see REQUEST_COLS comment) — the Notes thread's "new" flag. Marked
+  // opened once anyone actually views the thread; reset to unread every
+  // time a new note is appended (see the Add Note handler below).
+  async function markNotesOpened(requestId) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req || req.NotesOpenedAt) return;
+    const now = new Date().toISOString();
+    req.NotesOpenedAt = now;
+    try {
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, req));
+    } catch (e) { /* best-effort, same as markStageOpened */ }
+  }
+  async function markNotesUnread(requestId) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    req.NotesOpenedAt = '';
+    try {
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, req));
+    } catch (e) { /* best-effort */ }
+  }
+  // Shared across every card that shows a Notes button (My Requests,
+  // Approval Queue, My Approvals) so the "new note" flag looks and
+  // behaves identically everywhere.
+  function hasUnreadNote(request, noteCount) {
+    return noteCount > 0 && !request.NotesOpenedAt;
+  }
+  function notesButtonHtml(request, noteCount, btnClass, dataAttrs) {
+    const flagged = hasUnreadNote(request, noteCount);
+    return `<button class="${btnClass} btn-secondary" ${dataAttrs} style="font-size:0.8rem;padding:4px 10px;${flagged ? 'border-color:#b3261e;color:#b3261e;font-weight:600;' : ''}">${flagged ? '🆕' : '💬'} Notes${noteCount ? ` (${noteCount})` : ''}</button>`;
+  }
   // A condensed, click-to-open card for a New item — shows just enough to
   // identify it plus the 🆕 badge; clicking it marks it Opened (shared,
   // permanent) and re-renders the tab so it now shows in full with its
@@ -1152,7 +1191,7 @@ const FinanceModule = (function () {
       body.innerHTML = `<p class="muted">Payment Requests aren't set up yet — add rows to the <strong>FinancePaymentRules</strong> sheet (one per Schedule D Payment Type) to enable this.</p>`;
       return;
     }
-    const paymentTypes = [...new Set(paymentRulesCache.map(r => r.PaymentType))];
+    const paymentTypes = [...new Set(paymentRulesCache.map(r => r.PaymentType))].sort((a, b) => a.localeCompare(b));
     body.innerHTML = `
       <div class="card" style="max-width:560px;margin:0;">
         <label>Payment Type
@@ -1200,7 +1239,7 @@ const FinanceModule = (function () {
         <label>Link to an existing Contract (optional)
           <select id="pr-contract">
             <option value="">— None / enter vendor manually —</option>
-            ${contractsCache.map(c => `<option value="${escapeHtml(c.ContractID)}">${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)}${c.EndDate ? ' (valid to ' + escapeHtml(c.EndDate) + ')' : ' (open-ended)'}</option>`).join('')}
+            ${contractsCache.slice().sort((a, b) => (a.Vendor || '').localeCompare(b.Vendor || '')).map(c => `<option value="${escapeHtml(c.ContractID)}">${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)}${c.EndDate ? ' (valid to ' + escapeHtml(c.EndDate) + ')' : ' (open-ended)'}</option>`).join('')}
           </select>
         </label>
         <div id="pr-contract-status"></div>`;
@@ -1753,8 +1792,8 @@ const FinanceModule = (function () {
               <option value="Preventive Maintenance">Preventive Maintenance</option>
               <option value="Safety">Safety</option>
               <option value="Statutory Compliance">Statutory Compliance</option>
-              <option value="Wear and Tear">Wear and Tear</option>
               <option value="Upgrade">Upgrade</option>
+              <option value="Wear and Tear">Wear and Tear</option>
               <option value="Other">Other (specify below)</option>
             </select>
           </label>
@@ -2211,9 +2250,14 @@ const FinanceModule = (function () {
     const user = MVOA.getUser();
     body.innerHTML = `<p class="muted">Loading your approval history…</p>`;
     let allApprovals = [];
+    let allNotes = [];
     try {
-      const rows = await MVOA.sheetsRead(TAB_APPROVALS);
-      allApprovals = rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+      const [approvalRows, noteRows] = await Promise.all([
+        MVOA.sheetsRead(TAB_APPROVALS),
+        MVOA.sheetsRead(TAB_NOTES)
+      ]);
+      allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+      allNotes = noteRows.slice(1).map((r, i) => rowToObj(NOTE_COLS, r, i + 2));
     } catch (e) {
       body.innerHTML = `<p class="error-text">Could not load approval history: ${escapeHtml(e.message)}</p>`;
       return;
@@ -2233,6 +2277,12 @@ const FinanceModule = (function () {
     body.innerHTML = mine.map((a, i) => {
       const req = requestsCache.find(r => r.RequestID === a.RequestID);
       const ok = a.Decision === 'Approved';
+      // Now uses the same shared NotesOpenedAt tracking as My Requests
+      // and Approval Queue (see markNotesOpened/markNotesUnread) — was
+      // previously a timestamp-comparison proxy that could never clear
+      // once actually viewed. This is the real thing: clears the moment
+      // anyone opens the thread, resets the moment a new note lands.
+      const noteCount = allNotes.filter(n => n.RequestID === a.RequestID).length;
       return `
         <div class="mvoa-list-item">
           <div class="mvoa-row fin-myapproval-trail-toggle" data-idx="${i}" style="cursor:pointer;">
@@ -2242,8 +2292,9 @@ const FinanceModule = (function () {
           ${req && req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
           ${a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : ''}
+          ${req && hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
-          ${req ? `<button class="fin-myapproval-notes-toggle btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">💬 Notes</button>` : ''}
+          ${req ? notesButtonHtml(req, noteCount, 'fin-myapproval-notes-toggle', `data-idx="${i}" style="margin-top:6px;"`) : ''}
           <div class="fin-myapproval-trail-body hidden" data-idx="${i}"></div>
           <div class="fin-myapproval-notes-body hidden" data-idx="${i}"></div>
         </div>`;
@@ -2295,14 +2346,20 @@ const FinanceModule = (function () {
     }
     body.innerHTML = `<p class="muted">Loading current status…</p>`;
     let allApprovals = [];
+    let allNotes = [];
     try {
-      const rows = await MVOA.sheetsRead(TAB_APPROVALS);
-      allApprovals = rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+      const [approvalRows, noteRows] = await Promise.all([
+        MVOA.sheetsRead(TAB_APPROVALS),
+        MVOA.sheetsRead(TAB_NOTES)
+      ]);
+      allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+      allNotes = noteRows.slice(1).map((r, i) => rowToObj(NOTE_COLS, r, i + 2));
     } catch (e) { /* fall back to coarse status below if this fails */ }
 
     body.innerHTML = list.map(r => {
       if (isItemNew(r)) return newItemCardHtml(r, r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : '');
       const approvals = allApprovals.filter(a => a.RequestID === r.RequestID);
+      const noteCount = allNotes.filter(n => n.RequestID === r.RequestID).length;
       let badge;
       try {
         badge = (allApprovals.length || r.Status !== 'PendingApproval') ? stageBadgeHtml(r, approvals) : displayStatus(r);
@@ -2323,9 +2380,10 @@ const FinanceModule = (function () {
         ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted ${formatDate(r.RequestedDate)}</p>
         ${r.Status === 'Rejected' ? rejectionDetailHtml(r, approvals) : ''}
+        ${hasUnreadNote(r, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="fin-mine-trail-toggle-btn btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">🔍 View Details</button>
-          <button class="fin-mine-notes-toggle btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">💬 Notes</button>
+          ${notesButtonHtml(r, noteCount, 'fin-mine-notes-toggle', `data-request-id="${escapeHtml(r.RequestID)}"`)}
         </div>
         <div class="fin-mine-trail-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
         <div class="fin-mine-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
@@ -2362,7 +2420,7 @@ const FinanceModule = (function () {
     });
   }
 
-  async function renderNotesThread(notesBody, requestId, toggleBtn, canWrite) {
+  async function renderNotesThread(notesBody, requestId, toggleBtn, canWrite, markOpened = true) {
     notesBody.innerHTML = `<p class="muted" style="font-size:0.8rem;padding:8px 0;">Loading notes…</p>`;
     let notes;
     try {
@@ -2372,6 +2430,11 @@ const FinanceModule = (function () {
       notesBody.innerHTML = `<p class="error-text">Could not load notes: ${escapeHtml(e.message)}</p>`;
       return;
     }
+    // Only mark opened on a genuine "someone viewed this" moment — NOT
+    // on the recursive refresh right after posting a note (that call
+    // passes markOpened=false), or the poster's own view would
+    // immediately clear the flag before anyone else ever saw it.
+    if (markOpened && notes.length) await markNotesOpened(requestId);
     if (toggleBtn) toggleBtn.textContent = `💬 Notes (${notes.length})`;
     const notesHtml = notes.length
       ? notes.map(n => `
@@ -2412,8 +2475,9 @@ const FinanceModule = (function () {
           const noteId = MVOA.nextId('NOTE', existingIds);
           const row = { NoteID: noteId, RequestID: requestId, Author: user.name, Timestamp: new Date().toISOString(), Note: text };
           await MVOA.sheetsAppend(TAB_NOTES, objToRow(NOTE_COLS, row));
+          await markNotesUnread(requestId);
           textarea.value = '';
-          await renderNotesThread(notesBody, requestId, toggleBtn, canWrite);
+          await renderNotesThread(notesBody, requestId, toggleBtn, canWrite, false);
         } catch (e) {
           errEl.textContent = 'Could not save note: ' + escapeHtml(e.message);
           submitBtn.disabled = false; submitBtn.textContent = 'Add Note';
@@ -2442,6 +2506,12 @@ const FinanceModule = (function () {
       <p class="muted" style="margin-top:16px;">Once a request is fully approved, its actual payment release (Expense Sheet entry → Treasurer review → Disbursement Officer) happens in the <strong>₹ Payments</strong> tab, not here.</p>
     `;
 
+    let allNotes = [];
+    try {
+      const noteRows = await MVOA.sheetsRead(TAB_NOTES);
+      allNotes = noteRows.slice(1).map((r, i) => rowToObj(NOTE_COLS, r, i + 2));
+    } catch (e) { /* notes flag just won't show if this fails, non-critical */ }
+
     const cardsEl = body.querySelector('#fin-queue-cards');
     const newCards = cards.filter(c => isItemNew(c.req));
     const openCards = cards.filter(c => !isItemNew(c.req));
@@ -2451,6 +2521,7 @@ const FinanceModule = (function () {
     wireNewItemCards(cardsEl, () => render(container));
 
     openCards.forEach(({ req, state }) => {
+      const noteCount = allNotes.filter(n => n.RequestID === req.RequestID).length;
       const div = document.createElement('div');
       div.className = 'mvoa-list-item';
       div.innerHTML = `
@@ -2463,11 +2534,12 @@ const FinanceModule = (function () {
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
         ${attachmentLinksHtml(req)}
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
+        ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>
           <button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>
           ${state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
-          <button class="btn-secondary fin-queue-notes-toggle" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">💬 Ask a question</button>
+          ${notesButtonHtml(req, noteCount, 'fin-queue-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}"`)}
         </div>
         <p class="error-text fin-queue-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
         <div class="fin-queue-notes-body hidden" data-request-id="${escapeHtml(req.RequestID)}"></div>
@@ -2669,6 +2741,18 @@ const FinanceModule = (function () {
       body.innerHTML = `<p class="muted">Nothing sent back to you right now.</p>`;
       return;
     }
+    // Bug/gap found in testing: newly-sent-back items weren't marked
+    // "New" at all — StageEnteredAt/StageOpenedAt already get reset
+    // correctly on Send Back (see decide()), same shared mechanism used
+    // everywhere else in this app, but this tab just wasn't USING it.
+    // Now split the same way Approval Queue/Payments already do: a
+    // condensed "🆕 New — tap to open" card until opened, then the full
+    // edit-and-resubmit form.
+    const newOnes = sentBack.filter(x => isItemNew(x.r));
+    const openOnes = sentBack.filter(x => !isItemNew(x.r));
+    const newCardsHtml = newOnes.map(({ r, state }) => newItemCardHtml(r,
+      `<p class="muted" style="margin:4px 0;">${state.sentBackAt && state.sentBackAt.Comment ? `"${escapeHtml(state.sentBackAt.Comment)}"` : 'No reason given.'}</p>`
+    )).join('');
     // Bug/gap found in testing: the previous version was a bare
     // "Resubmit" button with no way to actually act on the reason given
     // — the requester could see "need one more quotation" but had no
@@ -2678,7 +2762,7 @@ const FinanceModule = (function () {
     // attachment or changing Amount/Vendor — editing those still needs
     // the Notes thread; this covers the two most common corrections
     // (clarify the description, attach one more document).
-    body.innerHTML = sentBack.map(({ r, state }) => {
+    const openCardsHtml = openOnes.map(({ r, state }) => {
       const existingAttachments = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean);
       return `
       <div class="mvoa-list-item" style="border:1px solid #b3261e;">
@@ -2704,10 +2788,12 @@ const FinanceModule = (function () {
         <p class="error-text fin-resubmit-error" data-request-id="${escapeHtml(r.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
       </div>`;
     }).join('');
+    body.innerHTML = newCardsHtml + openCardsHtml;
+    wireNewItemCards(body, () => render(container));
     // One pending-new-attachments array per sent-back card, keyed by
     // RequestID, so multiple cards on screen at once don't collide.
     sentBackPendingAttachments = {};
-    sentBack.forEach(({ r }) => {
+    openOnes.forEach(({ r }) => {
       const existingCount = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean).length;
       if (existingCount >= 3) return;
       sentBackPendingAttachments[r.RequestID] = [];
@@ -2974,8 +3060,8 @@ const FinanceModule = (function () {
           <div style="margin-top:8px;">
             <select class="fin-bank-select" data-request-id="${escapeHtml(req.RequestID)}" style="width:100%;margin-bottom:6px;">
               <option value="">— Select Bank —</option>
-              <option value="IOB">IOB</option>
               <option value="HDFC">HDFC</option>
+              <option value="IOB">IOB</option>
             </select>
             <input type="text" class="fin-ud-number" data-request-id="${escapeHtml(req.RequestID)}" placeholder="UD Number / Cheque / UTR" style="width:100%;margin-bottom:6px;">
             <button class="btn-primary fin-disburse-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Release Payment</button>
