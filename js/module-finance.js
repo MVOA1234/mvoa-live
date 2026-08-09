@@ -163,7 +163,10 @@ const FinanceModule = (function () {
   // drives.
   const EXPENSE_COLS = ['RequestID','SlNo','Vendor','InvoiceDate','InvoiceNumber',
     'InvoicePeriodPurpose','Period','GrossAmount','GST','TDSRate','TDS','LessAdd','NetAmount',
-    'NelsonCheck','LakshmanCheck','ApprovedBy','PassedBy','UDNumber','Date'];
+    'NelsonCheck','LakshmanCheck','ApprovedBy','PassedBy','UDNumber','Date',
+    // Added after the fact, appended at the end — which bank account the
+    // Disbursement Officer paid from, selected at the moment of release.
+    'Bank'];
 
   // FinanceBudgets — one row per Category × Financial Year, the source of
   // truth for "Total Budget" (this isn't derivable from anything else —
@@ -387,10 +390,15 @@ const FinanceModule = (function () {
             <p style="margin:2px 0;">${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)} — <strong>${c.daysLeft < 0 ? `Expired ${-c.daysLeft} day(s) ago` : `Due in ${c.daysLeft} day(s)`}</strong></p>
           `).join('')}
         </div>` : ''}
+      <div class="mvoa-row" style="margin-bottom:6px;">
+        <span></span>
+        <span class="muted" style="font-size:0.85rem;">Logged in as: <strong>${escapeHtml(user.name)}</strong>${user.role ? ` (${escapeHtml(user.role)})` : ''}</span>
+      </div>
       <div class="ops-tabs">
         <button data-view="submit" class="ops-tab-btn ${currentView==='submit'?'active':''}">+ New Request</button>
         <button data-view="payreq" class="ops-tab-btn ${currentView==='payreq'?'active':''}">💵 New Payment Request</button>
         <button data-view="mine" class="ops-tab-btn ${currentView==='mine'?'active':''}">My Requests${countSuffix(mineCounts)}</button>
+        <button data-view="myapprovals" class="ops-tab-btn ${currentView==='myapprovals'?'active':''}">✅ My Approvals</button>
         <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue${countSuffix(queueCounts)}</button>
         <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments${countSuffix(paymentsCounts)}</button>
         <button data-view="budget" class="ops-tab-btn ${currentView==='budget'?'active':''}">📊 Budget</button>
@@ -423,6 +431,7 @@ const FinanceModule = (function () {
     const body = container.querySelector('#fin-view-body');
     if (currentView === 'submit') renderSubmitForm(body, container);
     else if (currentView === 'payreq') renderPaymentRequestForm(body, container);
+    else if (currentView === 'myapprovals') renderMyApprovals(body, container);
     else if (currentView === 'queue') renderQueue(body, container);
     else if (currentView === 'payments') renderPayments(body, container);
     else if (currentView === 'budget') renderBudgetStatus(body, container);
@@ -1964,6 +1973,46 @@ const FinanceModule = (function () {
     return statusBadge(`Pending approval${sinceText(request)}`, 'pending');
   }
 
+  // ───────────────────────────────────────────────────────────
+  // MY APPROVALS — every decision THIS user has made (Approved or
+  // Rejected), across every stage type (Administrative/Financial/EC/AGM
+  // for Schedule A/B/C, FM/OpsHead/Secretary/Treasurer/President for
+  // Schedule D), newest first. Read-only history — same visual language
+  // as My Requests, but from the approver's side of the transaction.
+  // ───────────────────────────────────────────────────────────
+  async function renderMyApprovals(body, container) {
+    const user = MVOA.getUser();
+    body.innerHTML = `<p class="muted">Loading your approval history…</p>`;
+    let allApprovals = [];
+    try {
+      const rows = await MVOA.sheetsRead(TAB_APPROVALS);
+      allApprovals = rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+    } catch (e) {
+      body.innerHTML = `<p class="error-text">Could not load approval history: ${escapeHtml(e.message)}</p>`;
+      return;
+    }
+    const mine = allApprovals.filter(a => a.ApproverName === user.name)
+      .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
+    if (!mine.length) {
+      body.innerHTML = `<p class="muted">You haven't approved or rejected anything yet.</p>`;
+      return;
+    }
+    body.innerHTML = mine.map(a => {
+      const req = requestsCache.find(r => r.RequestID === a.RequestID);
+      const ok = a.Decision === 'Approved';
+      return `
+        <div class="mvoa-list-item">
+          <div class="mvoa-row">
+            <strong>${req ? escapeHtml(req.Category) + ' — ' + formatAmount(req.Amount) : escapeHtml(a.RequestID)}</strong>
+            <span class="mvoa-badge" style="color:${ok ? '#0f6e56' : '#a32d2d'};background:${ok ? '#eaf5ef' : '#fbeaea'};">${ok ? '✅' : '❌'} ${escapeHtml(a.Stage)} — ${escapeHtml(a.Decision)}</span>
+          </div>
+          ${req && req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
+          ${a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : ''}
+        </div>`;
+    }).join('');
+  }
+
   async function renderMine(body, container) {
     const user = MVOA.getUser();
     const list = requestsCache.filter(r => r.RequestedBy === user.name)
@@ -2508,6 +2557,11 @@ const FinanceModule = (function () {
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <div style="margin-top:8px;">
+            <select class="fin-bank-select" data-request-id="${escapeHtml(req.RequestID)}" style="width:100%;margin-bottom:6px;">
+              <option value="">— Select Bank —</option>
+              <option value="IOB">IOB</option>
+              <option value="HDFC">HDFC</option>
+            </select>
             <input type="text" class="fin-ud-number" data-request-id="${escapeHtml(req.RequestID)}" placeholder="UD Number / Cheque / UTR" style="width:100%;margin-bottom:6px;">
             <button class="btn-primary fin-disburse-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Release Payment</button>
           </div>
@@ -2673,12 +2727,15 @@ const FinanceModule = (function () {
     if (!req || !req.ExpenseTab) return;
     const errEl = scopeEl.querySelector(`.fin-disburse-error[data-request-id="${requestId}"]`);
     const udInput = scopeEl.querySelector(`.fin-ud-number[data-request-id="${requestId}"]`);
+    const bankSelect = scopeEl.querySelector(`.fin-bank-select[data-request-id="${requestId}"]`);
     const udNumber = udInput ? udInput.value.trim() : '';
+    const bank = bankSelect ? bankSelect.value : '';
+    if (!bank) { if (errEl) errEl.textContent = 'Please select which Bank this was paid from.'; return; }
     if (!udNumber) { if (errEl) errEl.textContent = 'Please enter a UD Number / Cheque / UTR reference.'; return; }
     try {
       const entry = await readExpenseRow(req.ExpenseTab, requestId);
       if (!entry) throw new Error('Expense Sheet entry not found');
-      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: new Date().toLocaleDateString() });
+      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: new Date().toLocaleDateString(), Bank: bank });
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
       await markPaid(requestId, udNumber);
       await loadAll(true);
