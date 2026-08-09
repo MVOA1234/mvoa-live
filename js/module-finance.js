@@ -194,6 +194,7 @@ const FinanceModule = (function () {
   let contractsCache = [];
   let paymentRulesCache = [];
   let queueCardsCache = []; // PendingApproval requests THIS user can act on right now — see computeQueueCards()
+  let currentTopTab = 'home'; // 'home' | 'spend' | 'payment' | 'budget' | 'contracts'
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
   let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
@@ -375,14 +376,50 @@ const FinanceModule = (function () {
     render(container);
   }
 
+  // Sub-tabs for each of the two workflow groups. "Spend Approval" and
+  // "Payment Approval" are the two top-level buckets requested — most
+  // views (My Requests, My Approvals, Approval Queue) aren't inherently
+  // type-specific, so they're offered under BOTH groups for convenience
+  // rather than picking one arbitrary home for them. Approval Queue's
+  // underlying list IS filtered by type per group (see renderQueue's
+  // filterMode param) so each group only shows what's actually relevant
+  // to it, even though the raw data is shared.
+  function subTabsFor(topTab) {
+    if (topTab === 'spend') return [
+      { view: 'submit', label: '+ New Request' },
+      { view: 'mine', label: 'My Requests' },
+      { view: 'myapprovals', label: '✅ My Approvals' },
+      { view: 'queue', label: 'Approval Queue' }
+    ];
+    if (topTab === 'payment') return [
+      { view: 'payreq', label: '💵 New Payment Request' },
+      { view: 'mine', label: 'My Requests' },
+      { view: 'myapprovals', label: '✅ My Approvals' },
+      { view: 'queue', label: 'Approval Queue' },
+      { view: 'payments', label: '₹ Payments' }
+    ];
+    return [];
+  }
+  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts' };
+
   function render(container) {
     const user = MVOA.getUser();
     const mineCounts = countNewOpen(requestsCache.filter(r => r.RequestedBy === user.name));
-    const queueCounts = countNewOpen(queueCardsCache.map(c => c.req));
+    const queueCardsSpend = queueCardsCache.filter(c => c.req.RequestType !== 'PaymentRequest');
+    const queueCardsPayment = queueCardsCache.filter(c => c.req.RequestType === 'PaymentRequest');
+    const queueCountsSpend = countNewOpen(queueCardsSpend.map(c => c.req));
+    const queueCountsPayment = countNewOpen(queueCardsPayment.map(c => c.req));
     const paymentsCounts = countNewOpen(paymentsVisibleForCurrentUser());
     const expiringContracts = computeExpiringContracts();
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
-    container.innerHTML = `
+    const countFor = (view) => {
+      if (view === 'mine') return mineCounts;
+      if (view === 'queue') return currentTopTab === 'spend' ? queueCountsSpend : queueCountsPayment;
+      if (view === 'payments') return paymentsCounts;
+      return { open: 0, newCount: 0 };
+    };
+
+    const headerHtml = `
       ${expiringContracts.length ? `
         <div class="mvoa-list-item" style="border:1px solid #b3261e;margin-bottom:12px;">
           <p style="margin:0 0 8px;font-weight:600;color:#b3261e;">📄 Contract Expiring Soon</p>
@@ -393,17 +430,37 @@ const FinanceModule = (function () {
       <div class="mvoa-row" style="margin-bottom:6px;">
         <span></span>
         <span class="muted" style="font-size:0.85rem;">Logged in as: <strong>${escapeHtml(user.name)}</strong>${user.role ? ` (${escapeHtml(user.role)})` : ''}</span>
-      </div>
+      </div>`;
+
+    if (currentTopTab === 'home') {
+      // Home screen — the 4 top-level buckets only. No back button here
+      // by design (nothing to go back to); it appears once inside any
+      // of these.
+      container.innerHTML = `
+        ${headerHtml}
+        <div class="ops-tabs">
+          <button data-toptab="spend" class="ops-tab-btn">📝 Spend Approval</button>
+          <button data-toptab="payment" class="ops-tab-btn">💵 Payment Approval</button>
+          <button data-toptab="budget" class="ops-tab-btn">📊 Budget</button>
+          <button data-toptab="contracts" class="ops-tab-btn">📄 Contracts</button>
+        </div>`;
+      container.querySelectorAll('.ops-tab-btn[data-toptab]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          currentTopTab = btn.dataset.toptab;
+          currentView = TOP_TAB_DEFAULT_VIEW[currentTopTab];
+          if (currentTopTab === 'contracts') contractsSubView = 'list';
+          render(container);
+        });
+      });
+      return;
+    }
+
+    const subTabs = subTabsFor(currentTopTab);
+    container.innerHTML = `
+      ${headerHtml}
       <div class="ops-tabs">
-        <button data-view="submit" class="ops-tab-btn ${currentView==='submit'?'active':''}">+ New Request</button>
-        <button data-view="payreq" class="ops-tab-btn ${currentView==='payreq'?'active':''}">💵 New Payment Request</button>
-        <button data-view="mine" class="ops-tab-btn ${currentView==='mine'?'active':''}">My Requests${countSuffix(mineCounts)}</button>
-        <button data-view="myapprovals" class="ops-tab-btn ${currentView==='myapprovals'?'active':''}">✅ My Approvals</button>
-        <button data-view="queue" class="ops-tab-btn ${currentView==='queue'?'active':''}">Approval Queue${countSuffix(queueCounts)}</button>
-        <button data-view="payments" class="ops-tab-btn ${currentView==='payments'?'active':''}">₹ Payments${countSuffix(paymentsCounts)}</button>
-        <button data-view="budget" class="ops-tab-btn ${currentView==='budget'?'active':''}">📊 Budget</button>
-        <button data-view="contracts" class="ops-tab-btn ${currentView==='contracts'?'active':''}">📄 Contracts</button>
-        <button id="fin-budget-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
+        ${subTabs.map(t => `<button data-view="${t.view}" class="ops-tab-btn ${currentView===t.view?'active':''}">${t.label}${countSuffix(countFor(t.view))}</button>`).join('')}
+        <button id="fin-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
@@ -411,11 +468,10 @@ const FinanceModule = (function () {
     container.querySelectorAll('.ops-tab-btn[data-view]').forEach(btn => {
       btn.addEventListener('click', () => {
         currentView = btn.dataset.view;
-        if (currentView === 'contracts') contractsSubView = 'list'; // fresh tab click always starts at the list
         render(container);
       });
     });
-    container.querySelector('#fin-budget-back-btn').addEventListener('click', () => { currentView = 'mine'; render(container); });
+    container.querySelector('#fin-back-btn').addEventListener('click', () => { currentTopTab = 'home'; render(container); });
     container.querySelector('#fin-refresh-btn').addEventListener('click', async () => {
       const btn = container.querySelector('#fin-refresh-btn');
       const original = btn.textContent;
@@ -432,7 +488,7 @@ const FinanceModule = (function () {
     if (currentView === 'submit') renderSubmitForm(body, container);
     else if (currentView === 'payreq') renderPaymentRequestForm(body, container);
     else if (currentView === 'myapprovals') renderMyApprovals(body, container);
-    else if (currentView === 'queue') renderQueue(body, container);
+    else if (currentView === 'queue') renderQueue(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'payments') renderPayments(body, container);
     else if (currentView === 'budget') renderBudgetStatus(body, container);
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
@@ -728,12 +784,23 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   const PETTY_CASH_FLOAT_TARGET = 15000;
   const PETTY_CASH_OPERATIONAL_MIN = 2000;
+  const PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE = 'Petty Cash Replenishment';
+  // Matches a Replenishment either the OLD way (Category='Petty Cash',
+  // PettyCashType='Replenishment' — pre-existing rows from before this
+  // moved into Payment Requests) or the NEW way (a genuine Payment
+  // Request with Category === the Payment Type string above). Both need
+  // recognizing everywhere the float logic looks for one, so nothing
+  // about already-submitted requests breaks.
+  function isReplenishmentRequest(r) {
+    return (r.Category === 'Petty Cash' && r.PettyCashType === 'Replenishment') ||
+      (r.RequestType === 'PaymentRequest' && r.Category === PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE);
+  }
   function computeFloatBalance() {
     const expenseSum = requestsCache
       .filter(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Expense' && r.Status === 'Approved')
       .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
     const replenishedSum = requestsCache
-      .filter(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Replenishment' && r.Status === 'Approved' && r.DisbursementStage === 'Paid')
+      .filter(r => isReplenishmentRequest(r) && r.Status === 'Approved' && r.DisbursementStage === 'Paid')
       .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
     return PETTY_CASH_FLOAT_TARGET - expenseSum + replenishedSum;
   }
@@ -753,7 +820,7 @@ const FinanceModule = (function () {
   // arrived yet. Returns the existing in-flight Replenishment request, or
   // undefined if there isn't one.
   function inFlightReplenishment() {
-    return requestsCache.find(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Replenishment' &&
+    return requestsCache.find(r => isReplenishmentRequest(r) &&
       r.Status !== 'Rejected' && !(r.Status === 'Approved' && r.DisbursementStage === 'Paid'));
   }
 
@@ -1050,7 +1117,7 @@ const FinanceModule = (function () {
         <label>Amount (₹)
           <input id="pr-amount" type="number" min="0" step="1" placeholder="0" style="-moz-appearance:textfield;" onwheel="this.blur()">
         </label>
-        <label>Vendor / Payee
+        <label id="pr-vendor-label">Vendor / Payee
           <input id="pr-vendor" type="text" placeholder="e.g. ABC Electricals">
         </label>
         <label>Description
@@ -1109,13 +1176,30 @@ const FinanceModule = (function () {
       body.querySelector('#pr-form-error').textContent = '';
       const type = typeEl.value;
       const wccWrap = body.querySelector('#pr-wcc-wrap');
-      if (!type) { previewEl.innerHTML = ''; labelEl.textContent = 'Attachments'; wccWrap.innerHTML = ''; return; }
+      const vendorLabel = body.querySelector('#pr-vendor-label');
+      if (!type) { previewEl.innerHTML = ''; labelEl.textContent = 'Attachments'; wccWrap.innerHTML = ''; if (vendorLabel) vendorLabel.style.display = ''; return; }
       const rule = paymentRuleFor(type);
       const amount = Number(amtEl.value) || 0;
+      const isReplenishment = type === PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE;
 
-      // R&M/CAPEX only: goods-procurement toggle changes which documents
-      // apply (see effectiveDocsForPayment/Governance Note 5).
-      if (isWccPaymentType(type)) {
+      // Petty Cash Replenishment: no vendor (internal float top-up), and
+      // shows the same Float Balance context New Request used to show
+      // when this lived there — moved here since it's purely a
+      // payment-release workflow (Secretary→Treasurer→Payments tab), not
+      // a spend-approval one.
+      if (vendorLabel) vendorLabel.style.display = isReplenishment ? 'none' : '';
+      if (isReplenishment) {
+        const balance = computeFloatBalance();
+        const inFlight = inFlightReplenishment();
+        if (inFlight) {
+          wccWrap.innerHTML = `<p class="error-text" style="margin:8px 0;">⚠️ A Replenishment request (${formatAmount(inFlight.Amount)}) is already in progress — please wait for it to be fully paid out before submitting another.</p>`;
+        } else {
+          wccWrap.innerHTML = `<p class="muted" style="margin:8px 0;">Float Balance: <strong style="color:${balance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : 'green'};">${formatAmount(balance)}</strong> of ${formatAmount(PETTY_CASH_FLOAT_TARGET)}</p>`;
+          if (!amtEl.value) amtEl.value = Math.max(0, PETTY_CASH_FLOAT_TARGET - balance);
+        }
+      } else if (isWccPaymentType(type)) {
+        // R&M/CAPEX only: goods-procurement toggle changes which documents
+        // apply (see effectiveDocsForPayment/Governance Note 5).
         wccWrap.innerHTML = `
           <label style="display:flex;align-items:center;gap:8px;margin:8px 0;">
             <input type="checkbox" id="pr-goods-procurement" ${paymentIsGoodsProcurement ? 'checked' : ''}>
@@ -1138,7 +1222,12 @@ const FinanceModule = (function () {
           ${rule.SecretaryRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Secretary — Admin Approval</p>' : ''}
           ${rule.TreasurerRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Treasurer — Financial Approval</p>' : ''}
           ${rule.PresidentRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">President Approval</p>' : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isWccPaymentType(type) && !paymentIsGoodsProcurement ? (amount > WCC_THRESHOLD ? ' (WCC required — over ₹50,000)' : ' (WCC not required — ₹50,000 or under)') : ''}</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isWccPaymentType(type) && !paymentIsGoodsProcurement ? (amount > WCC_THRESHOLD ? ' (WCC required — over ₹50,000)' : ' (WCC not required — ₹50,000 or under)') : ''}${isDocsConfirmationOnly(docs) ? ' — confirm with the checkbox below, no attachment needed.' : ''}</p>` : ''}
+          ${isDocsConfirmationOnly(docs) ? `
+            <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+              <input type="checkbox" id="pr-docs-confirmed">
+              ✅ Original documents submitted to Accountant
+            </label>` : ''}
         </div>`;
       // Requires an attachment for each listed document (capped at 3,
       // matching the existing Schedule A/B/C flow's pattern) rather than
@@ -1149,7 +1238,10 @@ const FinanceModule = (function () {
       // since there's no reliable way to tell those apart from real
       // documents (invoices, WCC, delivery slips) just from the text —
       // in practice that just means a photo can stand in as evidence.
-      const minAttachments = (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+      // A pure confirmation doc (Petty Cash Replenishment's "Original
+      // Documents Submitted to Accountant") needs a checkbox, not a file.
+      const minAttachments = isDocsConfirmationOnly(docs) ? 0 : (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+      labelEl.parentElement.style.display = isDocsConfirmationOnly(docs) ? 'none' : '';
       labelEl.textContent = minAttachments > 0 ? `Attachments — at least ${minAttachments} required (see documents needed above)` : 'Attachments (optional)';
       renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, docs, 3);
     }
@@ -1180,11 +1272,26 @@ const FinanceModule = (function () {
 
     if (!paymentType) { errEl.textContent = 'Please select a Payment Type.'; return; }
     if (amount <= 0) { errEl.textContent = 'Please enter an amount greater than zero.'; return; }
-    if (!vendor) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
+    const isReplenishment = paymentType === PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE;
+    if (!vendor && !isReplenishment) { errEl.textContent = 'Please enter a Vendor / Payee.'; return; }
+    if (isReplenishment) {
+      const inFlight = inFlightReplenishment();
+      if (inFlight) {
+        errEl.textContent = `A Replenishment request (${formatAmount(inFlight.Amount)}, submitted ${formatDate(inFlight.RequestedDate)}) is already in progress — please wait for it to be fully paid out before submitting another.`;
+        return;
+      }
+    }
 
     const rule = paymentRuleFor(paymentType);
     const docs = effectiveDocsForPayment(paymentType, amount, paymentIsGoodsProcurement);
-    const minAttachments = (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+    if (isDocsConfirmationOnly(docs)) {
+      const confirmBox = body.querySelector('#pr-docs-confirmed');
+      if (!confirmBox || !confirmBox.checked) {
+        errEl.textContent = 'Please confirm that the original documents have been submitted to the Accountant.';
+        return;
+      }
+    }
+    const minAttachments = isDocsConfirmationOnly(docs) ? 0 : (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
     if (paymentPendingAttachments.length < minAttachments) {
       errEl.textContent = `This payment type requires at least ${minAttachments} attachment(s): ${docs.join(', ')}.`;
       return;
@@ -1295,15 +1402,17 @@ const FinanceModule = (function () {
         pettyCashType = 'Expense';
         return;
       }
+      // Replenishment moved to "New Payment Request" — it's purely a
+      // payment-release workflow (Secretary → Treasurer → Payments tab),
+      // not a spend-approval one, so it doesn't belong on this form
+      // anymore. This form now only ever logs an Expense against the
+      // float; pettyCashType is kept (rather than removed outright) only
+      // for the doSubmitRequest code path further down that still reads
+      // it, and for backward compatibility with the FinanceRequests rows
+      // already submitted the old way.
+      pettyCashType = 'Expense';
       const balance = computeFloatBalance();
       const inFlight = inFlightReplenishment();
-      // If an earlier Replenishment hasn't actually been paid out yet, its
-      // amount is already "spoken for" — letting a second one through
-      // would double-count against the same shortfall (and confuse
-      // whoever's tracking the float, since the real cash top-up for the
-      // first one hasn't arrived). Force back to Expense if Replenishment
-      // was selected before this became true.
-      if (inFlight && pettyCashType === 'Replenishment') pettyCashType = 'Expense';
       // One-time setup reminder — shown only until the very first Petty
       // Cash request of any kind has been logged. The live float
       // calculation assumes a fresh ₹15,000 float with nothing spent yet;
@@ -1315,28 +1424,13 @@ const FinanceModule = (function () {
         ${isFirstEverPettyCashUse ? `
           <div class="mvoa-list-item" style="margin:6px 0;background:#fff8e1;">
             <p style="margin:0;font-weight:600;">⚙️ First-time setup</p>
-            <p class="muted" style="margin:4px 0 0;">This assumes the float starts at a fresh ₹15,000. If the real physical balance right now is already lower, log a one-off "Log an Expense" entry first for the gap (e.g. "Opening balance adjustment — pre-app float usage") before relying on the balance below.</p>
+            <p class="muted" style="margin:4px 0 0;">This assumes the float starts at a fresh ₹15,000. If the real physical balance right now is already lower, log a one-off Expense entry first for the gap (e.g. "Opening balance adjustment — pre-app float usage") before relying on the balance below.</p>
           </div>` : ''}
         <div class="mvoa-list-item" style="margin:6px 0;">
           <p style="margin:0 0 6px;font-weight:600;">Float Balance: <span style="color:${balance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : 'green'};">${formatAmount(balance)}</span> of ${formatAmount(PETTY_CASH_FLOAT_TARGET)}</p>
-          ${balance < PETTY_CASH_OPERATIONAL_MIN && !inFlight ? `<p class="error-text" style="margin:0 0 6px;">⚠️ Below the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum — a Replenishment request is due.</p>` : ''}
-          ${inFlight ? `<p class="error-text" style="margin:0 0 6px;">⚠️ A Replenishment request (${formatAmount(inFlight.Amount)}) is already in progress — please wait for it to be fully paid out before submitting another.</p>` : ''}
-          <label style="display:flex;align-items:center;gap:6px;margin:4px 0;">
-            <input type="radio" name="fin-pc-type" value="Expense" ${pettyCashType === 'Expense' ? 'checked' : ''}> Log an Expense
-          </label>
-          <label style="display:flex;align-items:center;gap:6px;margin:4px 0;opacity:${inFlight ? '0.5' : '1'};">
-            <input type="radio" name="fin-pc-type" value="Replenishment" ${pettyCashType === 'Replenishment' ? 'checked' : ''} ${inFlight ? 'disabled' : ''}> Replenish the Float
-          </label>
+          ${balance < PETTY_CASH_OPERATIONAL_MIN && !inFlight ? `<p class="error-text" style="margin:0 0 6px;">⚠️ Below the ₹${PETTY_CASH_OPERATIONAL_MIN.toLocaleString('en-IN')} operational minimum — submit a Replenishment via <strong>💵 New Payment Request</strong> (Payment Type: "${PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE}").</p>` : ''}
+          ${inFlight ? `<p class="muted" style="margin:0 0 6px;">A Replenishment request (${formatAmount(inFlight.Amount)}) is already in progress via New Payment Request — no action needed here.</p>` : ''}
         </div>`;
-      pcTypeWrap.querySelectorAll('input[name="fin-pc-type"]').forEach(r => r.addEventListener('change', (e) => {
-        pettyCashType = e.target.value;
-        if (pettyCashType === 'Replenishment') {
-          amtEl.value = Math.max(0, PETTY_CASH_FLOAT_TARGET - computeFloatBalance());
-        } else {
-          amtEl.value = '';
-        }
-        refreshRulePreview();
-      }));
     }
 
     function refreshBudgetStatusSelector() {
@@ -2009,20 +2103,41 @@ const FinanceModule = (function () {
       body.innerHTML = `<p class="muted">You haven't approved or rejected anything yet.</p>`;
       return;
     }
-    body.innerHTML = mine.map(a => {
+    body.innerHTML = mine.map((a, i) => {
       const req = requestsCache.find(r => r.RequestID === a.RequestID);
       const ok = a.Decision === 'Approved';
       return `
         <div class="mvoa-list-item">
-          <div class="mvoa-row">
+          <div class="mvoa-row fin-myapproval-trail-toggle" data-idx="${i}" style="cursor:pointer;">
             <strong>${req ? escapeHtml(req.Category) + ' — ' + formatAmount(req.Amount) : escapeHtml(a.RequestID)}</strong>
             <span class="mvoa-badge" style="color:${ok ? '#0f6e56' : '#a32d2d'};background:${ok ? '#eaf5ef' : '#fbeaea'};">${ok ? '✅' : '❌'} ${escapeHtml(a.Stage)} — ${escapeHtml(a.Decision)}</span>
           </div>
           ${req && req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
           ${a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : ''}
+          ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
+          <div class="fin-myapproval-trail-body hidden" data-idx="${i}"></div>
         </div>`;
     }).join('');
+
+    function toggleTrail(idx) {
+      const trailBody = body.querySelector(`.fin-myapproval-trail-body[data-idx="${idx}"]`);
+      if (!trailBody) return;
+      const isHidden = trailBody.classList.contains('hidden');
+      if (!isHidden) { trailBody.classList.add('hidden'); return; }
+      const a = mine[idx];
+      const req = requestsCache.find(r => r.RequestID === a.RequestID);
+      const approvals = allApprovals.filter(x => x.RequestID === a.RequestID);
+      try {
+        trailBody.innerHTML = req ? renderRequestTrailHtml(req, approvals) : '<p class="muted">Request no longer available.</p>';
+      } catch (e) {
+        trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
+      }
+      trailBody.classList.remove('hidden');
+    }
+    body.querySelectorAll('.fin-myapproval-trail-toggle, .fin-myapproval-trail-toggle-btn').forEach(el => {
+      el.addEventListener('click', () => toggleTrail(el.dataset.idx));
+    });
   }
 
   async function renderMine(body, container) {
@@ -2165,11 +2280,15 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   // APPROVAL QUEUE
   // ───────────────────────────────────────────────────────────
-  async function renderQueue(body, container) {
+  async function renderQueue(body, container, filterMode) {
     // Uses the same queueCardsCache the nav-tab count reads (refreshed in
     // loadAll) so the count and this list can never disagree — see the
-    // comment in loadAll for the bug this fixes.
-    const cards = queueCardsCache;
+    // comment in loadAll for the bug this fixes. filterMode ('spend' |
+    // 'payment') scopes this to whichever group's tab it was opened
+    // from, since Approval Queue's underlying data spans both.
+    const cards = !filterMode ? queueCardsCache
+      : filterMode === 'spend' ? queueCardsCache.filter(c => c.req.RequestType !== 'PaymentRequest')
+      : queueCardsCache.filter(c => c.req.RequestType === 'PaymentRequest');
 
     body.innerHTML = `
       <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">Awaiting your action</h3>
@@ -2314,6 +2433,7 @@ const FinanceModule = (function () {
         const wantsContract = confirm(`"${p.Category}" for ${p.Vendor || 'this vendor'} is now fully approved. Register it as a contract so future payments can reference it? (Choose Cancel for a one-time purchase.)`);
         if (wantsContract) {
           contractFormPrefill = { Category: p.Category, Vendor: p.Vendor, ApprovedRequestID: p.RequestID };
+          currentTopTab = 'contracts';
           currentView = 'contracts';
           contractsSubView = 'form';
           render(container);
