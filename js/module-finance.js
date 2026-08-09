@@ -1141,6 +1141,7 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   let paymentPendingAttachments = [];
   let selectedContractId = '';
+  let sentBackPendingAttachments = {}; // { [requestId]: pendingAttachment[] } — see renderSentBack
   let paymentIsGoodsProcurement = false;
 
   function renderPaymentRequestForm(body, container) {
@@ -2559,12 +2560,23 @@ const FinanceModule = (function () {
   // editing the request's fields/attachments in-place; the requester is
   // expected to have already addressed the reason (visible via the
   // Notes thread or the sent-back comment itself) before resubmitting.
-  async function resubmitRequest(requestId, container, errElSelector) {
+  async function resubmitRequest(requestId, container, errElSelector, newDescription, newAttachments) {
     const errEl = errElSelector ? document.querySelector(errElSelector) : null;
     try {
       const req = requestsCache.find(r => r.RequestID === requestId);
       if (!req) return;
       const user = MVOA.getUser();
+      // Upload any newly-added attachment(s) into whichever
+      // AttachmentURL slot(s) are still empty — never overwrites an
+      // existing one, only fills gaps.
+      const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3'];
+      const emptySlots = slots.filter(s => !req[s]);
+      const uploads = (newAttachments || []).slice(0, emptySlots.length);
+      const attachmentUpdates = {};
+      for (let i = 0; i < uploads.length; i++) {
+        const att = uploads[i];
+        attachmentUpdates[emptySlots[i]] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_resubmit${i+1}_${att.name}`);
+      }
       const existingIds = [];
       const approvalId = MVOA.nextId('APR', existingIds);
       const row = {
@@ -2573,7 +2585,10 @@ const FinanceModule = (function () {
       };
       await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, row));
       const now = new Date().toISOString();
-      const updated = Object.assign({}, req, { StageEnteredAt: now, StageOpenedAt: '' });
+      const updated = Object.assign({}, req,
+        { StageEnteredAt: now, StageOpenedAt: '' },
+        newDescription !== undefined ? { Description: newDescription } : {},
+        attachmentUpdates);
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Resubmitted', comment: '', statusAfter: 'PendingApproval' });
       await loadAll(true);
@@ -2612,7 +2627,18 @@ const FinanceModule = (function () {
       body.innerHTML = `<p class="muted">Nothing sent back to you right now.</p>`;
       return;
     }
-    body.innerHTML = sentBack.map(({ r, state }) => `
+    // Bug/gap found in testing: the previous version was a bare
+    // "Resubmit" button with no way to actually act on the reason given
+    // — the requester could see "need one more quotation" but had no
+    // way to add it. Now shows the current Description (editable) and
+    // existing attachments, with room to add more (up to the 3-slot
+    // cap) before resubmitting. Doesn't support REMOVING an old
+    // attachment or changing Amount/Vendor — editing those still needs
+    // the Notes thread; this covers the two most common corrections
+    // (clarify the description, attach one more document).
+    body.innerHTML = sentBack.map(({ r, state }) => {
+      const existingAttachments = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean);
+      return `
       <div class="mvoa-list-item" style="border:1px solid #b3261e;">
         <div class="mvoa-row">
           <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
@@ -2621,14 +2647,41 @@ const FinanceModule = (function () {
         ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
         <p style="margin:4px 0;color:#b3261e;">${state.sentBackAt && state.sentBackAt.Comment ? `"${escapeHtml(state.sentBackAt.Comment)}"` : 'No reason given.'}</p>
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${state.sentBackAt ? escapeHtml(state.sentBackAt.ApproverName) : 'unknown'}${state.sentBackAt ? ' · ' + formatDate(state.sentBackAt.Timestamp) : ''}</p>
-        <div style="margin-top:8px;">
+        <label style="margin-top:8px;">Description
+          <textarea class="fin-sb-desc" data-request-id="${escapeHtml(r.RequestID)}" rows="2">${escapeHtml(r.Description || '')}</textarea>
+        </label>
+        ${existingAttachments.length ? `<p class="muted" style="margin:6px 0 2px;">Existing attachments: ${existingAttachments.map((u, i) => `<a href="${u}" target="_blank" rel="noopener">📎 ${i+1}</a>`).join(' · ')}</p>` : ''}
+        ${existingAttachments.length < 3 ? `
+          <p class="muted" style="margin:6px 0 2px;">Add another attachment (optional):</p>
+          <div class="fin-sb-attachment-chips" data-request-id="${escapeHtml(r.RequestID)}"></div>
+          <div class="fin-sb-attachment-btns" data-request-id="${escapeHtml(r.RequestID)}" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;"></div>
+        ` : ''}
+        <div style="margin-top:10px;">
           <button class="btn-primary fin-resubmit-btn" data-request-id="${escapeHtml(r.RequestID)}" style="margin:0;">Resubmit</button>
         </div>
         <p class="error-text fin-resubmit-error" data-request-id="${escapeHtml(r.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
-      </div>
-    `).join('');
+      </div>`;
+    }).join('');
+    // One pending-new-attachments array per sent-back card, keyed by
+    // RequestID, so multiple cards on screen at once don't collide.
+    sentBackPendingAttachments = {};
+    sentBack.forEach(({ r }) => {
+      const existingCount = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean).length;
+      if (existingCount >= 3) return;
+      sentBackPendingAttachments[r.RequestID] = [];
+      renderDocAttachmentPicker(body,
+        `.fin-sb-attachment-chips[data-request-id="${r.RequestID}"]`,
+        `.fin-sb-attachment-btns[data-request-id="${r.RequestID}"]`,
+        sentBackPendingAttachments[r.RequestID], [], 3 - existingCount);
+    });
     body.querySelectorAll('.fin-resubmit-btn').forEach(btn => {
-      btn.addEventListener('click', () => resubmitRequest(btn.dataset.requestId, container, `.fin-resubmit-error[data-request-id="${btn.dataset.requestId}"]`));
+      const id = btn.dataset.requestId;
+      btn.addEventListener('click', () => {
+        const descEl = body.querySelector(`.fin-sb-desc[data-request-id="${id}"]`);
+        const newDesc = descEl ? descEl.value.trim() : undefined;
+        const newAttachments = sentBackPendingAttachments[id] || [];
+        resubmitRequest(id, container, `.fin-resubmit-error[data-request-id="${id}"]`, newDesc, newAttachments);
+      });
     });
   }
 
