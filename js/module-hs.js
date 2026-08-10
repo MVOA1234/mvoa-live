@@ -48,7 +48,7 @@ const HSModule = (function () {
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan', 'Group', 'LayoutImage'];
-  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay', 'ShowZoneOfDay', 'FailTaskCategory'];
+  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay', 'ShowZoneOfDay', 'FailTaskCategory', 'RoundBased', 'CustomScreen'];
   const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix', 'TypicalValue', 'DayApplicability'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes', 'AssetID', 'AssetName'];
@@ -723,6 +723,166 @@ const HSModule = (function () {
     });
   }
 
+  // ───────────────────────────────────────────────────────────
+  // IN / OUT LOG — Sewage/Garbage/Water Tanker/Garden Waste. Doesn't fit
+  // the generic scan→checklist shape at all: multiple IN/OUT entries can
+  // happen per day (a vehicle could come and go more than once), and
+  // Sewage/Garbage additionally need a WEEKLY rollup evaluated only on
+  // Sunday (≥2 visits for Sewage, ≥3 for Garbage, Mon-Sun) — genuinely
+  // different from "one submission per day/shift" everything else here
+  // assumes, so this is its own dedicated screen + sheet (HSInOutLog)
+  // rather than forced through HSChecklistLog/Items. Referenced by its
+  // raw tab name rather than through MVOA.TABS, since that lookup lives
+  // in shared.js and adding an entry there wasn't available this
+  // session — functionally identical either way.
+  // ───────────────────────────────────────────────────────────
+  const TAB_HS_INOUT_LOG = 'HSInOutLog';
+  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy'];
+  // weeklyMin: null means "frequency not defined" per the spec — no
+  // Fail concept at all for that type, logging only.
+  const IN_OUT_TYPES = [
+    { key: 'Sewage Disposal', needsPhoto: true, weeklyMin: 2 },
+    { key: 'Garbage Disposal', needsPhoto: false, weeklyMin: 3 },
+    { key: 'Water Tanker', needsPhoto: true, weeklyMin: null },
+    { key: 'Garden Waste Disposal', needsPhoto: false, weeklyMin: null }
+  ];
+
+  async function renderInOutLog(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-scan" class="btn-secondary">← Back</button>
+        <strong>🚚 In / Out Log</strong>
+      </div>
+      <div id="hs-inout-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
+
+    const bodyEl = container.querySelector('#hs-inout-body');
+    let logs;
+    try {
+      const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+      logs = rowsToObjs(rows, INOUT_LOG_COLS);
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const monday = mondayOfWeek(today);
+
+    // Sunday-only weekly evaluation — see evaluateWeeklyInOutCompliance.
+    // Deliberately client-triggered (no reliable background trigger
+    // exists in this app yet) rather than skipped: whoever opens this
+    // screen on a Sunday causes the check to run, with its own dedup so
+    // opening it repeatedly that day never creates duplicate tasks.
+    if (today.getDay() === 0) {
+      await evaluateWeeklyInOutCompliance(logs, monday, today);
+    }
+
+    function countThisWeek(typeKey, direction) {
+      return logs.filter(l => l.Type === typeKey && l.Direction === direction &&
+        new Date(l.Timestamp) >= monday && new Date(l.Timestamp) <= new Date(today.getTime() + 86400000)).length;
+    }
+    function todaysEntries(typeKey) {
+      return logs.filter(l => l.Type === typeKey && new Date(l.Timestamp).toDateString() === today.toDateString())
+        .sort((a, b) => a.Timestamp.localeCompare(b.Timestamp));
+    }
+
+    bodyEl.innerHTML = IN_OUT_TYPES.map(t => {
+      const weekCount = countThisWeek(t.key, 'IN');
+      const entries = todaysEntries(t.key);
+      const isSunday = today.getDay() === 0;
+      const weeklyStatusHtml = t.weeklyMin
+        ? `<p class="muted" style="margin:0 0 8px;">This week: ${weekCount} visit(s)${isSunday
+            ? (weekCount < t.weeklyMin ? ` <span style="color:#b3261e;font-weight:700;">— below the minimum of ${t.weeklyMin}</span>` : ` <span style="color:green;font-weight:700;">— meets the minimum</span>`)
+            : ` (minimum ${t.weeklyMin} by Sunday)`}</p>`
+        : '';
+      return `
+        <div class="card" style="max-width:520px;margin:0 0 16px 0;">
+          <h3 style="margin:0 0 8px;color:var(--mvoa-blue);">${escapeHtml(t.key)}</h3>
+          ${weeklyStatusHtml}
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <button class="btn-primary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="IN" data-photo="${t.needsPhoto}" style="flex:1;">Log IN</button>
+            <button class="btn-secondary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="OUT" data-photo="${t.needsPhoto}" style="flex:1;">Log OUT</button>
+          </div>
+          <p class="muted" style="margin:0 0 4px;font-size:0.8rem;font-weight:600;">Today:</p>
+          ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
+        </div>
+      `;
+    }).join('');
+
+    bodyEl.querySelectorAll('.hs-inout-btn').forEach(btn => {
+      btn.addEventListener('click', () => logInOutEntry(btn.dataset.type, btn.dataset.direction, btn.dataset.photo === 'true', container));
+    });
+  }
+
+  let isLoggingInOut = false;
+  async function logInOutEntry(typeKey, direction, needsPhoto, container) {
+    if (isLoggingInOut) return;
+    let photoFile = null, photoName = '';
+    if (needsPhoto) {
+      // Forces the actual camera — the timestamped photo IS the record
+      // that the vehicle was there, same reasoning as Security's Rounds.
+      const a = await MVOA.pickAttachment({ photoOnly: true, useCamera: true });
+      if (!a) return; // cancelled
+      photoFile = a.file; photoName = a.name;
+    }
+    isLoggingInOut = true;
+    try {
+      const existingRows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+      const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+      const logId = MVOA.nextId('IOLOG', existingIds);
+      let photoUrl = '';
+      if (photoFile) photoUrl = await MVOA.uploadPhotoToDrive(photoFile, `${logId}_${photoName}`);
+      const user = MVOA.getUser();
+      const row = INOUT_LOG_COLS.map(c => ({
+        LogID: logId, Type: typeKey, Direction: direction, Timestamp: new Date().toISOString(),
+        PhotoURL: photoUrl, LoggedBy: user.name
+      })[c]);
+      await MVOA.sheetsAppend(TAB_HS_INOUT_LOG, row);
+      await renderInOutLog(container);
+    } catch (e) {
+      alert('Could not save entry: ' + e.message);
+    }
+    isLoggingInOut = false;
+  }
+
+  // Runs only when opened on a Sunday — evaluates Mon-Sun visit counts
+  // for whichever IN_OUT_TYPES entries define a weeklyMin (Sewage,
+  // Garbage; Water Tanker/Garden Waste have none per the spec, so never
+  // evaluated here), and creates ONE task per shortfall per week.
+  // Dedup is by exact task title (embeds the week's Monday date) rather
+  // than "any open task", since a closed task from an earlier week
+  // shouldn't prevent detecting a NEW shortfall this week, but this
+  // exact week's task should never be created twice regardless of
+  // whether it's since been closed.
+  async function evaluateWeeklyInOutCompliance(logs, monday, today) {
+    for (const t of IN_OUT_TYPES) {
+      if (!t.weeklyMin) continue;
+      const count = logs.filter(l => l.Type === t.key && l.Direction === 'IN' &&
+        new Date(l.Timestamp) >= monday && new Date(l.Timestamp) <= new Date(today.getTime() + 86400000)).length;
+      if (count >= t.weeklyMin) continue;
+      const title = `Plant Rounds: ${t.key} — only ${count} visit(s) this week (week of ${isoDate(monday)})`;
+      try {
+        const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+        const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
+        if (alreadyExists) continue;
+        await MVOA.createOpsTask({
+          categoryName: 'Security',
+          title,
+          description: `Weekly minimum for ${t.key} is ${t.weeklyMin} visits (Monday–Sunday) — only ${count} recorded this week.`,
+          assigneeTitle: 'Facility Manager',
+          priority: 'Urgent',
+          createdBy: 'System (Plant Rounds — weekly In/Out check)'
+        });
+      } catch (e) {
+        // Best-effort — this runs passively on page load; don't block
+        // the screen over it, worst case the check just runs again
+        // next time someone opens this screen today.
+      }
+    }
+  }
+
   function renderReportsMenu(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -974,7 +1134,15 @@ const HSModule = (function () {
     const [year, month] = monthlyReportMonth.split('-').map(Number); // month is 1-based
     const daysInMonth = new Date(year, month, 0).getDate();
     const isShiftBased = template.ShiftBased === 'TRUE' || template.ShiftBased === 'true';
-    const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : [null];
+    const isRoundBased = template.RoundBased === 'TRUE' || template.RoundBased === 'true';
+    // Without this, a RoundBased template would fall into the [null]
+    // case below and cellFor() would silently grab whichever of
+    // Round1/Round2 happened to match first for a given date, hiding
+    // the other round's data entirely — Round1/Round2 work as drop-in
+    // values everywhere else (cellFor/performedByFor just compare
+    // l.Shift === shift generically), so grouping by them here is a
+    // one-line fix, not a deeper change.
+    const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? ['Round1', 'Round2'] : [null];
     const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
     function cellFor(itemId, day, shift) {
@@ -1235,7 +1403,12 @@ const HSModule = (function () {
     });
   }
 
-  function shiftLabel(s) { return s === '2nd3rd' ? '2nd & 3rd' : s; } // '2nd3rd' kept for reading old log entries only — no longer written
+  function shiftLabel(s) {
+    if (s === '2nd3rd') return '2nd & 3rd'; // kept for reading old log entries only — no longer written
+    if (s === 'Round1') return 'Round 1 (2–3 AM)';
+    if (s === 'Round2') return 'Round 2 (4–5 PM)';
+    return s;
+  }
 
   // ───────────────────────────────────────────────────────────
   // QR SCANNER — same jsQR-based approach as Daily Ops, decoded via
@@ -1519,6 +1692,20 @@ const HSModule = (function () {
       return;
     }
     cardsEl.innerHTML = targetTemplates.map(t => {
+      // CustomScreen templates (e.g. In/Out Log) don't write to HSLog at
+      // all, so the normal Due/Overdue calculation would show "Never
+      // logged" forever — that's misleading for an ongoing log, so skip
+      // it entirely rather than let dueInfo() apply here.
+      if (t.CustomScreen) {
+        return `
+          <div class="mvoa-list-item ${canEdit ? 'hs-template-card' : ''}" data-template-id="${t.TemplateID}" style="${canEdit ? 'cursor:pointer;' : ''}">
+            <div class="mvoa-row">
+              <span><strong>${escapeHtml(t.Name)}</strong></span>
+              <span class="muted" style="font-size:0.85rem;">Ongoing log</span>
+            </div>
+          </div>
+        `;
+      }
       const due = dueInfo(t);
       const rule = frequencyRuleText(t);
       return `
@@ -1534,7 +1721,14 @@ const HSModule = (function () {
     if (!canEdit) return; // view-only — nothing further to wire up
     cardsEl.querySelectorAll('.hs-template-card').forEach(card => {
       card.addEventListener('click', () => {
-        currentTemplate = templateById(card.dataset.templateId);
+        const t = templateById(card.dataset.templateId);
+        // A handful of templates don't fit the generic scan→checklist
+        // shape at all (e.g. the In/Out Log's continuous multi-entry-
+        // per-day log with a weekly rollup) — CustomScreen routes those
+        // to their own dedicated render function instead, while still
+        // appearing in this same template-card list for discoverability.
+        if (t && t.CustomScreen === 'InOutLog') { renderInOutLog(container); return; }
+        currentTemplate = t;
         currentShift = '';
         pendingResults = {};
         pendingPerformedBy = MVOA.getUser().name;
@@ -1580,6 +1774,24 @@ const HSModule = (function () {
     if (shift === '3rd') return '9 PM – 7 AM';
     return '';
   }
+  // Security's "Daily Rounds Photos" doesn't fit the 1st/2nd/3rd shift
+  // system at all — two fixed windows, deliberately kept as its own
+  // separate mechanic rather than overloading "shift" terminology.
+  // Piggybacks on the same Shift column/hasSubmittedToday/todaysLogFor
+  // machinery though, since those already just compare arbitrary string
+  // values — 'Round1'/'Round2' work as drop-in Shift values with zero
+  // changes needed to that generic matching logic.
+  function isWithinRoundWindow(round, now) {
+    const h = now.getHours() + now.getMinutes() / 60;
+    if (round === 'Round1') return h >= 2 && h < 3;
+    if (round === 'Round2') return h >= 16 && h < 17;
+    return true;
+  }
+  function roundWindowLabel(round) {
+    if (round === 'Round1') return '2 AM – 3 AM';
+    if (round === 'Round2') return '4 PM – 5 PM';
+    return '';
+  }
 
   // ───────────────────────────────────────────────────────────
   // Running-hours meter guard — a cumulative meter can never go
@@ -1609,6 +1821,7 @@ const HSModule = (function () {
   async function renderChecklistForm(container) {
     const isDaily = currentTemplate.Frequency === 'Daily';
     const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
+    const isRoundBased = currentTemplate.RoundBased === 'TRUE' || currentTemplate.RoundBased === 'true';
     if (isDaily && isShiftBased && !currentShift) {
       const now = new Date();
       const shiftDone = { '1st': hasSubmittedToday(currentTemplate.TemplateID, '1st'),
@@ -1648,7 +1861,44 @@ const HSModule = (function () {
       return;
     }
 
-    if (isDaily && !isShiftBased && hasSubmittedToday(currentTemplate.TemplateID, null)) {
+    if (isDaily && isRoundBased && !currentShift) {
+      const now = new Date();
+      const roundDone = { Round1: hasSubmittedToday(currentTemplate.TemplateID, 'Round1'),
+        Round2: hasSubmittedToday(currentTemplate.TemplateID, 'Round2') };
+      const roundBtn = (round, label) => {
+        if (roundDone[round]) {
+          return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Already submitted today</button>`;
+        }
+        if (!isWithinRoundWindow(round, now)) {
+          return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Only allowed ${roundWindowLabel(round)}</button>`;
+        }
+        return `<button class="btn-${round === 'Round1' ? 'primary' : 'secondary'} hs-round-btn" data-round="${round}" style="width:100%;margin-bottom:8px;">${label}</button>`;
+      };
+      container.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="hs-back-scan" class="btn-secondary">← Back</button>
+          <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        </div>
+        <div class="card" style="max-width:420px;margin:0 0 12px 0;">
+          <label>Performed By (ASO)
+            <input type="text" id="hs-performed-by" value="${escapeHtml(pendingPerformedBy)}">
+          </label>
+        </div>
+        <div class="card" style="max-width:420px;margin:0;">
+          <p class="muted" style="margin:0 0 10px;">Which round is this for?</p>
+          ${roundBtn('Round1', 'Round 1 (2–3 AM)')}
+          ${roundBtn('Round2', 'Round 2 (4–5 PM)')}
+        </div>
+      `;
+      container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; });
+      container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
+      container.querySelectorAll('.hs-round-btn').forEach(btn => {
+        btn.addEventListener('click', () => { currentShift = btn.dataset.round; renderChecklistForm(container); });
+      });
+      return;
+    }
+
+    if (isDaily && !isShiftBased && !isRoundBased && hasSubmittedToday(currentTemplate.TemplateID, null)) {
       const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
@@ -1678,7 +1928,7 @@ const HSModule = (function () {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
-        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : isRoundBased ? ' — ' + shiftLabel(currentShift) : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
       ${showZone ? `<div class="card" style="max-width:600px;margin:0 0 12px 0;background:#eef6fb;"><p style="margin:0;font-weight:700;color:var(--mvoa-blue);">📍 Today's Zone: ${escapeHtml(landscapeZoneForToday())}</p></div>` : ''}
       <div class="card" style="max-width:600px;margin:0 0 12px 0;">
@@ -1773,6 +2023,27 @@ const HSModule = (function () {
         </div>
         <button class="btn-secondary hs-assetlist-add" data-item-id="${item.ItemID}" data-prefix="${escapeHtml(prefix)}" style="margin-top:6px;width:100%;">+ Add Another Light</button>
       `;
+    } else if (item.InputType === 'Photo' || item.InputType === 'PhotoLocation') {
+      // Security's Daily Rounds — the photo itself IS the check (Note 3:
+      // no photo = Fail), captured live via the camera rather than
+      // picked from gallery, since the whole point is proof of presence
+      // at the moment of the round. 'PhotoLocation' additionally needs a
+      // free-text location name (Locations 2/3 aren't fixed — the ASO
+      // says where they went), 'Photo' alone is for the fixed Main Gate
+      // location. The actual timestamp compliance-wise comes from this
+      // log entry's own Timestamp (recorded at submission, which the
+      // round-window check already confirms falls inside 2–3 AM/4–5 PM)
+      // rather than pixels burned into the image.
+      const hasPhoto = !!current.photoName;
+      inputHtml = `
+        ${item.InputType === 'PhotoLocation' ? `
+          <input type="text" class="hs-photoloc-input" data-item-id="${item.ItemID}" value="${escapeHtml(current.locationText || '')}" placeholder="Which location did you enter?" style="width:100%;margin-top:6px;box-sizing:border-box;">
+        ` : ''}
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+          <button class="btn-secondary hs-photo-capture" data-item-id="${item.ItemID}" style="margin:0;">📷 ${hasPhoto ? 'Retake Photo' : 'Take Photo'}</button>
+          ${hasPhoto ? `<span class="muted" style="font-size:0.8rem;">✓ ${escapeHtml(current.photoName)}</span>` : ''}
+        </div>
+      `;
     } else { // Text
       inputHtml = `<textarea class="hs-text-input" data-item-id="${item.ItemID}" rows="2" style="width:100%;margin-top:6px;box-sizing:border-box;">${escapeHtml(current.result || '')}</textarea>`;
     }
@@ -1833,6 +2104,20 @@ const HSModule = (function () {
         });
         return;
       }
+      const photoBtn = e.target.closest('.hs-photo-capture');
+      if (photoBtn) {
+        const itemId = photoBtn.dataset.itemId;
+        const item = items.find(i => i.ItemID === itemId);
+        // Forces the actual camera (not gallery/file picker) — proof of
+        // presence at the moment of the round is the whole point.
+        MVOA.pickAttachment({ photoOnly: true, useCamera: true }).then(a => {
+          if (!a) return; // cancelled
+          pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoFile: a.file, photoName: a.name });
+          const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+          if (row && item) row.outerHTML = renderItemRow(item);
+        });
+        return;
+      }
       const btn = e.target.closest('.hs-pf-btn');
       if (!btn) return;
       const itemId = btn.dataset.itemId;
@@ -1850,6 +2135,10 @@ const HSModule = (function () {
         const idx = parseInt(e.target.dataset.idx, 10);
         if (pendingResults[itemId] && pendingResults[itemId].entries) pendingResults[itemId].entries[idx] = e.target.value;
         return; // no re-render — would steal focus mid-typing, same reasoning as Numeric
+      }
+      if (e.target.classList.contains('hs-photoloc-input')) {
+        pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { locationText: e.target.value });
+        return; // no re-render — would steal focus mid-typing
       }
       if (e.target.classList.contains('hs-remarks-input')) {
         pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { remarks: e.target.value });
@@ -1953,17 +2242,22 @@ const HSModule = (function () {
     if (isSubmittingChecklist) return;
     const errEl = container.querySelector('#hs-form-error');
     const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
+    const isRoundBased = currentTemplate.RoundBased === 'TRUE' || currentTemplate.RoundBased === 'true';
     // Authoritative re-check right before writing — the shift-selection
     // screen already hides an already-done shift, but re-verify here in
     // case of a stale cache or two tabs racing each other.
-    if (hasSubmittedToday(currentTemplate.TemplateID, isShiftBased ? currentShift : null)) {
-      errEl.textContent = isShiftBased
-        ? `${shiftLabel(currentShift)} shift has already been submitted today for this checklist.`
+    if (hasSubmittedToday(currentTemplate.TemplateID, (isShiftBased || isRoundBased) ? currentShift : null)) {
+      errEl.textContent = (isShiftBased || isRoundBased)
+        ? `${shiftLabel(currentShift)} has already been submitted today for this checklist.`
         : 'This checklist has already been submitted today.';
       return;
     }
     if (isShiftBased && !isWithinShiftWindow(currentShift, new Date())) {
       errEl.textContent = `${shiftLabel(currentShift)} shift can only be logged between ${shiftWindowLabel(currentShift)}.`;
+      return;
+    }
+    if (isRoundBased && !isWithinRoundWindow(currentShift, new Date())) {
+      errEl.textContent = `${shiftLabel(currentShift)} can only be logged between ${roundWindowLabel(currentShift)}.`;
       return;
     }
     if (!pendingPerformedBy || !pendingPerformedBy.trim()) {
@@ -2022,6 +2316,35 @@ const HSModule = (function () {
       const existingLogRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
       const existingLogIds = existingLogRows.slice(1).map(r => r[0]).filter(Boolean);
       const logId = MVOA.nextId('HSLOG', existingLogIds);
+
+      // Photo / PhotoLocation — Security's Daily Rounds. Never blocks
+      // submission (a round can genuinely happen without every location
+      // reached), but per Note 3 a missing photo IS a Fail, same as any
+      // other failed check — uploads happen here, right before the
+      // generic result-row serialization below, writing result/remarks
+      // in the exact shape that existing generic code already expects,
+      // so no special-casing needed downstream.
+      for (const item of items) {
+        if (item.InputType !== 'Photo' && item.InputType !== 'PhotoLocation') continue;
+        const r = pendingResults[item.ItemID] || {};
+        const needsLocation = item.InputType === 'PhotoLocation';
+        const missingLocation = needsLocation && !(r.locationText || '').trim();
+        if (!r.photoFile) {
+          pendingResults[item.ItemID] = Object.assign({}, r, { result: 'Fail', remarks: missingLocation ? 'No photo captured and no location entered.' : 'No photo captured.' });
+          continue;
+        }
+        if (missingLocation) {
+          pendingResults[item.ItemID] = Object.assign({}, r, { result: 'Fail', remarks: 'Photo captured but no location entered.' });
+          continue;
+        }
+        submitBtn.textContent = 'Uploading photo…';
+        const photoUrl = await MVOA.uploadPhotoToDrive(r.photoFile, `${logId}_${item.ItemID}_${r.photoName}`);
+        pendingResults[item.ItemID] = Object.assign({}, r, {
+          result: 'Pass',
+          remarks: needsLocation ? `Location: ${r.locationText.trim()} | Photo: ${photoUrl}` : `Photo: ${photoUrl}`
+        });
+      }
+      submitBtn.textContent = 'Submitting…';
 
       const anyFail = items.some(i => pendingResults[i.ItemID]?.result === 'Fail') ||
         items.some(i => i.InputType === 'AssetList' && (pendingResults[i.ItemID]?.entries || []).some(v => v && v.trim()));
