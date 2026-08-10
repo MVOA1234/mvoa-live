@@ -47,9 +47,9 @@ const HSModule = (function () {
   const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
-  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan', 'Group'];
-  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay'];
-  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix', 'TypicalValue'];
+  const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan', 'Group', 'LayoutImage'];
+  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay', 'ShowZoneOfDay', 'FailTaskCategory'];
+  const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix', 'TypicalValue', 'DayApplicability'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes', 'AssetID', 'AssetName'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
@@ -75,6 +75,40 @@ const HSModule = (function () {
   function categoryByKey(key) { return categoriesCache.find(c => c.CategoryKey === key); }
   function categoryLabel(key) { const c = categoryByKey(key); return c ? c.Label : key; }
   function failTaskCategoryFor(key) { const c = categoryByKey(key); return c ? c.FailTaskCategory : ''; }
+  // Housekeeping needs its two templates to route Fails to two
+  // DIFFERENT Daily Ops categories (Zone Rotation → Landscape & Garden;
+  // Building Cleaning → Housekeeping) even though both live under the
+  // same Plant Rounds "Housekeeping" category — a per-template override
+  // on top of the existing per-category default, blank falls back to
+  // the category's own FailTaskCategory exactly as before for every
+  // template that doesn't set one.
+  function effectiveFailTaskCategory(template, qrTarget) {
+    return (template && template.FailTaskCategory) || failTaskCategoryFor(qrTarget);
+  }
+  // Day-of-week gating for items whose real-world schedule is locked to
+  // specific weekdays (e.g. "Sweeping Mon/Wed/Fri") — a comma list of
+  // 3-letter day names in DayApplicability; blank means every day, same
+  // as always. On a non-matching day the item is treated the same way
+  // Required=FALSE items already are (shown, optional, never counted as
+  // a Fail if left blank) — this is a SOFT gate layered on top of
+  // Required, not a replacement for it: a day-gated item can still have
+  // Required=TRUE (it genuinely must be done — just only on its days).
+  const WEEKDAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function isItemDueToday(item, now) {
+    if (!item.DayApplicability || !item.DayApplicability.trim()) return true;
+    const today = WEEKDAY_ABBR[(now || new Date()).getDay()];
+    return item.DayApplicability.split(',').map(s => s.trim()).includes(today);
+  }
+  // Which landscape zone is due today, for the Zone Rotation template's
+  // banner (ShowZoneOfDay=TRUE) — Mon=Zone1..Fri=Zone5, Sat/Sun=catch-up
+  // for whatever zone didn't get finished that week. Purely a display
+  // label; the checklist items themselves are the same 7 activities
+  // regardless of which zone they're being applied to that day.
+  function landscapeZoneForToday(now) {
+    const day = (now || new Date()).getDay(); // 0=Sun..6=Sat
+    const zoneByDay = { 1: 'Zone 1', 2: 'Zone 2', 3: 'Zone 3', 4: 'Zone 4', 5: 'Zone 5' };
+    return zoneByDay[day] || 'Catch-up / Pending Work';
+  }
 
   function rowsToObjs(rows, cols) {
     return rows.slice(1).map((r, i) => {
@@ -1463,11 +1497,17 @@ const HSModule = (function () {
       .filter(t => t.QRTarget === currentScan.qrTarget)
       .sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
 
+    const cat = categoryByKey(currentScan.qrTarget);
+    const layoutImageHtml = cat && cat.LayoutImage
+      ? `<img src="${escapeHtml(cat.LayoutImage)}" alt="${escapeHtml(cat.Label)} layout" style="width:100%;max-width:900px;border-radius:8px;margin-bottom:12px;display:block;">`
+      : '';
+
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}${currentScan.assetName ? ' — ' + escapeHtml(currentScan.assetName) : ''}</strong>
       </div>
+      ${layoutImageHtml}
       <p class="muted" style="margin:0 0 12px;">${canEdit ? 'Choose which checklist to log.' : "View only — you don't have edit access here."}</p>
       <div id="hs-template-cards"></div>
     `;
@@ -1634,11 +1674,13 @@ const HSModule = (function () {
     // the moment the technician starts typing.
     await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
 
+    const showZone = currentTemplate.ShowZoneOfDay === 'TRUE' || currentTemplate.ShowZoneOfDay === 'true';
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
         <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
+      ${showZone ? `<div class="card" style="max-width:600px;margin:0 0 12px 0;background:#eef6fb;"><p style="margin:0;font-weight:700;color:var(--mvoa-blue);">📍 Today's Zone: ${escapeHtml(landscapeZoneForToday())}</p></div>` : ''}
       <div class="card" style="max-width:600px;margin:0 0 12px 0;">
         <label>Performed By
           <input type="text" id="hs-performed-by" value="${escapeHtml(pendingPerformedBy)}">
@@ -1738,6 +1780,7 @@ const HSModule = (function () {
       <div class="mvoa-list-item" data-item-row="${item.ItemID}">
         <strong>${escapeHtml(item.CheckItem)}</strong>
         ${item.Requirement ? `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${escapeHtml(item.Requirement)}</p>` : ''}
+        ${!isItemDueToday(item) ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Not scheduled today (${escapeHtml(item.DayApplicability)}) — optional</p>` : ''}
         ${inputHtml}
       </div>
     `;
@@ -1934,6 +1977,7 @@ const HSModule = (function () {
     const missing = items.filter(i =>
       (i.InputType === 'PassFail' || i.InputType === 'Numeric') &&
       !(i.Required === 'FALSE' || i.Required === 'false') &&
+      isItemDueToday(i) &&
       !pendingResults[i.ItemID]?.result
     );
     if (missing.length) {
@@ -2024,7 +2068,7 @@ const HSModule = (function () {
       for (const item of failedItems) {
         try {
           await MVOA.createOpsTask({
-            categoryName: failTaskCategoryFor(currentScan.qrTarget),
+            categoryName: effectiveFailTaskCategory(currentTemplate, currentScan.qrTarget),
             title: `Plant Rounds: ${item.CheckItem} failed — ${categoryLabel(currentScan.qrTarget)}`,
             description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nLogged by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
             assigneeTitle: 'Facility Manager',
@@ -2081,7 +2125,7 @@ const HSModule = (function () {
             if (hasOpenTaskFor(assetCode)) continue; // still-open task from an earlier night already tracks this light
             try {
               await MVOA.createOpsTask({
-                categoryName: failTaskCategoryFor(currentScan.qrTarget),
+                categoryName: effectiveFailTaskCategory(currentTemplate, currentScan.qrTarget),
                 title: `Plant Rounds: ${item.CheckItem} — ${assetCode}`,
                 description: `Reported not working by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
                 assigneeTitle: 'Facility Manager',
