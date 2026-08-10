@@ -96,6 +96,12 @@ const HSModule = (function () {
   const WEEKDAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   function isItemDueToday(item, now) {
     if (!item.DayApplicability || !item.DayApplicability.trim()) return true;
+    // 'WeeklyOnce' — no fixed day, just needs to happen once during the
+    // week (e.g. Cob Web Removal). Always "due" so it never shows the
+    // day-locked items' "not scheduled today" treatment; its own weekly
+    // check (evaluateWeeklyItemCompliance) handles Fail/task-creation on
+    // Sunday instead, same shape as the In/Out Log's weekly evaluation.
+    if (item.DayApplicability === 'WeeklyOnce') return true;
     const today = WEEKDAY_ABBR[(now || new Date()).getDay()];
     return item.DayApplicability.split(',').map(s => s.trim()).includes(today);
   }
@@ -751,7 +757,7 @@ const HSModule = (function () {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
-        <strong>🚚 In / Out Log</strong>
+        <strong>🚚 In / Out Log — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
       <div id="hs-inout-body"><p class="muted">Loading…</p></div>
     `;
@@ -879,6 +885,61 @@ const HSModule = (function () {
         // Best-effort — this runs passively on page load; don't block
         // the screen over it, worst case the check just runs again
         // next time someone opens this screen today.
+      }
+    }
+  }
+
+  // WEEKLY-ONLY ITEMS (DayApplicability === 'WeeklyOnce') — e.g. Cob Web
+  // Removal, DG/EB/Server/WTP Room Cleaning. No fixed day; just needs to
+  // happen once Monday–Sunday. Evaluated only on Sunday, same shape as
+  // evaluateWeeklyInOutCompliance: for every WeeklyOnce item on every
+  // template belonging to this category, check whether any log for that
+  // template this week recorded a Pass for it; if not, create one Ops
+  // task. Dedup by exact title (embeds the week's Monday date) so
+  // opening the screen repeatedly on Sunday never double-creates, but a
+  // closed task from an earlier week never blocks detecting a new
+  // shortfall this week.
+  async function evaluateWeeklyItemCompliance(qrTarget) {
+    const now = new Date();
+    if (now.getDay() !== 0) return; // Sunday only
+    const monday = mondayOfWeek(now);
+    const relevantTemplates = templatesCache.filter(t => t.QRTarget === qrTarget);
+    for (const template of relevantTemplates) {
+      const weeklyItems = itemsCache.filter(i => i.TemplateID === template.TemplateID && i.DayApplicability === 'WeeklyOnce');
+      if (!weeklyItems.length) continue;
+      let logIdsThisWeek, results;
+      try {
+        const logRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
+        logIdsThisWeek = new Set(
+          rowsToObjs(logRows, LOG_COLS)
+            .filter(l => l.TemplateID === template.TemplateID &&
+              new Date(l.Timestamp) >= monday && new Date(l.Timestamp) <= new Date(now.getTime() + 86400000))
+            .map(l => l.LogID)
+        );
+        const resultRows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
+        results = rowsToObjs(resultRows, RESULT_COLS);
+      } catch (e) {
+        return; // best-effort — passive check, just retries next time this screen opens
+      }
+      for (const item of weeklyItems) {
+        const donePass = results.some(r => r.ItemID === item.ItemID && logIdsThisWeek.has(r.LogID) && r.Result === 'Pass');
+        if (donePass) continue;
+        const title = `Plant Rounds: ${item.CheckItem} not done this week — ${categoryLabel(qrTarget)} (week of ${isoDate(monday)})`;
+        try {
+          const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+          const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
+          if (alreadyExists) continue;
+          await MVOA.createOpsTask({
+            categoryName: effectiveFailTaskCategory(template, qrTarget),
+            title,
+            description: `${item.CheckItem} (${template.Name}) has no Pass recorded Monday–Sunday this week.`,
+            assigneeTitle: 'Facility Manager',
+            priority: 'Medium',
+            createdBy: 'System (Plant Rounds — weekly item check)'
+          });
+        } catch (e) {
+          // best-effort — same reasoning as above
+        }
       }
     }
   }
@@ -1666,6 +1727,12 @@ const HSModule = (function () {
       return;
     }
 
+    // Passive Sunday check for this category's WeeklyOnce items — not
+    // awaited, same reasoning as the In/Out Log's weekly check: runs in
+    // the background whenever someone opens this category on a Sunday,
+    // never blocks rendering the screen itself.
+    evaluateWeeklyItemCompliance(currentScan.qrTarget);
+
     const targetTemplates = templatesCache
       .filter(t => t.QRTarget === currentScan.qrTarget)
       .sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
@@ -2011,6 +2078,13 @@ const HSModule = (function () {
       // is never required, never blocks submission.
       const entries = current.entries || [];
       const prefix = item.AssetPrefix || '';
+      // Button label used to be hardcoded "Light" (only correct for
+      // Street Lights). Derived instead from the item's own CheckItem
+      // text so any AssetList item (CCTV, future ones) gets a sensible
+      // label with no schema change needed — e.g. "CCTV Not Working"
+      // -> "+ Add Another CCTV". Falls back to "Entry" if the item
+      // doesn't follow that "<noun> Not Working" phrasing.
+      const assetNoun = (item.CheckItem || '').replace(/\s*Not Working$/i, '').trim() || 'Entry';
       inputHtml = `
         <div class="hs-assetlist-entries" data-item-id="${item.ItemID}">
           ${entries.map((val, idx) => `
@@ -2021,7 +2095,7 @@ const HSModule = (function () {
             </div>
           `).join('')}
         </div>
-        <button class="btn-secondary hs-assetlist-add" data-item-id="${item.ItemID}" data-prefix="${escapeHtml(prefix)}" style="margin-top:6px;width:100%;">+ Add Another Light</button>
+        <button class="btn-secondary hs-assetlist-add" data-item-id="${item.ItemID}" data-prefix="${escapeHtml(prefix)}" style="margin-top:6px;width:100%;">+ Add Another ${escapeHtml(assetNoun)}</button>
       `;
     } else if (item.InputType === 'Photo' || item.InputType === 'PhotoLocation') {
       // Security's Daily Rounds — the photo itself IS the check (Note 3:
@@ -2051,7 +2125,8 @@ const HSModule = (function () {
       <div class="mvoa-list-item" data-item-row="${item.ItemID}">
         <strong>${escapeHtml(item.CheckItem)}</strong>
         ${item.Requirement ? `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${escapeHtml(item.Requirement)}</p>` : ''}
-        ${!isItemDueToday(item) ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Not scheduled today (${escapeHtml(item.DayApplicability)}) — optional</p>` : ''}
+        ${item.DayApplicability === 'WeeklyOnce' ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Weekly — log on any day this week</p>` : ''}
+        ${(item.DayApplicability && item.DayApplicability !== 'WeeklyOnce' && !isItemDueToday(item)) ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Not scheduled today (${escapeHtml(item.DayApplicability)}) — optional</p>` : ''}
         ${inputHtml}
       </div>
     `;
