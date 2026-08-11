@@ -1602,6 +1602,12 @@ const HSModule = (function () {
         const rows = templatesCache
           .filter(t => t.QRTarget === target)
           .flatMap(t => {
+            // CustomScreen templates (e.g. In/Out Log) don't write to HSLog
+            // at all, so dueInfo() would show "Never logged"/"Due" forever
+            // regardless of real activity — same reasoning as the checklist
+            // picker screen's identical special-case. Shown as an ongoing
+            // log here too, consistent with that screen.
+            if (t.CustomScreen) return [{ template: t, due: { overdue: false, text: 'Ongoing log — see In/Out Monthly Report for activity' }, assetLabel: '' }];
             // Per-asset expansion — a template shared by multiple physical
             // units (e.g. 18 Distribution Panels, each scanned separately)
             // shows one row per unit rather than one row for the whole
