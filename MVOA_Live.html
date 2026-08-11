@@ -701,12 +701,12 @@
               </select>
             </td>`;
         }).join('');
-        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;">${cat.Icon || ''} ${cat.Name}</td>${cells}</tr>`;
+        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">${cat.Icon || ''} ${cat.Name}</td>${cells}</tr>`;
       }).join('');
 
       wrap.innerHTML = `
         <table class="mvoa-table" style="border-collapse:collapse;">
-          <thead><tr><th style="padding:6px 8px;">Category</th>${headerCells}</tr></thead>
+          <thead><tr><th style="padding:6px 8px;position:sticky;left:0;background:#fff;z-index:2;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">Category</th>${headerCells}</tr></thead>
           <tbody>${bodyRows}</tbody>
         </table>
       `;
@@ -851,12 +851,12 @@
               </select>
             </td>`;
         }).join('');
-        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;">${cat.Icon || ''} ${cat.Label}</td>${cells}</tr>`;
+        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">${cat.Icon || ''} ${cat.Label}</td>${cells}</tr>`;
       }).join('');
 
       wrap.innerHTML = `
         <table class="mvoa-table" style="border-collapse:collapse;">
-          <thead><tr><th style="padding:6px 8px;">Category</th>${headerCells}</tr></thead>
+          <thead><tr><th style="padding:6px 8px;position:sticky;left:0;background:#fff;z-index:2;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">Category</th>${headerCells}</tr></thead>
           <tbody>${bodyRows}</tbody>
         </table>
       `;
