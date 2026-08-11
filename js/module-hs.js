@@ -54,6 +54,7 @@ const HSModule = (function () {
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes', 'AssetID', 'AssetName'];
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
   const CATEGORY_ASSET_COLS = ['CategoryKey', 'AssetID', 'AssetLabel', 'Active'];
+  const ROUND_WINDOW_COLS = ['RoundKey', 'Label', 'StartHour', 'StartMinute', 'EndHour', 'EndMinute', 'Active'];
 
   let categoriesCache = [];
   let templatesCache = [];
@@ -61,6 +62,7 @@ const HSModule = (function () {
   let itemOptionsCache = [];
   let logsCache = [];
   let categoryAssetsCache = []; // per-asset master list — CategoryKey|AssetID|AssetLabel|Active
+  let roundWindowsCache = []; // sheet-driven Security round windows — see loadAll's fail-open fallback
                                  // (e.g. all 18 Distribution Panels), so Due Status can show a
                                  // unit that's never been scanned yet, not just ones with a log
 
@@ -160,6 +162,20 @@ const HSModule = (function () {
       categoryAssetsCache = rowsToObjs(categoryAssets, CATEGORY_ASSET_COLS).filter(a => a.Active === 'TRUE' || a.Active === 'true' || a.Active === true || a.Active === '1');
     } catch (e) {
       categoryAssetsCache = [];
+    }
+    // Optional tab — Security's Daily Rounds windows (RoundKey, Label,
+    // StartHour, StartMinute, EndHour, EndMinute, Active), sheet-driven
+    // so a round can be added, relabeled, retimed, or disabled without
+    // a code deploy. Fails open to today's exact Round1/Round2 setup if
+    // the tab doesn't exist yet, so nothing changes until it's created.
+    try {
+      const roundWindows = await MVOA.sheetsRead(MVOA.TABS.hsRoundWindows);
+      roundWindowsCache = rowsToObjs(roundWindows, ROUND_WINDOW_COLS).filter(r => r.Active === 'TRUE' || r.Active === 'true' || r.Active === true || r.Active === '1');
+    } catch (e) {
+      roundWindowsCache = [
+        { RoundKey: 'Round1', Label: 'Round 1', StartHour: '2', StartMinute: '0', EndHour: '3', EndMinute: '0' },
+        { RoundKey: 'Round2', Label: 'Round 2', StartHour: '16', StartMinute: '0', EndHour: '17', EndMinute: '0' }
+      ];
     }
   }
 
@@ -1125,9 +1141,9 @@ const HSModule = (function () {
     for (let i = 0; i < 7; i++) days.push(new Date(weeklyRoundsWeekStart.getTime() + i * 86400000));
     bodyEl.innerHTML = days.map(d => {
       const dayLogs = logs.filter(l => new Date(l.Timestamp).toDateString() === d.toDateString());
-      const roundsHtml = ['Round1', 'Round2'].map(round => {
+      const roundsHtml = activeRoundKeys().map(round => {
         const log = dayLogs.find(l => l.Shift === round);
-        const roundLabel = round === 'Round1' ? 'Round 1 (2–3 AM)' : 'Round 2 (4–5 PM)';
+        const roundLabel = shiftLabel(round);
         if (!log) return `<div style="margin:6px 0;"><strong>${roundLabel}:</strong> <span class="muted">Not logged</span></div>`;
         const itemsHtml = items.map(item => {
           const r = results.find(rr => rr.LogID === log.LogID && rr.ItemID === item.ItemID);
@@ -1435,7 +1451,7 @@ const HSModule = (function () {
     // values everywhere else (cellFor/performedByFor just compare
     // l.Shift === shift generically), so grouping by them here is a
     // one-line fix, not a deeper change.
-    const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? ['Round1', 'Round2'] : [null];
+    const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? activeRoundKeys() : [null];
     const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
     function cellFor(itemId, day, shift) {
@@ -1698,8 +1714,8 @@ const HSModule = (function () {
 
   function shiftLabel(s) {
     if (s === '2nd3rd') return '2nd & 3rd'; // kept for reading old log entries only — no longer written
-    if (s === 'Round1') return 'Round 1 (2–3 AM)';
-    if (s === 'Round2') return 'Round 2 (4–5 PM)';
+    const win = roundWindowsCache.find(r => r.RoundKey === s);
+    if (win) return `${win.Label || s} (${roundWindowLabel(s)})`;
     return s;
   }
 
@@ -2080,16 +2096,30 @@ const HSModule = (function () {
   // machinery though, since those already just compare arbitrary string
   // values — 'Round1'/'Round2' work as drop-in Shift values with zero
   // changes needed to that generic matching logic.
+  function activeRoundKeys() {
+    return roundWindowsCache
+      .slice()
+      .sort((a, b) => (parseInt(a.StartHour, 10) || 0) - (parseInt(b.StartHour, 10) || 0))
+      .map(r => r.RoundKey);
+  }
+  function formatRoundHour(h, m) {
+    h = parseInt(h, 10) || 0; m = parseInt(m, 10) || 0;
+    const period = h >= 12 ? 'PM' : 'AM';
+    let h12 = h % 12; if (h12 === 0) h12 = 12;
+    return m ? `${h12}:${String(m).padStart(2, '0')} ${period}` : `${h12} ${period}`;
+  }
   function isWithinRoundWindow(round, now) {
+    const win = roundWindowsCache.find(r => r.RoundKey === round);
+    if (!win) return false; // unknown/disabled round — safe default, matches "not allowed" rather than silently open
     const h = now.getHours() + now.getMinutes() / 60;
-    if (round === 'Round1') return h >= 2 && h < 3;
-    if (round === 'Round2') return h >= 16 && h < 17;
-    return true;
+    const start = (parseInt(win.StartHour, 10) || 0) + (parseInt(win.StartMinute, 10) || 0) / 60;
+    const end = (parseInt(win.EndHour, 10) || 0) + (parseInt(win.EndMinute, 10) || 0) / 60;
+    return h >= start && h < end;
   }
   function roundWindowLabel(round) {
-    if (round === 'Round1') return '2 AM – 3 AM';
-    if (round === 'Round2') return '4 PM – 5 PM';
-    return '';
+    const win = roundWindowsCache.find(r => r.RoundKey === round);
+    if (!win) return '';
+    return `${formatRoundHour(win.StartHour, win.StartMinute)} – ${formatRoundHour(win.EndHour, win.EndMinute)}`;
   }
 
   // ───────────────────────────────────────────────────────────
@@ -2162,16 +2192,18 @@ const HSModule = (function () {
 
     if (isDaily && isRoundBased && !currentShift) {
       const now = new Date();
-      const roundDone = { Round1: hasSubmittedToday(currentTemplate.TemplateID, 'Round1'),
-        Round2: hasSubmittedToday(currentTemplate.TemplateID, 'Round2') };
-      const roundBtn = (round, label) => {
+      const roundKeys = activeRoundKeys();
+      const roundDone = {};
+      roundKeys.forEach(k => { roundDone[k] = hasSubmittedToday(currentTemplate.TemplateID, k); });
+      const roundBtn = (round, idx) => {
+        const label = shiftLabel(round);
         if (roundDone[round]) {
           return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Already submitted today</button>`;
         }
         if (!isWithinRoundWindow(round, now)) {
           return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Only allowed ${roundWindowLabel(round)}</button>`;
         }
-        return `<button class="btn-${round === 'Round1' ? 'primary' : 'secondary'} hs-round-btn" data-round="${round}" style="width:100%;margin-bottom:8px;">${label}</button>`;
+        return `<button class="btn-${idx === 0 ? 'primary' : 'secondary'} hs-round-btn" data-round="${round}" style="width:100%;margin-bottom:8px;">${label}</button>`;
       };
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
@@ -2185,8 +2217,7 @@ const HSModule = (function () {
         </div>
         <div class="card" style="max-width:420px;margin:0;">
           <p class="muted" style="margin:0 0 10px;">Which round is this for?</p>
-          ${roundBtn('Round1', 'Round 1 (2–3 AM)')}
-          ${roundBtn('Round2', 'Round 2 (4–5 PM)')}
+          ${roundKeys.length ? roundKeys.map((k, i) => roundBtn(k, i)).join('') : '<p class="muted">No round windows configured — check HSRoundWindows.</p>'}
         </div>
       `;
       container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; });
