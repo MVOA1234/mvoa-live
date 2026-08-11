@@ -818,7 +818,16 @@ const HSModule = (function () {
     }).join('');
 
     bodyEl.querySelectorAll('.hs-inout-btn').forEach(btn => {
-      btn.addEventListener('click', () => logInOutEntry(btn.dataset.type, btn.dataset.direction, btn.dataset.photo === 'true', container));
+      btn.addEventListener('click', () => {
+        // Disable every log button the instant one is tapped — the
+        // isLoggingInOut flag already blocks a re-entrant save, but
+        // there was no visual feedback before the screen re-rendered,
+        // so an impatient double-tap (or a slow network) could look
+        // like nothing happened and invite a second real tap, which
+        // is how "logged twice" entries were showing up.
+        bodyEl.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = true);
+        logInOutEntry(btn.dataset.type, btn.dataset.direction, btn.dataset.photo === 'true', container);
+      });
     });
   }
 
@@ -830,7 +839,13 @@ const HSModule = (function () {
       // Forces the actual camera — the timestamped photo IS the record
       // that the vehicle was there, same reasoning as Security's Rounds.
       const a = await MVOA.pickAttachment({ photoOnly: true, useCamera: true });
-      if (!a) return; // cancelled
+      if (!a) {
+        // Cancelled — the calling click handler disabled every log
+        // button before this ran, so re-enable them here since we're
+        // returning without the re-render that would normally do it.
+        container.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = false);
+        return;
+      }
       photoFile = a.file; photoName = a.name;
     }
     isLoggingInOut = true;
@@ -846,9 +861,10 @@ const HSModule = (function () {
         PhotoURL: photoUrl, LoggedBy: user.name
       })[c]);
       await MVOA.sheetsAppend(TAB_HS_INOUT_LOG, row);
-      await renderInOutLog(container);
+      await renderInOutLog(container); // fresh render creates its own enabled buttons
     } catch (e) {
       alert('Could not save entry: ' + e.message);
+      container.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = false); // no re-render on this path, so re-enable manually
     }
     isLoggingInOut = false;
   }
@@ -1289,7 +1305,7 @@ const HSModule = (function () {
 
     const templateSelect = container.querySelector('#hs-monthly-template');
     function populateTemplateOptions() {
-      const available = templatesCache.filter(t => t.QRTarget === monthlyReportCategory).sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
+      const available = templatesCache.filter(t => t.QRTarget === monthlyReportCategory && !t.CustomScreen).sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
       if (!available.length) {
         templateSelect.innerHTML = '<option value="">No templates for this category</option>';
         monthlyReportTemplateId = '';
@@ -2272,6 +2288,7 @@ const HSModule = (function () {
         ${item.Requirement ? `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${escapeHtml(item.Requirement)}</p>` : ''}
         ${item.DayApplicability === 'WeeklyOnce' ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Weekly — log on any day this week</p>` : ''}
         ${(item.DayApplicability && item.DayApplicability !== 'WeeklyOnce' && !isItemDueToday(item)) ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Not scheduled today (${escapeHtml(item.DayApplicability)}) — optional</p>` : ''}
+        ${!item.DayApplicability ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Daily</p>` : ''}
         ${inputHtml}
       </div>
     `;
