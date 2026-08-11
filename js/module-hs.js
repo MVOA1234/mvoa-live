@@ -956,6 +956,8 @@ const HSModule = (function () {
         <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
         <button id="hs-report-hours" class="btn-secondary" style="width:100%;margin-bottom:8px;">⏱️ DG Running Hours</button>
         <button id="hs-report-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">📅 Monthly Report</button>
+        <button id="hs-report-weekly-rounds" class="btn-secondary" style="width:100%;margin-bottom:8px;">📷 Weekly Rounds Report (Security)</button>
+        <button id="hs-report-inout-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🚚 In/Out Monthly Report</button>
         <button id="hs-report-schedule" class="btn-secondary" style="width:100%;">🗂️ Inspection Schedule</button>
       </div>
     `;
@@ -965,7 +967,150 @@ const HSModule = (function () {
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
     container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
     container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
+    container.querySelector('#hs-report-weekly-rounds').addEventListener('click', () => renderWeeklyRoundsReport(container));
+    container.querySelector('#hs-report-inout-monthly').addEventListener('click', () => renderInOutMonthlyReport(container));
     container.querySelector('#hs-report-schedule').addEventListener('click', () => renderInspectionSchedule(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // WEEKLY ROUNDS REPORT — Security's Daily Rounds Photos (Round1/
+  // Round2), one week at a time, day by day, with a link to every
+  // photo taken. Built as its own report (rather than folding into
+  // the generic Monthly Report matrix) because the whole point of
+  // this checklist is the photo itself — a Pass/Fail cell tells you
+  // nothing here. Photo URLs are pulled from each item result's
+  // Remarks text ("Photo: <url>" / "Location: <text> | Photo: <url>"),
+  // the same convention renderChecklistForm already writes on submit.
+  // ───────────────────────────────────────────────────────────
+  let weeklyRoundsWeekStart = mondayOfWeek(new Date());
+
+  function renderWeeklyRoundsReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>📷 Weekly Rounds Report — Security</strong>
+      </div>
+      <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
+        <button id="hs-week-prev" class="btn-secondary">← Prev Week</button>
+        <span class="muted">Week of ${weeklyRoundsWeekStart.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+        <button id="hs-week-next" class="btn-secondary">Next Week →</button>
+      </div>
+      <div id="hs-weekly-rounds-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelector('#hs-week-prev').addEventListener('click', () => {
+      weeklyRoundsWeekStart = new Date(weeklyRoundsWeekStart.getTime() - 7 * 86400000);
+      renderWeeklyRoundsReport(container);
+    });
+    container.querySelector('#hs-week-next').addEventListener('click', () => {
+      weeklyRoundsWeekStart = new Date(weeklyRoundsWeekStart.getTime() + 7 * 86400000);
+      renderWeeklyRoundsReport(container);
+    });
+    loadWeeklyRoundsBody(container);
+  }
+
+  function photoUrlFromRemarks(remarks) {
+    const m = (remarks || '').match(/Photo:\s*(\S+)/);
+    return m ? m[1] : '';
+  }
+  function locationFromRemarks(remarks) {
+    const m = (remarks || '').match(/Location:\s*([^|]+)\s*\|/);
+    return m ? m[1].trim() : '';
+  }
+
+  async function loadWeeklyRoundsBody(container) {
+    const bodyEl = container.querySelector('#hs-weekly-rounds-body');
+    if (!bodyEl) return; // user navigated away before this resolved
+    const template = templatesCache.find(t => t.QRTarget === 'Security' && (t.RoundBased === 'TRUE' || t.RoundBased === 'true'));
+    if (!template) { bodyEl.innerHTML = `<p class="muted">Daily Rounds Photos template not found — check HSChecklistTemplates has a Security row with RoundBased=TRUE.</p>`; return; }
+    const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
+    let logs, results;
+    try {
+      const logRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
+      logs = rowsToObjs(logRows, LOG_COLS).filter(l => l.TemplateID === template.TemplateID);
+      const resultRows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
+      results = rowsToObjs(resultRows, RESULT_COLS);
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const days = [];
+    for (let i = 0; i < 7; i++) days.push(new Date(weeklyRoundsWeekStart.getTime() + i * 86400000));
+    bodyEl.innerHTML = days.map(d => {
+      const dayLogs = logs.filter(l => new Date(l.Timestamp).toDateString() === d.toDateString());
+      const roundsHtml = ['Round1', 'Round2'].map(round => {
+        const log = dayLogs.find(l => l.Shift === round);
+        const roundLabel = round === 'Round1' ? 'Round 1 (2–3 AM)' : 'Round 2 (4–5 PM)';
+        if (!log) return `<div style="margin:6px 0;"><strong>${roundLabel}:</strong> <span class="muted">Not logged</span></div>`;
+        const itemsHtml = items.map(item => {
+          const r = results.find(rr => rr.LogID === log.LogID && rr.ItemID === item.ItemID);
+          const remarks = r ? r.Remarks : '';
+          const photoUrl = photoUrlFromRemarks(remarks);
+          const loc = locationFromRemarks(remarks);
+          return `<div style="margin:2px 0 2px 12px;font-size:0.85rem;">${escapeHtml(item.CheckItem)}${loc ? ' — ' + escapeHtml(loc) : ''}: ${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷 View photo</a>` : '<span style="color:#b3261e;">No photo — Fail</span>'}</div>`;
+        }).join('');
+        return `<div style="margin:6px 0;"><strong>${roundLabel}</strong> <span class="muted">— ${escapeHtml(log.PerformedBy)}</span>${itemsHtml}</div>`;
+      }).join('');
+      return `
+        <div class="card" style="margin:0 0 12px;">
+          <h4 style="margin:0 0 6px;color:var(--mvoa-blue);">${d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' })}</h4>
+          ${roundsHtml}
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // IN/OUT MONTHLY REPORT — a richer view than the generic Monthly
+  // Report matrix (which can't show CustomScreen data at all, since
+  // In/Out Log doesn't write to HSChecklistLog/HSChecklistItemResults —
+  // it has its own dedicated HSInOutLog sheet). One section per type
+  // (Sewage/Garbage/Water Tanker/Garden Waste), every entry for the
+  // chosen month with its time and a link to the photo where one was
+  // taken (Sewage/Water Tanker require one; Garbage/Garden Waste don't).
+  // ───────────────────────────────────────────────────────────
+  let inOutMonthlyMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; })();
+
+  function renderInOutMonthlyReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>🚚 In/Out Monthly Report</strong>
+      </div>
+      <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
+        <label class="muted">Month: <input id="hs-inout-month" type="month" value="${inOutMonthlyMonth}"></label>
+      </div>
+      <div id="hs-inout-monthly-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelector('#hs-inout-month').addEventListener('change', (e) => {
+      inOutMonthlyMonth = e.target.value;
+      loadInOutMonthlyBody(container);
+    });
+    loadInOutMonthlyBody(container);
+  }
+
+  async function loadInOutMonthlyBody(container) {
+    const bodyEl = container.querySelector('#hs-inout-monthly-body');
+    if (!bodyEl) return;
+    let logs;
+    try {
+      const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+      logs = rowsToObjs(rows, INOUT_LOG_COLS);
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const monthLogs = logs.filter(l => (l.Timestamp || '').startsWith(inOutMonthlyMonth));
+    bodyEl.innerHTML = IN_OUT_TYPES.map(t => {
+      const entries = monthLogs.filter(l => l.Type === t.key).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp));
+      return `
+        <div class="card" style="margin:0 0 16px;">
+          <h4 style="margin:0 0 8px;color:var(--mvoa-blue);">${escapeHtml(t.key)}</h4>
+          ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${formatDate(e.Timestamp)} — ${e.Direction}${e.PhotoURL ? ` · <a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷 View photo</a>` : ''} <span style="font-size:0.8rem;">(${escapeHtml(e.LoggedBy)})</span></p>`).join('') : '<p class="muted">No entries this month.</p>'}
+        </div>
+      `;
+    }).join('');
   }
 
   // ───────────────────────────────────────────────────────────
