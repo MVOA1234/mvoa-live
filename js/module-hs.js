@@ -803,14 +803,24 @@ const HSModule = (function () {
             ? (weekCount < t.weeklyMin ? ` <span style="color:#b3261e;font-weight:700;">— below the minimum of ${t.weeklyMin}</span>` : ` <span style="color:green;font-weight:700;">— meets the minimum</span>`)
             : ` (minimum ${t.weeklyMin} by Sunday)`}</p>`
         : '';
+      // Which direction is actually loggable next — not just "today's"
+      // entries, since a vehicle could log IN before midnight and OUT
+      // after. Looks at the most recent entry of ANY day for this type;
+      // no entries yet, or the last one was OUT, means IN is next; last
+      // one was IN means OUT is next. This is what was missing before —
+      // nothing stopped "Log IN" being pressed twice in a row with no
+      // OUT in between, which is what looked like duplicate entries.
+      const lastEntry = logs.filter(l => l.Type === t.key).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp)).pop();
+      const currentlyIn = lastEntry && lastEntry.Direction === 'IN';
       return `
         <div class="card" style="max-width:520px;margin:0 0 16px 0;">
           <h3 style="margin:0 0 8px;color:var(--mvoa-blue);">${escapeHtml(t.key)}</h3>
           ${weeklyStatusHtml}
           <div style="display:flex;gap:8px;margin-bottom:8px;">
-            <button class="btn-primary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="IN" data-photo="${t.needsPhoto}" style="flex:1;">Log IN</button>
-            <button class="btn-secondary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="OUT" data-photo="${t.needsPhoto}" style="flex:1;">Log OUT</button>
+            <button class="btn-primary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="IN" data-photo="${t.needsPhoto}" style="flex:1;" ${currentlyIn ? 'disabled' : ''}>Log IN</button>
+            <button class="btn-secondary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="OUT" data-photo="${t.needsPhoto}" style="flex:1;" ${!currentlyIn ? 'disabled' : ''}>Log OUT</button>
           </div>
+          ${currentlyIn ? `<p class="muted" style="margin:0 0 8px;font-size:0.8rem;">Currently IN — log OUT before logging IN again.</p>` : ''}
           <p class="muted" style="margin:0 0 4px;font-size:0.8rem;font-weight:600;">Today:</p>
           ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
         </div>
@@ -823,8 +833,7 @@ const HSModule = (function () {
         // isLoggingInOut flag already blocks a re-entrant save, but
         // there was no visual feedback before the screen re-rendered,
         // so an impatient double-tap (or a slow network) could look
-        // like nothing happened and invite a second real tap, which
-        // is how "logged twice" entries were showing up.
+        // like nothing happened and invite a second real tap.
         bodyEl.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = true);
         logInOutEntry(btn.dataset.type, btn.dataset.direction, btn.dataset.photo === 'true', container);
       });
@@ -852,6 +861,25 @@ const HSModule = (function () {
     try {
       const existingRows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
       const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+      // Authoritative re-check, not just trusting the disabled button —
+      // guards against a stale screen or two people logging the same
+      // gate at once. Re-reads the actual last entry right before
+      // writing, same reasoning as hasSubmittedToday's submit-time check.
+      const allLogs = rowsToObjs(existingRows, INOUT_LOG_COLS);
+      const lastEntry = allLogs.filter(l => l.Type === typeKey).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp)).pop();
+      const currentlyIn = lastEntry && lastEntry.Direction === 'IN';
+      if (direction === 'IN' && currentlyIn) {
+        alert(`Already logged IN for ${typeKey} — log OUT first.`);
+        isLoggingInOut = false;
+        await renderInOutLog(container);
+        return;
+      }
+      if (direction === 'OUT' && !currentlyIn) {
+        alert(`${typeKey} isn't currently logged IN.`);
+        isLoggingInOut = false;
+        await renderInOutLog(container);
+        return;
+      }
       const logId = MVOA.nextId('IOLOG', existingIds);
       let photoUrl = '';
       if (photoFile) photoUrl = await MVOA.uploadPhotoToDrive(photoFile, `${logId}_${photoName}`);
