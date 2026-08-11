@@ -1360,7 +1360,7 @@ const HSModule = (function () {
     const DIRECTIONS = ['IN', 'OUT'];
 
     const headerGroupCells = IN_OUT_TYPES.map((t, gi) => `<th colspan="2" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;${gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${escapeHtml(t.key)}</th>`).join('');
-    const headerDirCells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((d, di) => `<th style="padding:4px 6px;font-size:0.75rem;${di === 1 && gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${d}</th>`).join('')).join('');
+    const headerDirCells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((d, di) => `<th style="padding:4px 6px;font-size:0.75rem;text-align:center;${di === 1 && gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${d}</th>`).join('')).join('');
 
     const bodyRows = [];
     for (let day = 1; day <= daysInMonth; day++) {
