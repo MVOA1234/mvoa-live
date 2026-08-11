@@ -55,6 +55,7 @@ const MVOA = (function () {
     hsAmcAssets: 'HSAMCAssets',
     hsAmcLog: 'HSAMCLog',
     hsCategoryAssets: 'HSCategoryAssets',
+    hsRoundWindows: 'HSRoundWindows',
     expenseRequests: 'Expense_Requests',
     expenseVotes: 'Expense_Votes',
     approvalMatrix: 'ApprovalMatrix',
