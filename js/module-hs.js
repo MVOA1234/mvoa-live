@@ -615,12 +615,18 @@ const HSModule = (function () {
         .filter(l => l.AssetID === assetId)
         .sort((a, b) => b.CompletedDate.localeCompare(a.CompletedDate));
       bodyEl.innerHTML = entries.length
-        ? entries.map(l => `
+        ? entries.map(l => {
+            const attachments = parseReportUrls(l.ReportURL);
+            const links = attachments.length
+              ? attachments.map(a => `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener">${a.kind === 'PHOTO' ? '📷' : a.kind === 'DOC' ? '📄' : '📎'} View ${a.kind === 'PHOTO' ? 'photo' : a.kind === 'DOC' ? 'document' : 'report'}</a>`).join(' &nbsp; ')
+              : '<span class="muted">No report attached</span>';
+            return `
             <p style="margin:6px 0;padding-bottom:6px;border-bottom:1px solid #eee;">
-              ${new Date(l.CompletedDate).toLocaleDateString()} — ${escapeHtml(l.CompletedBy)}
-              ${l.ReportURL ? ` · <a href="${escapeHtml(l.ReportURL)}" target="_blank" rel="noopener">📎 View report</a>` : ' · <span class="muted">No report attached</span>'}
+              ${new Date(l.CompletedDate).toLocaleDateString()} — ${escapeHtml(l.CompletedBy)}<br>
+              ${links}
             </p>
-          `).join('')
+          `;
+          }).join('')
         : '<p class="muted">No completions logged yet.</p>';
     } catch (e) {
       bodyEl.innerHTML = `<p class="error-text">Could not load history: ${e.message}</p>`;
@@ -740,23 +746,44 @@ const HSModule = (function () {
         <label>Completed Date
           <input type="date" id="hs-amc-done-date" value="${isoDate(new Date())}">
         </label>
-        <div id="hs-amc-done-attach" style="margin-top:10px;"></div>
-        <button id="hs-amc-done-attach-btn" class="btn-secondary" style="width:100%;">📎 Attach Report (optional)</button>
+        <div id="hs-amc-done-docs-list" style="margin-top:10px;"></div>
+        <button id="hs-amc-done-doc-btn" class="btn-secondary" style="width:100%;">📄 Attach Document (up to 3)</button>
+        <div id="hs-amc-done-photos-list" style="margin-top:10px;"></div>
+        <button id="hs-amc-done-photo-btn" class="btn-secondary" style="width:100%;margin-top:6px;">📷 Attach Photo (up to 3)</button>
         <button id="hs-amc-done-save" class="btn-primary" style="margin-top:10px;">Save</button>
         <button id="hs-amc-done-cancel" class="btn-secondary">Cancel</button>
         <p class="error-text" id="hs-amc-done-error"></p>
       </div>
     `;
     document.body.appendChild(modal);
-    let attachment = null;
+    // Up to 3 of each kind — stored together as a single "|"-joined
+    // ReportURL string, each entry tagged "DOC::url" / "PHOTO::url" so
+    // the History modal can label and icon them correctly. Older
+    // single-attachment log rows (no "::" tag) still render fine —
+    // parseReportUrls falls back to a generic link for those.
+    let docs = [], photos = [];
+
+    function renderAttachLists() {
+      modal.querySelector('#hs-amc-done-docs-list').innerHTML = docs.map((d, i) =>
+        `<p class="muted" style="margin:2px 0;">📄 ${escapeHtml(d.name)} <a href="#" class="hs-amc-remove-doc" data-idx="${i}">✕</a></p>`).join('');
+      modal.querySelector('#hs-amc-done-photos-list').innerHTML = photos.map((p, i) =>
+        `<p class="muted" style="margin:2px 0;">📷 ${escapeHtml(p.name)} <a href="#" class="hs-amc-remove-photo" data-idx="${i}">✕</a></p>`).join('');
+      modal.querySelector('#hs-amc-done-doc-btn').disabled = docs.length >= 3;
+      modal.querySelector('#hs-amc-done-photo-btn').disabled = photos.length >= 3;
+      modal.querySelectorAll('.hs-amc-remove-doc').forEach(el => el.addEventListener('click', (e) => { e.preventDefault(); docs.splice(+el.dataset.idx, 1); renderAttachLists(); }));
+      modal.querySelectorAll('.hs-amc-remove-photo').forEach(el => el.addEventListener('click', (e) => { e.preventDefault(); photos.splice(+el.dataset.idx, 1); renderAttachLists(); }));
+    }
 
     modal.querySelector('#hs-amc-done-cancel').addEventListener('click', () => modal.remove());
-    modal.querySelector('#hs-amc-done-attach-btn').addEventListener('click', async () => {
+    modal.querySelector('#hs-amc-done-doc-btn').addEventListener('click', async () => {
+      if (docs.length >= 3) return;
       const a = await MVOA.pickAttachment({ photoOnly: false, useCamera: false });
-      if (a) {
-        attachment = a;
-        modal.querySelector('#hs-amc-done-attach').innerHTML = `<p class="muted">📎 ${escapeHtml(a.name)}</p>`;
-      }
+      if (a) { docs.push(a); renderAttachLists(); }
+    });
+    modal.querySelector('#hs-amc-done-photo-btn').addEventListener('click', async () => {
+      if (photos.length >= 3) return;
+      const a = await MVOA.pickAttachment({ photoOnly: true, useCamera: false });
+      if (a) { photos.push(a); renderAttachLists(); }
     });
     modal.querySelector('#hs-amc-done-save').addEventListener('click', async () => {
       const errEl = modal.querySelector('#hs-amc-done-error');
@@ -766,11 +793,18 @@ const HSModule = (function () {
       saveBtn.disabled = true;
       saveBtn.textContent = 'Saving…';
       try {
-        let reportUrl = '';
-        if (attachment) {
-          saveBtn.textContent = 'Uploading report…';
-          reportUrl = await MVOA.uploadPhotoToDrive(attachment.file, `AMC_${asset.AssetCode}_${dateVal}_${attachment.name}`);
+        const urlParts = [];
+        for (let i = 0; i < docs.length; i++) {
+          saveBtn.textContent = `Uploading document ${i + 1}/${docs.length}…`;
+          const url = await MVOA.uploadPhotoToDrive(docs[i].file, `AMC_${asset.AssetCode}_${dateVal}_doc${i + 1}_${docs[i].name}`);
+          urlParts.push(`DOC::${url}`);
         }
+        for (let i = 0; i < photos.length; i++) {
+          saveBtn.textContent = `Uploading photo ${i + 1}/${photos.length}…`;
+          const url = await MVOA.uploadPhotoToDrive(photos[i].file, `AMC_${asset.AssetCode}_${dateVal}_photo${i + 1}_${photos[i].name}`);
+          urlParts.push(`PHOTO::${url}`);
+        }
+        const reportUrl = urlParts.join('|');
         const updated = Object.assign({}, asset, { LastDone: dateVal });
         await MVOA.sheetsUpdateRow(MVOA.TABS.hsAmcAssets, asset.rowNumber, AMC_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
         const existingLogRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcLog);
@@ -785,6 +819,19 @@ const HSModule = (function () {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save';
       }
+    });
+    renderAttachLists();
+  }
+
+  // Parses a ReportURL cell into individual (kind, url) entries. Handles
+  // the new "DOC::url|PHOTO::url|..." multi-attachment format as well as
+  // older single-attachment rows that have no "::" tag at all.
+  function parseReportUrls(reportUrl) {
+    if (!reportUrl) return [];
+    return reportUrl.split('|').filter(Boolean).map(part => {
+      const idx = part.indexOf('::');
+      if (idx === -1) return { kind: 'REPORT', url: part };
+      return { kind: part.slice(0, idx), url: part.slice(idx + 2) };
     });
   }
 
@@ -1059,7 +1106,6 @@ const HSModule = (function () {
         <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
         <button id="hs-report-hours" class="btn-secondary" style="width:100%;margin-bottom:8px;">⏱️ DG Running Hours</button>
         <button id="hs-report-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">📅 Monthly Report</button>
-        <button id="hs-report-weekly-rounds" class="btn-secondary" style="width:100%;margin-bottom:8px;">📷 Weekly Rounds Report (Security)</button>
         <button id="hs-report-rounds-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🗓️ Rounds Monthly Report (Security)</button>
         <button id="hs-report-inout-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🚚 In/Out Monthly Report</button>
         <button id="hs-report-schedule" class="btn-secondary" style="width:100%;">🗂️ Inspection Schedule</button>
@@ -1071,7 +1117,6 @@ const HSModule = (function () {
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
     container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
     container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
-    container.querySelector('#hs-report-weekly-rounds').addEventListener('click', () => renderWeeklyRoundsReport(container));
     container.querySelector('#hs-report-rounds-monthly').addEventListener('click', () => renderRoundsMonthlyReport(container));
     container.querySelector('#hs-report-inout-monthly').addEventListener('click', () => renderInOutMonthlyReport(container));
     container.querySelector('#hs-report-schedule').addEventListener('click', () => renderInspectionSchedule(container));
@@ -1129,28 +1174,38 @@ const HSModule = (function () {
     const [y, mo] = roundsMonthlyMonth.split('-').map(Number);
     const daysInMonth = new Date(y, mo, 0).getDate();
 
-    const headerGroupCells = rounds.map(r => `<th colspan="${items.length}" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;">${escapeHtml(shiftLabel(r))}</th>`).join('');
-    const headerItemCells = rounds.map(() => items.map(i => `<th style="padding:4px 6px;font-size:0.75rem;white-space:nowrap;">${escapeHtml(i.CheckItem)}</th>`).join('')).join('');
+    const DIVIDER = 'border-right:2px solid #999;';
+    const ROW_H = 'height:58px;vertical-align:middle;';
+
+    const headerGroupCells = rounds.map((r, gi) => `<th colspan="${items.length}" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;${gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(shiftLabel(r))}</th>`).join('');
+    const headerItemCells = rounds.map((r, gi) => items.map((i, ii) => `<th style="padding:4px 6px;font-size:0.75rem;white-space:nowrap;${ii === items.length - 1 && gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(i.CheckItem)}</th>`).join('')).join('');
 
     const bodyRows = [];
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${roundsMonthlyMonth}-${String(day).padStart(2, '0')}`;
       const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
-      const cells = rounds.map(round => {
+      const cells = rounds.map((round, gi) => {
         const log = dayLogs.find(l => l.Shift === round);
-        return items.map(item => {
-          if (!log) return `<td style="padding:4px 6px;text-align:center;color:#ccc;">—</td>`;
+        // Same submission timestamp applies to every item in this round
+        // (one log = one round submission) — shown under every item's
+        // cell, not just the location-bearing ones, since "when was this
+        // round actually done" is useful on Main Gate too.
+        const timeStr = log ? new Date(log.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+        return items.map((item, ii) => {
+          const divider = (ii === items.length - 1 && gi < rounds.length - 1) ? DIVIDER : '';
+          if (!log) return `<td style="padding:4px 6px;text-align:center;color:#ccc;${ROW_H}${divider}">—</td>`;
           const r = results.find(rr => rr.LogID === log.LogID && rr.ItemID === item.ItemID);
           const remarks = r ? r.Remarks : '';
           const photoUrl = photoUrlFromRemarks(remarks);
           const loc = locationFromRemarks(remarks); // only set for PhotoLocation items (Location 2 / Location 3) — Main Gate has none
-          return `<td style="padding:4px 6px;text-align:center;">
-            ${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}
-            ${loc ? `<br><span class="muted" style="font-size:0.7rem;white-space:nowrap;">${escapeHtml(loc)}</span>` : ''}
+          return `<td style="padding:4px 6px;text-align:center;${ROW_H}${divider}">
+            <div>${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}</div>
+            <div class="muted" style="font-size:0.7rem;white-space:nowrap;min-height:1em;">${loc ? escapeHtml(loc) : ''}</div>
+            <div class="muted" style="font-size:0.65rem;white-space:nowrap;min-height:1em;">${timeStr}</div>
           </td>`;
         }).join('');
       }).join('');
-      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;">${day}</td>${cells}</tr>`);
+      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;${ROW_H}">${day}</td>${cells}</tr>`);
     }
 
     bodyEl.innerHTML = `
@@ -1324,7 +1379,7 @@ const HSModule = (function () {
         <table class="mvoa-table" style="table-layout:fixed;width:100%;">
           <thead><tr>
             <th style="width:220px;text-align:left;">Equipment / Category</th>
-            <th>Daily</th><th>Weekly</th><th>Monthly</th><th>Bi-Monthly</th>
+            <th style="text-align:center;">Daily</th><th style="text-align:center;">Weekly</th><th style="text-align:center;">Monthly</th><th style="text-align:center;">Bi-Monthly</th>
           </tr></thead>
           <tbody id="hs-schedule-body"></tbody>
         </table>
