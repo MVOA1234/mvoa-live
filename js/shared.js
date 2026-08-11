@@ -552,20 +552,31 @@ const MVOA = (function () {
   // have access, unlisted Titles have none.
   // ───────────────────────────────────────────────────────────
   let plantRoundsPermMatrixCache = null;
+  let plantRoundsPermMatrixRowsCache = null; // raw rows incl. rowNumber, for the editable grid — same reasoning as Daily Ops' rows cache
   async function loadPlantRoundsPermissionsMatrix(force) {
     if (plantRoundsPermMatrixCache && !force) return plantRoundsPermMatrixCache;
     const rows = await sheetsRead(TABS.permissionsMatrixPlantRounds);
     const map = {};
-    rows.slice(1).forEach(r => {
+    const rawRows = [];
+    rows.slice(1).forEach((r, i) => {
       const section = (r[0] || '').trim();
       const title = (r[1] || '').trim();
       const level = (r[2] || '').trim();
-      if (!section || !title || !level) return;
+      if (!section || !title) return; // truly blank/junk row
+      rawRows.push({ rowNumber: i + 2, Section: section, Title: title, AccessLevel: level });
+      if (!level) return; // row exists but blanked back to "No access" — keep in rawRows, skip in map
       if (!map[section]) map[section] = {};
       map[section][title] = level;
     });
     plantRoundsPermMatrixCache = map;
+    plantRoundsPermMatrixRowsCache = rawRows;
     return plantRoundsPermMatrixCache;
+  }
+  // Raw rows (with sheet rowNumber) for the editable grid — must call
+  // loadPlantRoundsPermissionsMatrix at least once first, same pattern
+  // as getDailyOpsPermissionsMatrixRows.
+  function getPlantRoundsPermissionsMatrixRows() {
+    return plantRoundsPermMatrixRowsCache || [];
   }
   function canEditPlantRoundsSection(sectionName, user) {
     if (!user) return false;
@@ -1004,7 +1015,7 @@ const MVOA = (function () {
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
-    loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection,
+    loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection, getPlantRoundsPermissionsMatrixRows,
     loadNotesForTask, appendNote,
     logAudit, nextId, createOpsTask,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
