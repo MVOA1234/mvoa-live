@@ -1186,11 +1186,6 @@ const HSModule = (function () {
       const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
       const cells = rounds.map((round, gi) => {
         const log = dayLogs.find(l => l.Shift === round);
-        // Same submission timestamp applies to every item in this round
-        // (one log = one round submission) — shown under every item's
-        // cell, not just the location-bearing ones, since "when was this
-        // round actually done" is useful on Main Gate too.
-        const timeStr = log ? new Date(log.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
         return items.map((item, ii) => {
           const divider = (ii === items.length - 1 && gi < rounds.length - 1) ? DIVIDER : '';
           if (!log) return `<td style="padding:4px 6px;text-align:center;color:#ccc;${ROW_H}${divider}">—</td>`;
@@ -1198,6 +1193,9 @@ const HSModule = (function () {
           const remarks = r ? r.Remarks : '';
           const photoUrl = photoUrlFromRemarks(remarks);
           const loc = locationFromRemarks(remarks); // only set for PhotoLocation items (Location 2 / Location 3) — Main Gate has none
+          // Time only shown alongside an actual photo — an item with no
+          // photo (✕) has nothing that timestamp would even describe.
+          const timeStr = photoUrl ? new Date(log.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
           return `<td style="padding:4px 6px;text-align:center;${ROW_H}${divider}">
             <div>${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}</div>
             <div class="muted" style="font-size:0.7rem;white-space:nowrap;min-height:1em;">${loc ? escapeHtml(loc) : ''}</div>
@@ -1327,7 +1325,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
         <label class="muted">Month: <input id="hs-inout-month" type="month" value="${inOutMonthlyMonth}"></label>
       </div>
-      <div id="hs-inout-monthly-body"><p class="muted">Loading…</p></div>
+      <div id="hs-inout-monthly-body" style="overflow-x:auto;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
     container.querySelector('#hs-inout-month').addEventListener('change', (e) => {
@@ -1337,27 +1335,63 @@ const HSModule = (function () {
     loadInOutMonthlyBody(container);
   }
 
+  // Same matrix shape as the Rounds Monthly Report — one row per day,
+  // one column-group per Type (Sewage/Garbage/Water Tanker/Garden
+  // Waste), 2 sub-columns per group (In/Out). Photo-required types
+  // (Sewage, Water Tanker — see IN_OUT_TYPES.needsPhoto) show a photo
+  // link + time per entry; the other two show time only, since they
+  // never have a photo to show. A cell can hold more than one entry a
+  // day (e.g. two IN/OUT cycles), stacked — unlike Rounds, which is
+  // capped at one submission per round per day.
   async function loadInOutMonthlyBody(container) {
     const bodyEl = container.querySelector('#hs-inout-monthly-body');
     if (!bodyEl) return;
     let logs;
     try {
       const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
-      logs = rowsToObjs(rows, INOUT_LOG_COLS);
+      logs = rowsToObjs(rows, INOUT_LOG_COLS).filter(l => (l.Timestamp || '').startsWith(inOutMonthlyMonth));
     } catch (e) {
       bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
     }
-    const monthLogs = logs.filter(l => (l.Timestamp || '').startsWith(inOutMonthlyMonth));
-    bodyEl.innerHTML = IN_OUT_TYPES.map(t => {
-      const entries = monthLogs.filter(l => l.Type === t.key).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp));
-      return `
-        <div class="card" style="margin:0 0 16px;">
-          <h4 style="margin:0 0 8px;color:var(--mvoa-blue);">${escapeHtml(t.key)}</h4>
-          ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${formatDate(e.Timestamp)} — ${e.Direction}${e.PhotoURL ? ` · <a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷 View photo</a>` : ''} <span style="font-size:0.8rem;">(${escapeHtml(e.LoggedBy)})</span></p>`).join('') : '<p class="muted">No entries this month.</p>'}
-        </div>
-      `;
-    }).join('');
+    const [y, mo] = inOutMonthlyMonth.split('-').map(Number);
+    const daysInMonth = new Date(y, mo, 0).getDate();
+    const DIVIDER = 'border-right:2px solid #999;';
+    const DIRECTIONS = ['IN', 'OUT'];
+
+    const headerGroupCells = IN_OUT_TYPES.map((t, gi) => `<th colspan="2" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;${gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${escapeHtml(t.key)}</th>`).join('');
+    const headerDirCells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((d, di) => `<th style="padding:4px 6px;font-size:0.75rem;${di === 1 && gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${d}</th>`).join('')).join('');
+
+    const bodyRows = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${inOutMonthlyMonth}-${String(day).padStart(2, '0')}`;
+      const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
+      const cells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((dir, di) => {
+        const divider = (di === 1 && gi < IN_OUT_TYPES.length - 1) ? DIVIDER : '';
+        const entries = dayLogs.filter(l => l.Type === t.key && l.Direction === dir).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp));
+        if (!entries.length) return `<td style="padding:4px 6px;text-align:center;color:#ccc;${divider}">—</td>`;
+        const linesHtml = entries.map(e => {
+          const timeStr = new Date(e.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          // No photo icon at all for non-photo types — showing a ✕ would
+          // wrongly read as a Fail when a photo was never required here.
+          return t.needsPhoto
+            ? `<div>${e.PhotoURL ? `<a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'} <span class="muted" style="font-size:0.7rem;">${timeStr}</span></div>`
+            : `<div class="muted" style="font-size:0.75rem;">${timeStr}</div>`;
+        }).join('');
+        return `<td style="padding:4px 6px;text-align:center;${divider}">${linesHtml}</td>`;
+      }).join('')).join('');
+      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;">${day}</td>${cells}</tr>`);
+    }
+
+    bodyEl.innerHTML = `
+      <table class="mvoa-table" style="border-collapse:collapse;">
+        <thead>
+          <tr><th rowspan="2" style="padding:4px 6px;position:sticky;left:0;background:#fff;">Date</th>${headerGroupCells}</tr>
+          <tr>${headerDirCells}</tr>
+        </thead>
+        <tbody>${bodyRows.join('')}</tbody>
+      </table>
+    `;
   }
 
   // ───────────────────────────────────────────────────────────
