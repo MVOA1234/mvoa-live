@@ -1060,6 +1060,7 @@ const HSModule = (function () {
         <button id="hs-report-hours" class="btn-secondary" style="width:100%;margin-bottom:8px;">⏱️ DG Running Hours</button>
         <button id="hs-report-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">📅 Monthly Report</button>
         <button id="hs-report-weekly-rounds" class="btn-secondary" style="width:100%;margin-bottom:8px;">📷 Weekly Rounds Report (Security)</button>
+        <button id="hs-report-rounds-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🗓️ Rounds Monthly Report (Security)</button>
         <button id="hs-report-inout-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🚚 In/Out Monthly Report</button>
         <button id="hs-report-schedule" class="btn-secondary" style="width:100%;">🗂️ Inspection Schedule</button>
       </div>
@@ -1071,8 +1072,91 @@ const HSModule = (function () {
     container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
     container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
     container.querySelector('#hs-report-weekly-rounds').addEventListener('click', () => renderWeeklyRoundsReport(container));
+    container.querySelector('#hs-report-rounds-monthly').addEventListener('click', () => renderRoundsMonthlyReport(container));
     container.querySelector('#hs-report-inout-monthly').addEventListener('click', () => renderInOutMonthlyReport(container));
     container.querySelector('#hs-report-schedule').addEventListener('click', () => renderInspectionSchedule(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // ROUNDS MONTHLY REPORT — Security's Daily Rounds Photos as a full
+  // month at a glance: one row per day, one column-group per active
+  // round (from HSRoundWindows), one sub-column per item (Main Gate /
+  // Location 2 / Location 3), each cell a clickable photo link (or ✕
+  // if that round was logged but this item's photo is missing, or —
+  // if the round wasn't logged that day at all). Picking a month
+  // always shows just that month — nothing to reset explicitly, a
+  // month picker naturally does this, same as the other monthly
+  // reports.
+  // ───────────────────────────────────────────────────────────
+  let roundsMonthlyMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; })();
+
+  function renderRoundsMonthlyReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>🗓️ Rounds Monthly Report — Security</strong>
+      </div>
+      <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
+        <label class="muted">Month: <input id="hs-rounds-month" type="month" value="${roundsMonthlyMonth}"></label>
+      </div>
+      <div id="hs-rounds-monthly-body" style="overflow-x:auto;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+    container.querySelector('#hs-rounds-month').addEventListener('change', (e) => {
+      roundsMonthlyMonth = e.target.value;
+      loadRoundsMonthlyBody(container);
+    });
+    loadRoundsMonthlyBody(container);
+  }
+
+  async function loadRoundsMonthlyBody(container) {
+    const bodyEl = container.querySelector('#hs-rounds-monthly-body');
+    if (!bodyEl) return;
+    const template = templatesCache.find(t => t.QRTarget === 'Security' && (t.RoundBased === 'TRUE' || t.RoundBased === 'true'));
+    if (!template) { bodyEl.innerHTML = `<p class="muted">Daily Rounds Photos template not found.</p>`; return; }
+    const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
+    const rounds = activeRoundKeys();
+    let logs, results;
+    try {
+      const logRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
+      logs = rowsToObjs(logRows, LOG_COLS).filter(l => l.TemplateID === template.TemplateID && (l.Timestamp || '').startsWith(roundsMonthlyMonth));
+      const resultRows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
+      results = rowsToObjs(resultRows, RESULT_COLS);
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    const [y, mo] = roundsMonthlyMonth.split('-').map(Number);
+    const daysInMonth = new Date(y, mo, 0).getDate();
+
+    const headerGroupCells = rounds.map(r => `<th colspan="${items.length}" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;">${escapeHtml(shiftLabel(r))}</th>`).join('');
+    const headerItemCells = rounds.map(() => items.map(i => `<th style="padding:4px 6px;font-size:0.75rem;white-space:nowrap;">${escapeHtml(i.CheckItem)}</th>`).join('')).join('');
+
+    const bodyRows = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${roundsMonthlyMonth}-${String(day).padStart(2, '0')}`;
+      const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
+      const cells = rounds.map(round => {
+        const log = dayLogs.find(l => l.Shift === round);
+        return items.map(item => {
+          if (!log) return `<td style="padding:4px 6px;text-align:center;color:#ccc;">—</td>`;
+          const r = results.find(rr => rr.LogID === log.LogID && rr.ItemID === item.ItemID);
+          const photoUrl = photoUrlFromRemarks(r ? r.Remarks : '');
+          return `<td style="padding:4px 6px;text-align:center;">${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}</td>`;
+        }).join('');
+      }).join('');
+      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;">${day}</td>${cells}</tr>`);
+    }
+
+    bodyEl.innerHTML = `
+      <table class="mvoa-table" style="border-collapse:collapse;">
+        <thead>
+          <tr><th rowspan="2" style="padding:4px 6px;position:sticky;left:0;background:#fff;">Date</th>${headerGroupCells}</tr>
+          <tr>${headerItemCells}</tr>
+        </thead>
+        <tbody>${bodyRows.join('')}</tbody>
+      </table>
+    `;
   }
 
   // ───────────────────────────────────────────────────────────
