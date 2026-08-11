@@ -157,6 +157,12 @@
         <p class="muted">Edit the full Title × Category access grid directly — changes save in place.</p>
         <button id="open-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
       </div>
+      <!-- Plant Rounds Permissions Matrix entry -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Plant Rounds Permissions</h2>
+        <p class="muted">Edit the Title × Category access grid for Plant Rounds & Compliance — changes save in place.</p>
+        <button id="open-pr-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
+      </div>
       <!-- Manage Users -->
       <div class="card" id="manage-users-card">
         <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
@@ -241,6 +247,27 @@
       <button id="pm-save-btn" class="btn-primary" style="margin-top:14px;">Save Changes</button>
       <p class="error-text" id="pm-error"></p>
       <p class="muted" id="pm-saved-msg"></p>
+    </div>
+  </div>
+
+  <!-- ═══════════════ PLANT ROUNDS PERMISSIONS MATRIX SCREEN (admin only) ═══════════════ -->
+  <div id="pr-perm-matrix-screen" class="screen hidden">
+    <div class="card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">Plant Rounds Permissions Matrix</h1>
+        <button id="pr-perm-matrix-back-btn" class="btn-secondary">&larr; Settings</button>
+      </div>
+      <p class="muted">Edit access directly. Changes update the existing row in place — no duplicate rows are created. A cell set back to "No access" is blanked, not deleted. A category with no rows at all stays open to everyone until you add its first row here.</p>
+      <div class="mvoa-row" style="gap:8px;flex-wrap:wrap;margin:10px 0;">
+        <input id="pr-new-title" type="text" placeholder="New title name (e.g. Pool Lead)" style="flex:1;min-width:180px;">
+        <button id="pr-add-title-btn" class="btn-secondary">+ Add Title Column</button>
+      </div>
+      <div id="pr-grid-wrap" style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <p class="muted">Loading…</p>
+      </div>
+      <button id="pr-save-btn" class="btn-primary" style="margin-top:14px;">Save Changes</button>
+      <p class="error-text" id="pr-error"></p>
+      <p class="muted" id="pr-saved-msg"></p>
     </div>
   </div>
 
@@ -458,6 +485,11 @@
       renderPermMatrixGrid();
     });
     document.getElementById('perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
+    document.getElementById('open-pr-perm-matrix-btn').addEventListener('click', () => {
+      show('pr-perm-matrix-screen');
+      renderPrPermMatrixGrid();
+    });
+    document.getElementById('pr-perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
     document.getElementById('settings-save-btn').addEventListener('click', () => {
       const sheetId = document.getElementById('settings-sheet-id').value.trim();
       const apiKey = document.getElementById('settings-api-key').value.trim();
@@ -735,6 +767,154 @@
         pmExtraTitles = [];
         savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
         await renderPermMatrixGrid();
+      } catch (e) {
+        errEl.textContent = 'Could not save changes: ' + e.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+    });
+
+    // ---- Plant Rounds Permissions Matrix grid editor (DEV/admin only) ----
+    // Same shape and same edit-in-place approach as the Daily Ops matrix
+    // above, just pointed at HSCategories (CategoryKey/Label instead of
+    // OpsCategories' Name) and the PermissionsMatrix_PlantRounds tab. The
+    // one real behavioral difference: a Plant Rounds category with zero
+    // matrix rows defaults to fully OPEN (see canViewPlantRoundsSection
+    // in shared.js) rather than falling back to legacy AllowedRoles —
+    // Plant Rounds never had that legacy system. That's just how the
+    // access resolves at runtime though; this editor still shows every
+    // active category as a row regardless, so you can lock one down by
+    // giving it its first row here.
+    let prCategories = [];
+    let prTitles = [];
+    let prRowNumberByKey = {};
+    let prOriginalByKey = {};
+    let prExtraTitles = [];
+
+    function prKey(section, title) { return section + '||' + title; }
+
+    async function renderPrPermMatrixGrid() {
+      const wrap = document.getElementById('pr-grid-wrap');
+      const errEl = document.getElementById('pr-error');
+      const savedEl = document.getElementById('pr-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+      wrap.innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const catRows = await MVOA.sheetsRead(MVOA.TABS.hsCategories);
+        prCategories = catRows.slice(1).map(r => ({
+          CategoryKey: (r[0] || '').trim(), Label: (r[1] || '').trim(),
+          Icon: (r[4] || '').trim(), Active: r[5]
+        })).filter(c => c.CategoryKey && (c.Active === 'TRUE' || c.Active === 'true' || c.Active === true || c.Active === '1'));
+
+        await MVOA.loadPlantRoundsPermissionsMatrix();
+        const rawRows = MVOA.getPlantRoundsPermissionsMatrixRows();
+        const users = await MVOA.loadRoles();
+
+        const titleSet = new Set();
+        users.filter(u => u.active).forEach(u => titleSet.add(MVOA.displayTitle(u)));
+        rawRows.forEach(r => titleSet.add(r.Title));
+        prExtraTitles.forEach(t => titleSet.add(t));
+        prTitles = [...titleSet].filter(Boolean).sort((a, b) => a.localeCompare(b));
+
+        prRowNumberByKey = {};
+        prOriginalByKey = {};
+        rawRows.forEach(r => {
+          const key = prKey(r.Section, r.Title);
+          prRowNumberByKey[key] = r.rowNumber;
+          prOriginalByKey[key] = r.AccessLevel || '';
+        });
+      } catch (e) {
+        wrap.innerHTML = '<p class="error-text">Could not load permissions matrix: ' + e.message + '</p>';
+        return;
+      }
+
+      if (!prCategories.length) {
+        wrap.innerHTML = '<p class="muted">No active categories to show.</p>';
+        return;
+      }
+      if (!prTitles.length) {
+        wrap.innerHTML = '<p class="muted">No titles yet — add one above, or create a user with a Title set.</p>';
+        return;
+      }
+
+      const headerCells = prTitles.map(t => `<th style="padding:6px 8px;white-space:nowrap;">${t}</th>`).join('');
+      const bodyRows = prCategories.map(cat => {
+        const cells = prTitles.map(title => {
+          const key = prKey(cat.CategoryKey, title);
+          const current = prOriginalByKey[key] || '';
+          return `
+            <td style="padding:4px 6px;">
+              <select class="pr-cell" data-section="${cat.CategoryKey}" data-title="${title}" style="width:auto;min-width:110px;">
+                <option value="" ${current===''?'selected':''}>No access</option>
+                <option value="ReadOnly" ${current==='ReadOnly'?'selected':''}>Read Only</option>
+                <option value="Edit" ${current==='Edit'?'selected':''}>Edit</option>
+              </select>
+            </td>`;
+        }).join('');
+        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;">${cat.Icon || ''} ${cat.Label}</td>${cells}</tr>`;
+      }).join('');
+
+      wrap.innerHTML = `
+        <table class="mvoa-table" style="border-collapse:collapse;">
+          <thead><tr><th style="padding:6px 8px;">Category</th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      `;
+    }
+
+    document.getElementById('pr-add-title-btn').addEventListener('click', () => {
+      const input = document.getElementById('pr-new-title');
+      const title = input.value.trim();
+      const errEl = document.getElementById('pr-error');
+      errEl.textContent = '';
+      if (!title) { errEl.textContent = 'Enter a title name first.'; return; }
+      if (prTitles.includes(title)) { errEl.textContent = 'That title column already exists.'; return; }
+      prExtraTitles.push(title);
+      input.value = '';
+      renderPrPermMatrixGrid();
+    });
+
+    document.getElementById('pr-save-btn').addEventListener('click', async () => {
+      const errEl = document.getElementById('pr-error');
+      const savedEl = document.getElementById('pr-saved-msg');
+      const btn = document.getElementById('pr-save-btn');
+      errEl.textContent = ''; savedEl.textContent = '';
+
+      const toUpdate = [];
+      const toAppend = [];
+      document.querySelectorAll('.pr-cell').forEach(sel => {
+        const section = sel.dataset.section;
+        const title = sel.dataset.title;
+        const newVal = sel.value;
+        const key = prKey(section, title);
+        const original = prOriginalByKey[key] || '';
+        if (newVal === original) return;
+        const rowNumber = prRowNumberByKey[key];
+        if (rowNumber) {
+          toUpdate.push({ rowNumber, row: [section, title, newVal] });
+        } else if (newVal) {
+          toAppend.push([section, title, newVal]);
+        }
+      });
+
+      if (!toUpdate.length && !toAppend.length) {
+        savedEl.textContent = 'No changes to save.';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        for (const u of toUpdate) {
+          await MVOA.sheetsUpdateRow(MVOA.TABS.permissionsMatrixPlantRounds, u.rowNumber, u.row);
+        }
+        if (toAppend.length) {
+          await MVOA.sheetsAppendMany(MVOA.TABS.permissionsMatrixPlantRounds, toAppend);
+        }
+        await MVOA.loadPlantRoundsPermissionsMatrix(true);
+        prExtraTitles = [];
+        savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
+        await renderPrPermMatrixGrid();
       } catch (e) {
         errEl.textContent = 'Could not save changes: ' + e.message;
       }
