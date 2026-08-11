@@ -1141,8 +1141,13 @@ const HSModule = (function () {
         return items.map(item => {
           if (!log) return `<td style="padding:4px 6px;text-align:center;color:#ccc;">—</td>`;
           const r = results.find(rr => rr.LogID === log.LogID && rr.ItemID === item.ItemID);
-          const photoUrl = photoUrlFromRemarks(r ? r.Remarks : '');
-          return `<td style="padding:4px 6px;text-align:center;">${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}</td>`;
+          const remarks = r ? r.Remarks : '';
+          const photoUrl = photoUrlFromRemarks(remarks);
+          const loc = locationFromRemarks(remarks); // only set for PhotoLocation items (Location 2 / Location 3) — Main Gate has none
+          return `<td style="padding:4px 6px;text-align:center;">
+            ${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}
+            ${loc ? `<br><span class="muted" style="font-size:0.7rem;white-space:nowrap;">${escapeHtml(loc)}</span>` : ''}
+          </td>`;
         }).join('');
       }).join('');
       bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;">${day}</td>${cells}</tr>`);
