@@ -1706,6 +1706,13 @@ const HSModule = (function () {
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       return log ? log.PerformedBy : '';
     }
+    function notesFor(day, shift) {
+      const dateStr = new Date(year, month - 1, day).toDateString();
+      const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
+        new Date(l.Timestamp).toDateString() === dateStr &&
+        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      return log ? (log.Notes || '') : '';
+    }
 
     const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => i + 1);
     let bodyHtml = '';
@@ -1730,6 +1737,17 @@ const HSModule = (function () {
         dayHeaders.forEach((d, i) => pdfRow[String(d)] = cellPdfValue(item, cells[i]));
         pdfRows.push(pdfRow);
       });
+
+      // Overall Notes — free text entered on submission, one per
+      // log/day/shift, not tied to any single item. Shown as its own
+      // row under every category's matrix here (same lookup shape as
+      // Performed By, just reading Notes instead) — previously this
+      // only surfaced in Full History's per-entry drill-down.
+      const notesCells = dayHeaders.map(d => notesFor(d, shift));
+      bodyHtml += `<tr><td style="font-style:italic;white-space:normal;word-wrap:break-word;">Overall Notes</td>${notesCells.map(v => `<td class="muted" style="font-size:0.72rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
+      const notesRow = { Item: 'Overall Notes' };
+      dayHeaders.forEach((d, i) => notesRow[String(d)] = notesCells[i] || '');
+      pdfRows.push(notesRow);
     });
 
     tableEl.innerHTML = `
