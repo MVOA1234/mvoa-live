@@ -2316,7 +2316,7 @@ const HSModule = (function () {
         ${item.Requirement ? `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${escapeHtml(item.Requirement)}</p>` : ''}
         ${item.DayApplicability === 'WeeklyOnce' ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Weekly — log on any day this week</p>` : ''}
         ${(item.DayApplicability && item.DayApplicability !== 'WeeklyOnce' && !isItemDueToday(item)) ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Not scheduled today (${escapeHtml(item.DayApplicability)}) — optional</p>` : ''}
-        ${!item.DayApplicability ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Daily</p>` : ''}
+        ${(!item.DayApplicability && currentTemplate && currentTemplate.Frequency === 'Daily') ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">Daily</p>` : ''}
         ${inputHtml}
       </div>
     `;
