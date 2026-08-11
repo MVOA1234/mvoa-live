@@ -550,6 +550,7 @@ const HSModule = (function () {
                 <td>${contractHtml}</td>
                 <td>
                   <button class="btn-primary hs-amc-done-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0 0 4px 0;">✓ Mark Done</button>
+                  <button class="btn-secondary hs-amc-history-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0 0 4px 0;">🕘 History</button>
                   <button class="btn-secondary hs-amc-edit-btn" data-asset-id="${a.AssetID}" style="font-size:0.8rem;padding:4px 10px;margin:0;">✏️ Edit</button>
                 </td>
               </tr>`;
@@ -563,9 +564,51 @@ const HSModule = (function () {
     bodyEl.querySelectorAll('.hs-amc-done-btn').forEach(btn => {
       btn.addEventListener('click', () => openAmcMarkDoneDialog(btn.dataset.assetId, assets, container));
     });
+    bodyEl.querySelectorAll('.hs-amc-history-btn').forEach(btn => {
+      btn.addEventListener('click', () => openAmcHistoryDialog(btn.dataset.assetId, assets));
+    });
     bodyEl.querySelectorAll('.hs-amc-edit-btn').forEach(btn => {
       btn.addEventListener('click', () => openAmcEditDialog(btn.dataset.assetId, assets, container));
     });
+  }
+
+  // History modal — every past completion for one asset, newest first,
+  // pulled straight from HSAMCLog (never overwritten; Mark Done always
+  // appends there, only HSAMCAssets.LastDone gets updated in place).
+  // Read-only — this is the "how do I see an old report" gap the app
+  // previously had no answer for.
+  async function openAmcHistoryDialog(assetId, assets) {
+    const asset = assets.find(a => a.AssetID === assetId);
+    if (!asset) return;
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;">
+        <h3>History: ${escapeHtml(asset.AssetName)}</h3>
+        <div id="hs-amc-history-body"><p class="muted">Loading…</p></div>
+        <button id="hs-amc-history-close" class="btn-secondary" style="margin-top:10px;">Close</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('#hs-amc-history-close').addEventListener('click', () => modal.remove());
+
+    const bodyEl = modal.querySelector('#hs-amc-history-body');
+    try {
+      const logRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcLog);
+      const entries = rowsToObjs(logRows, AMC_LOG_COLS)
+        .filter(l => l.AssetID === assetId)
+        .sort((a, b) => b.CompletedDate.localeCompare(a.CompletedDate));
+      bodyEl.innerHTML = entries.length
+        ? entries.map(l => `
+            <p style="margin:6px 0;padding-bottom:6px;border-bottom:1px solid #eee;">
+              ${new Date(l.CompletedDate).toLocaleDateString()} — ${escapeHtml(l.CompletedBy)}
+              ${l.ReportURL ? ` · <a href="${escapeHtml(l.ReportURL)}" target="_blank" rel="noopener">📎 View report</a>` : ' · <span class="muted">No report attached</span>'}
+            </p>
+          `).join('')
+        : '<p class="muted">No completions logged yet.</p>';
+    } catch (e) {
+      bodyEl.innerHTML = `<p class="error-text">Could not load history: ${e.message}</p>`;
+    }
   }
 
   function openAmcEditDialog(assetId, assets, container) {
