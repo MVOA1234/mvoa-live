@@ -1686,8 +1686,18 @@ const HSModule = (function () {
         }
         return entries.map(e => `<span style="display:block;white-space:nowrap;font-size:0.62rem;line-height:1.3;">${escapeHtml(e)}</span>`).join('');
       }
-      if (resultObj.Result === 'Fail') return '<span style="color:#b3261e;font-weight:700;">✕</span>';
-      if (resultObj.Result === 'Pass') return '<span style="color:green;font-weight:700;">✓</span>';
+      if (resultObj.Result === 'Fail' || resultObj.Result === 'Pass') {
+        const mark = resultObj.Result === 'Fail'
+          ? '<span style="color:#b3261e;font-weight:700;">✕</span>'
+          : '<span style="color:green;font-weight:700;">✓</span>';
+        // Per-item Remarks — an optional note tied to THIS item/location
+        // specifically (distinct from the whole-submission Overall
+        // Notes row at the bottom of the matrix), shown right under its
+        // own Pass/Fail mark rather than lumped in with every other
+        // location's notes.
+        const remarks = (resultObj.Remarks || '').trim();
+        return remarks ? `${mark}<br><span class="muted" style="font-size:0.65rem;white-space:normal;">${escapeHtml(remarks)}</span>` : mark;
+      }
       return escapeHtml(String(resultObj.Result)); // Text/Dropdown
     }
     function cellPdfValue(item, resultObj) {
@@ -1697,6 +1707,7 @@ const HSModule = (function () {
         return (isRecheck ? '⚠️ RECHECK ' : '') + numericDisplayValue(item, resultObj);
       }
       if (item.InputType === 'AssetList' && !String(resultObj.Result || '').trim()) return resultObj._logNotes || '';
+      if (item.InputType === 'PassFail' && (resultObj.Remarks || '').trim()) return `${resultObj.Result || ''} (${resultObj.Remarks.trim()})`;
       return resultObj.Result || '';
     }
     function performedByFor(day, shift) {
@@ -2501,7 +2512,7 @@ const HSModule = (function () {
           <button class="hs-pf-btn ${current.result === 'Pass' ? 'btn-primary' : 'btn-secondary'}" data-item-id="${item.ItemID}" data-value="Pass" style="flex:1;">✓ Pass</button>
           <button class="hs-pf-btn ${current.result === 'Fail' ? 'btn-primary' : 'btn-secondary'}" data-item-id="${item.ItemID}" data-value="Fail" style="flex:1;background:${current.result === 'Fail' ? '#b3261e' : ''};">✕ Fail</button>
         </div>
-        <textarea class="hs-remarks-input ${current.result === 'Fail' ? '' : 'hidden'}" data-item-id="${item.ItemID}" rows="2" placeholder="Remarks (required for Fail)" style="width:100%;margin-top:6px;box-sizing:border-box;">${escapeHtml(current.remarks || '')}</textarea>
+        <textarea class="hs-remarks-input" data-item-id="${item.ItemID}" rows="2" placeholder="${current.result === 'Fail' ? 'Remarks (required for Fail)' : 'Notes (optional)'}" style="width:100%;margin-top:6px;box-sizing:border-box;">${escapeHtml(current.remarks || '')}</textarea>
       `;
     } else if (item.InputType === 'Numeric') {
       // If FailThreshold is set, auto-evaluates Pass/Fail as the
