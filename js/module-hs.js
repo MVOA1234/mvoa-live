@@ -2170,6 +2170,25 @@ const HSModule = (function () {
     if (template.Frequency === 'BiMonthly') return 'Due last week of Jul / Sep / Nov / Jan / Mar / May';
     return ''; // Daily has no interval to state — it's due every day
   }
+  // For Daily templates specifically, frequencyRuleText has nothing to
+  // say — but the real schedule often lives at the ITEM level
+  // (DayApplicability), e.g. Club House 2nd Floor's items are all
+  // Mon/Wed/Fri, 3rd Floor's are Wed-only. Summarizes across the
+  // template's items so the choose-checklist screen shows something
+  // meaningful instead of going blank for every Daily template.
+  function templateScheduleLabel(template) {
+    const its = itemsCache.filter(i => i.TemplateID === template.TemplateID);
+    if (!its.length) return '';
+    const labels = [];
+    const seen = new Set();
+    its.forEach(i => {
+      const label = i.DayApplicability === 'WeeklyOnce' ? 'Weekly (any day)'
+        : i.DayApplicability ? i.DayApplicability.split(',').join('/')
+        : 'Daily';
+      if (!seen.has(label)) { seen.add(label); labels.push(label); }
+    });
+    return labels.join(' + ');
+  }
 
   function renderScanResult(container) {
     const user = MVOA.getUser();
@@ -2235,7 +2254,7 @@ const HSModule = (function () {
         `;
       }
       const due = dueInfo(t);
-      const rule = frequencyRuleText(t);
+      const rule = frequencyRuleText(t) || templateScheduleLabel(t);
       return `
         <div class="mvoa-list-item ${canEdit ? 'hs-template-card' : ''}" data-template-id="${t.TemplateID}" style="${canEdit ? 'cursor:pointer;' : ''}">
           <div class="mvoa-row">
