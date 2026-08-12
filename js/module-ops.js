@@ -685,7 +685,8 @@ const OpsModule = (function () {
              <div class="ops-edit-body hidden" data-task-id="${t.TaskID}"></div>
              <div class="ops-evidence-body hidden" data-task-id="${t.TaskID}"></div>
              ${canClose ? `<button class="btn-primary ops-comply-btn" data-task-id="${t.TaskID}" style="margin-top:8px;">Mark Compliant / Close</button>` : ''}`
-          : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}`}
+          : `<p class="muted" style="font-size:0.8rem;margin-top:6px;">Closed by ${escapeHtml(t.ClosedBy)} · ${formatDate(t.ClosedDate)}${t.ComplianceComment ? ' — ' + escapeHtml(t.ComplianceComment) : ''}</p>${attachmentLinksHtml(t, true)}
+             ${(user.role === 'DEV' || isCreatorOf(t, user)) ? `<button class="btn-secondary ops-reopen-btn" data-task-id="${t.TaskID}" style="margin-top:8px;font-size:0.8rem;padding:4px 10px;">↺ Reopen</button>` : ''}`}
       </div>
     `;
     }).join('');
@@ -767,6 +768,10 @@ const OpsModule = (function () {
 
     body.querySelectorAll('.ops-comply-btn').forEach(btn => {
       btn.addEventListener('click', () => openComplyDialog(btn.dataset.taskId, container));
+    });
+
+    body.querySelectorAll('.ops-reopen-btn').forEach(btn => {
+      btn.addEventListener('click', () => openReopenDialog(btn.dataset.taskId, container));
     });
   }
 
@@ -1236,6 +1241,63 @@ const OpsModule = (function () {
       }
       modal.remove();
       currentView = 'closed';
+      await loadTasks();
+      render(container);
+    });
+  }
+
+  // Reopening is restricted to the task's original creator (or DEV,
+  // same override pattern as closing) — deliberately NOT the assignee,
+  // since the whole point is the person who raised it gets to say
+  // whether it's really resolved. The reason is posted as a Note (the
+  // same thread already used for task discussion) so it's visible
+  // once the task is back in the Open list, rather than a separate
+  // field nobody would think to check.
+  function openReopenDialog(taskId, container) {
+    const task = tasksCache.find(t => t.TaskID === taskId);
+    if (!task) return;
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;">
+        <h3>Reopen: ${escapeHtml(task.Title)}</h3>
+        <label>Reason for Reopening <span style="color:#b3261e;">*</span>
+          <textarea id="ops-reopen-comment" rows="3" placeholder="Why is this being reopened? (required)"></textarea>
+        </label>
+        <button id="ops-reopen-submit" class="btn-primary" style="margin-top:10px;">Confirm Reopen</button>
+        <button id="ops-reopen-cancel" class="btn-secondary">Cancel</button>
+        <p class="error-text" id="ops-reopen-error"></p>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    modal.querySelector('#ops-reopen-cancel').addEventListener('click', () => modal.remove());
+    modal.querySelector('#ops-reopen-submit').addEventListener('click', async () => {
+      const comment = modal.querySelector('#ops-reopen-comment').value.trim();
+      const errEl = modal.querySelector('#ops-reopen-error');
+      errEl.textContent = '';
+      if (!comment) {
+        errEl.textContent = 'Please explain why this is being reopened.';
+        modal.querySelector('#ops-reopen-comment').focus();
+        return;
+      }
+      const confirmBtn = modal.querySelector('#ops-reopen-submit');
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Reopening…';
+      task.Status = 'Open'; // mutate the cached object directly — stampNoteMetadata below does the actual sheet write from this same object, so both changes land in one write instead of racing two separate ones
+      try {
+        await MVOA.appendNote(taskId, `Reopened: ${comment}`);
+        await stampNoteMetadata(taskId);
+        await MVOA.logAudit({ module: 'DailyOps', requestId: taskId, eventType: 'Reopened', comment, statusAfter: 'Open' });
+      } catch (e) {
+        task.Status = 'Closed'; // revert the local mutation since the write may not have happened
+        errEl.textContent = 'Could not reopen task: ' + e.message;
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Confirm Reopen';
+        return;
+      }
+      modal.remove();
+      currentView = 'open';
       await loadTasks();
       render(container);
     });
