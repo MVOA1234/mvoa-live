@@ -1570,7 +1570,13 @@ const HSModule = (function () {
 
     const templateSelect = container.querySelector('#hs-monthly-template');
     function populateTemplateOptions() {
-      const available = templatesCache.filter(t => t.QRTarget === monthlyReportCategory && !t.CustomScreen).sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
+      // CustomScreen templates (In/Out Log) can't show data here at all
+      // — see the In/Out Monthly Report. RoundBased templates (Daily
+      // Rounds Photos) now have their own dedicated Rounds Monthly
+      // Report too, which shows the actual photos this generic matrix
+      // can't — so Security's Monthly Report picker now only offers
+      // CCTV Working Check.
+      const available = templatesCache.filter(t => t.QRTarget === monthlyReportCategory && !t.CustomScreen && t.RoundBased !== 'TRUE' && t.RoundBased !== 'true').sort((a, b) => FREQUENCY_ORDER.indexOf(a.Frequency) - FREQUENCY_ORDER.indexOf(b.Frequency));
       if (!available.length) {
         templateSelect.innerHTML = '<option value="">No templates for this category</option>';
         monthlyReportTemplateId = '';
