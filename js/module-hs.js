@@ -1697,6 +1697,24 @@ const HSModule = (function () {
   // shifts (no top-up event was recorded separately back then), so
   // Diesel Top Up correctly stays blank for them — that's the one
   // figure that genuinely can't be reconstructed from old data.
+  // Numeric items WITH a FailThreshold auto-evaluate to a Pass/Fail
+  // verdict — THAT goes in Result, while the technician's actual
+  // entered number instead gets stashed in Remarks as "Entered: 87%
+  // (fails if below 40%)" or "Recorded: 1883.2hrs" (see the
+  // HSChecklistItems Numeric/FailThreshold note at the top of this
+  // file). A Numeric item with no threshold (e.g. Running Hours) has
+  // no verdict to compute, so it just puts the value straight in
+  // Result. Try Result first — cheap, and correct for the no-threshold
+  // case — then fall back to pulling the number back out of Remarks
+  // for the Pass/Fail-verdict case, so callers don't need to know
+  // which flavor a given item is.
+  function extractNumericResult(row) {
+    const direct = parseFloat(row.Result);
+    if (!isNaN(direct)) return direct;
+    const m = (row.Remarks || '').match(/(?:entered|recorded):\s*(-?\d+(?:\.\d+)?)/i);
+    return m ? parseFloat(m[1]) : NaN;
+  }
+
   async function loadDgOperationsData() {
     const hoursItem = itemsCache.find(i => /running hours/i.test(i.CheckItem));
     const kwhItem = itemsCache.find(i => /cumulated kwh/i.test(i.CheckItem));
@@ -1723,7 +1741,7 @@ const HSModule = (function () {
       if (!byDateShift[key]) byDateShift[key] = { dateKey, shift: log.Shift, timestamp: log.Timestamp };
       const entry = byDateShift[key];
       if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp; // earliest of the merged rounds anchors sort order
-      const val = parseFloat(r.Result);
+      const val = extractNumericResult(r);
       if (isNaN(val)) return;
       if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
       if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
