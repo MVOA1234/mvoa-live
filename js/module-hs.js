@@ -1684,7 +1684,22 @@ const HSModule = (function () {
     const totalKwh = sum(allKwh);
     const totalDiesel = sum(allDiesel);
     const totalTopUp = sum(allTopUp);
-    const totalEfficiency = (totalDiesel !== null && totalKwh) ? Math.round((totalDiesel / totalKwh) * 1000) / 1000 : null;
+    // Fuel Efficiency's period total is NOT a straight sum of every
+    // shift's efficiency, and NOT a ratio of the period's totals either
+    // — per the user: compute one efficiency figure per DAY (that
+    // day's diesel consumed ÷ that day's kWh generated, combining its
+    // up-to-3 shifts), then average those daily figures over the full
+    // period length (÷7 for a week, ÷days-in-month for a month) —
+    // divided by the period's day COUNT, not by how many days actually
+    // had data.
+    const dailyEfficiencies = dates.map(d => {
+      const dayDiesel = sum(shifts.map((s, si) => cellFor(d, si, 'dieselConsumedLitres')).filter(v => typeof v === 'number'));
+      const dayKwh = sum(shifts.map((s, si) => cellFor(d, si, 'kwhGenerated')).filter(v => typeof v === 'number'));
+      return (dayDiesel !== null && dayKwh) ? dayDiesel / dayKwh : null;
+    }).filter(v => v !== null);
+    const totalEfficiency = dailyEfficiencies.length
+      ? Math.round((dailyEfficiencies.reduce((a, b) => a + b, 0) / dates.length) * 1000) / 1000
+      : null;
 
     bodyEl.innerHTML = `
       <div class="card" style="max-width:100%;margin:0;max-height:72vh;overflow:auto;">
