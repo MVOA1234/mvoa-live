@@ -288,10 +288,15 @@ const HSModule = (function () {
     }
     const shiftRows = ['1st', '2nd', '3rd'].map(shift => {
       const log = todaysLogFor(template.TemplateID, shift);
-      return log ? { shift, log } : null;
+      // Only the shift whose clock window is happening RIGHT NOW —
+      // diesel readings can happen any time during an active shift,
+      // but a shift that's already ended shouldn't still be editable
+      // just because it was logged earlier today.
+      if (!log || !isWithinShiftWindow(shift, new Date())) return null;
+      return { shift, log };
     }).filter(Boolean);
     if (!shiftRows.length) {
-      listEl.innerHTML = '<p class="muted">No DG Set shift has been logged yet today — submit the regular shift checklist first, then diesel readings can be logged any time during that shift.</p>';
+      listEl.innerHTML = '<p class="muted">No shift is both currently active and already logged today — diesel readings can only be entered during the shift\'s own clock window, once that shift\'s checklist has been submitted.</p>';
       return;
     }
 
