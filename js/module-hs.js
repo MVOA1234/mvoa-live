@@ -391,9 +391,12 @@ const HSModule = (function () {
   // END OF SHIFT REPORT — a separate, later step from the checklist
   // itself. The checklist is filled at the START of a shift; this
   // lets the technician come back at the END of their shift to note
-  // any event, on whichever of TODAY's already-submitted shifts they
-  // pick. Only shows shifts that actually have a log today — you
-  // can't report on a shift that was never submitted.
+  // any event. Only the shift that's CURRENTLY within its own clock
+  // window is offered — same isWithinShiftWindow gate as Diesel
+  // Top-Up — so a technician can't reach back and edit a prior
+  // shift's end-of-shift note once that shift has ended. Also still
+  // requires that shift to actually have a log today; you can't
+  // report on a shift that was never submitted.
   // ───────────────────────────────────────────────────────────
   function renderEndOfShiftPicker(container) {
     const user = MVOA.getUser();
@@ -403,21 +406,23 @@ const HSModule = (function () {
         <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
         <strong>📝 End of Shift Report</strong>
       </div>
-      <p class="muted" style="margin:0 0 12px;">Pick which of today's submitted shifts you're reporting on.</p>
+      <p class="muted" style="margin:0 0 12px;">Only the shift currently in progress is shown here — end-of-shift notes can't be added for a shift once its window has ended.</p>
       <div id="hs-eos-list"></div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
 
     const listEl = container.querySelector('#hs-eos-list');
+    const now = new Date();
     const rows = [];
     dailyTemplates.forEach(t => {
       ['1st', '2nd', '3rd'].forEach(shift => {
+        if (!isWithinShiftWindow(shift, now)) return; // prior/future shifts aren't reportable, only the one happening right now
         const log = todaysLogFor(t.TemplateID, shift);
         if (log) rows.push({ template: t, shift, log });
       });
     });
     if (!rows.length) {
-      listEl.innerHTML = '<p class="muted">No shifts have been submitted yet today.</p>';
+      listEl.innerHTML = `<p class="muted">No shift is both currently active and already logged today — the End of Shift Report can only be filled in during ${escapeHtml(shiftWindowLabel(currentShiftNow(now)))} (the ${escapeHtml(shiftLabel(currentShiftNow(now)))} shift window), once that shift's checklist has been submitted.</p>`;
       return;
     }
     listEl.innerHTML = rows.map((r, i) => `
@@ -2643,6 +2648,13 @@ const HSModule = (function () {
     if (shift === '2nd') return h >= 14 && h < 21;
     if (shift === '3rd') return h >= 21 || h < 7;
     return true;
+  }
+  // Which of 1st/2nd/3rd is happening right now, derived from
+  // isWithinShiftWindow so the two never drift apart — used anywhere
+  // that needs to name "the current shift" (e.g. the End of Shift
+  // Report's empty-state message) rather than just test one shift.
+  function currentShiftNow(now) {
+    return ['1st', '2nd', '3rd'].find(s => isWithinShiftWindow(s, now)) || '';
   }
   function shiftWindowLabel(shift) {
     if (shift === '1st') return '7 AM – 2 PM';
