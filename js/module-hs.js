@@ -1656,7 +1656,8 @@ const HSModule = (function () {
     const DIVIDER = 'border-right:2px solid #999;';
     const ROW_H = 'height:30px;vertical-align:middle;';
 
-    const headerDateCells = dates.map((d, di) => `<th colspan="3" style="padding:4px 6px;text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;${di < dates.length - 1 ? DIVIDER : ''}">Date ${isWeekly ? di + 1 : d.getDate()}</th>`).join('');
+    const LABEL_W = 130, UNIT_W = 70; // px — explicit widths so the two sticky-left columns can be offset correctly instead of both sitting at left:0 on top of each other
+    const headerDateCells = dates.map((d, di) => `<th colspan="3" style="padding:4px 6px;text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;${di < dates.length - 1 ? DIVIDER : ''}">${d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</th>`).join('');
     const headerShiftCells = dates.map((d, di) => shifts.map((s, si) => `<th style="padding:4px 6px;font-size:0.72rem;position:sticky;top:32px;z-index:3;background:#eef2f6;${si === shifts.length - 1 && di < dates.length - 1 ? DIVIDER : ''}">Shift ${si + 1}</th>`).join('')).join('');
 
     function cellFor(d, shiftIdx, field) {
@@ -1671,7 +1672,7 @@ const HSModule = (function () {
         return `<td style="padding:4px 6px;text-align:center;${ROW_H}${divider}">${dgOpsCellHtml(val)}</td>`;
       }).join('')).join('');
       const total = totalFn();
-      return `<tr><td style="padding:4px 6px;font-weight:600;position:sticky;left:0;z-index:1;background:#fff;${ROW_H}">${label}</td><td style="padding:4px 6px;color:var(--muted);position:sticky;left:0;z-index:1;background:#fff;${ROW_H}"></td>${cells}<td style="padding:4px 6px;text-align:center;font-weight:700;${ROW_H}">${total !== null ? total : '—'}</td></tr>`;
+      return `<tr><td style="padding:4px 6px;font-weight:600;position:sticky;left:0;z-index:1;background:#fff;width:${LABEL_W}px;${ROW_H}">${label}</td><td style="padding:4px 6px;color:var(--muted);position:sticky;left:${LABEL_W}px;z-index:1;background:#fff;width:${UNIT_W}px;${ROW_H}">${unit}</td>${cells}<td style="padding:4px 6px;text-align:center;font-weight:700;${ROW_H}">${total !== null ? total : '—'}</td></tr>`;
     }
 
     const allRunHours = dates.flatMap((d, di) => shifts.map((s, si) => cellFor(d, si, 'hoursRun'))).filter(v => typeof v === 'number');
@@ -1689,7 +1690,7 @@ const HSModule = (function () {
       <div class="card" style="max-width:100%;margin:0;max-height:72vh;overflow:auto;">
         <table class="mvoa-table" style="border-collapse:separate;border-spacing:0;">
           <thead>
-            <tr><th rowspan="2" style="position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">&nbsp;</th><th rowspan="2" style="position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Unit</th>${headerDateCells}<th rowspan="2" style="position:sticky;top:0;z-index:3;background:#eef2f6;">Total for ${isWeekly ? 'Week' : 'Month'}</th></tr>
+            <tr><th rowspan="2" style="position:sticky;top:0;left:0;z-index:4;background:#eef2f6;width:${LABEL_W}px;">&nbsp;</th><th rowspan="2" style="position:sticky;top:0;left:${LABEL_W}px;z-index:4;background:#eef2f6;width:${UNIT_W}px;">Unit</th>${headerDateCells}<th rowspan="2" style="position:sticky;top:0;z-index:3;background:#eef2f6;">Total for ${isWeekly ? 'Week' : 'Month'}</th></tr>
             <tr>${headerShiftCells}</tr>
           </thead>
           <tbody>
