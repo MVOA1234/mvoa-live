@@ -1400,7 +1400,13 @@ const HSModule = (function () {
           const loc = locationFromRemarks(remarks); // only set for PhotoLocation items (Location 2 / Location 3) — Main Gate has none
           // Time only shown alongside an actual photo — an item with no
           // photo (✕) has nothing that timestamp would even describe.
-          const timeStr = photoUrl ? new Date(log.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+          // Prefer THIS photo's own capture time (Main Gate / Location 2
+          // / Location 3 are a walk apart, so these differ by a few
+          // minutes in practice) — fall back to the round's overall
+          // submission Timestamp only for older rows logged before
+          // per-photo capture time was recorded.
+          const capturedAt = capturedAtFromRemarks(remarks);
+          const timeStr = photoUrl ? new Date(capturedAt || log.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
           return `<td style="padding:4px 6px;text-align:center;${ROW_H}${itemDivider}">
             <div>${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}</div>
             <div class="muted" style="font-size:0.7rem;white-space:nowrap;min-height:1em;">${loc ? escapeHtml(loc) : ''}</div>
@@ -1466,6 +1472,15 @@ const HSModule = (function () {
   function locationFromRemarks(remarks) {
     const m = (remarks || '').match(/Location:\s*([^|]+)\s*\|/);
     return m ? m[1].trim() : '';
+  }
+  // The actual moment THIS photo was taken (see hs-photo-capture),
+  // distinct from the round's own log Timestamp (when the whole round
+  // — every location — was finally submitted). Older rows logged
+  // before this existed have no "Time:" segment; callers fall back to
+  // log.Timestamp for those, same as before this fix.
+  function capturedAtFromRemarks(remarks) {
+    const m = (remarks || '').match(/Time:\s*(\S+)/);
+    return m ? m[1] : '';
   }
 
   async function loadWeeklyRoundsBody(container) {
@@ -3005,10 +3020,14 @@ const HSModule = (function () {
       // at the moment of the round. 'PhotoLocation' additionally needs a
       // free-text location name (Locations 2/3 aren't fixed — the ASO
       // says where they went), 'Photo' alone is for the fixed Main Gate
-      // location. The actual timestamp compliance-wise comes from this
-      // log entry's own Timestamp (recorded at submission, which the
-      // round-window check already confirms falls inside 2–3 AM/4–5 PM)
-      // rather than pixels burned into the image.
+      // location. Round-window COMPLIANCE (was this round done inside
+      // its window) still goes off this log entry's own Timestamp,
+      // recorded once at final submission — that's correct as-is.
+      // Per-photo DISPLAY time (Rounds Monthly Report) is different: it
+      // uses each photo's own capture moment (see hs-photo-capture /
+      // "Time:" in Remarks below), since Main Gate, Location 2, and
+      // Location 3 are a walk apart and get photographed several
+      // minutes apart in practice, not simultaneously at submission.
       const hasPhoto = !!current.photoName;
       inputHtml = `
         ${item.InputType === 'PhotoLocation' ? `
@@ -3089,7 +3108,17 @@ const HSModule = (function () {
         // presence at the moment of the round is the whole point.
         MVOA.pickAttachment({ photoOnly: true, useCamera: true }).then(a => {
           if (!a) return; // cancelled
-          pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoFile: a.file, photoName: a.name });
+          // Stamp the moment THIS photo was actually taken — Main Gate,
+          // Location 2, and Location 3 are a walk apart, so by the time
+          // the whole round gets submitted at the end they were taken
+          // several minutes apart, not simultaneously. Prefer the
+          // camera file's own lastModified (the true capture instant)
+          // and only fall back to "now" if a browser/device doesn't
+          // expose it.
+          const capturedAt = (a.file && typeof a.file.lastModified === 'number' && a.file.lastModified > 0)
+            ? new Date(a.file.lastModified).toISOString()
+            : new Date().toISOString();
+          pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoFile: a.file, photoName: a.name, capturedAt });
           const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
           if (row && item) row.outerHTML = renderItemRow(item);
         });
@@ -3316,9 +3345,16 @@ const HSModule = (function () {
         }
         submitBtn.textContent = 'Uploading photo…';
         const photoUrl = await MVOA.uploadPhotoToDrive(r.photoFile, `${logId}_${item.ItemID}_${r.photoName}`);
+        // Time: <ISO> records the moment THIS photo was actually taken
+        // (see the hs-photo-capture handler above) — separate from
+        // this log row's own Timestamp, which is when the whole round
+        // (all locations) was finally submitted. Falls back to "now" on
+        // the off chance capturedAt didn't get set (e.g. an old
+        // in-flight pendingResults from before this existed).
+        const capturedAt = r.capturedAt || new Date().toISOString();
         pendingResults[item.ItemID] = Object.assign({}, r, {
           result: 'Pass',
-          remarks: needsLocation ? `Location: ${r.locationText.trim()} | Photo: ${photoUrl}` : `Photo: ${photoUrl}`
+          remarks: needsLocation ? `Location: ${r.locationText.trim()} | Photo: ${photoUrl} | Time: ${capturedAt}` : `Photo: ${photoUrl} | Time: ${capturedAt}`
         });
       }
       submitBtn.textContent = 'Submitting…';
