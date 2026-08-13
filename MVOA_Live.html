@@ -303,6 +303,7 @@
       .then(() => loadScript('js/module-ops.js?v=' + v))
       .then(() => loadScript('js/module-hs.js?v=' + v))
       .then(() => loadScript('js/module-finance.js?v=' + v))
+      .then(() => loadScript('js/module-dashboard.js?v=' + v))
       // .then(() => loadScript('js/module-expense.js?v=' + v)) // add here later, no other changes needed
       .then(() => boot())
       .catch(err => {
