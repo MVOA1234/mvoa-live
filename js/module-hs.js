@@ -1778,6 +1778,18 @@ const HSModule = (function () {
       } else {
         r.dieselConsumedLitres = null;
       }
+      // Consumption can never be negative — diesel doesn't get
+      // un-consumed. A negative result here means the level actually
+      // ROSE between readings, i.e. a top-up happened somewhere in
+      // this interval that wasn't bracketed with the Before/After
+      // Top-Up screen (most common on the legacy Fuel-Level-only
+      // shifts, but possible any time someone tops up without logging
+      // it). There's no way to recover true consumption for an
+      // interval like that, so it's reported as unknown rather than a
+      // misleading negative figure — and left out of totals below,
+      // instead of silently dragging the period total negative.
+      if (typeof r.dieselConsumedLitres === 'number' && r.dieselConsumedLitres < 0) r.dieselConsumedLitres = null;
+      if (typeof r.dieselTopUpLitres === 'number' && r.dieselTopUpLitres < 0) r.dieselTopUpLitres = null;
       r.fuelEfficiency = (typeof r.dieselConsumedLitres === 'number' && r.kwhGenerated) ? Math.round((r.dieselConsumedLitres / r.kwhGenerated) * 1000) / 1000 : null;
     }
     return rows;
