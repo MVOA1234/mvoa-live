@@ -1094,6 +1094,60 @@ const HSModule = (function () {
     }
   }
 
+  // MISSED ROUNDS — a round whose window has fully closed with zero log
+  // at all (not a photo missing from an existing submission — no
+  // submission whatsoever) previously had no consequence: it just
+  // showed as "—" in every report, indistinguishable from a day that
+  // simply hasn't happened yet. Checked passively whenever Security is
+  // opened, for today plus the last couple of days (not just today) —
+  // catches a round that was truly skipped even if nobody opened the
+  // app again until well after its window closed. Dedups by exact
+  // title (date + round baked in) so re-opening the screen never
+  // creates a second task for the same missed round.
+  async function evaluateMissedRounds(qrTarget) {
+    const template = templatesCache.find(t => t.QRTarget === qrTarget && (t.RoundBased === 'TRUE' || t.RoundBased === 'true'));
+    if (!template) return;
+    const rounds = activeRoundKeys();
+    if (!rounds.length) return;
+    const now = new Date();
+    let logs;
+    try {
+      const logRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
+      logs = rowsToObjs(logRows, LOG_COLS).filter(l => l.TemplateID === template.TemplateID);
+    } catch (e) {
+      return; // best-effort — passive check, just retries next time this screen opens
+    }
+    const DAYS_TO_CHECK = 3; // today + 2 days back
+    for (let i = 0; i < DAYS_TO_CHECK; i++) {
+      const day = new Date(now.getTime() - i * 86400000);
+      for (const round of rounds) {
+        const win = roundWindowsCache.find(r => r.RoundKey === round);
+        if (!win) continue;
+        const windowEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), parseInt(win.EndHour, 10) || 0, parseInt(win.EndMinute, 10) || 0);
+        if (windowEnd > now) continue; // window hasn't closed yet for that day — not missed, just not due
+        const hasLog = logs.some(l => l.Shift === round && new Date(l.Timestamp).toDateString() === day.toDateString());
+        if (hasLog) continue;
+        const dateStr = isoDate(day);
+        const title = `Plant Rounds: ${shiftLabel(round)} not performed — ${categoryLabel(qrTarget)} (${dateStr})`;
+        try {
+          const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+          const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
+          if (alreadyExists) continue;
+          await MVOA.createOpsTask({
+            categoryName: effectiveFailTaskCategory(template, qrTarget),
+            title,
+            description: `${shiftLabel(round)} for ${template.Name} was never logged on ${dateStr}.`,
+            assigneeTitle: 'Facility Manager',
+            priority: 'High',
+            createdBy: 'System (Plant Rounds — missed round check)'
+          });
+        } catch (e) {
+          // best-effort
+        }
+      }
+    }
+  }
+
   function renderReportsMenu(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -1181,14 +1235,31 @@ const HSModule = (function () {
     const headerItemCells = rounds.map((r, gi) => items.map((i, ii) => `<th style="padding:4px 6px;font-size:0.75rem;white-space:nowrap;${ii === items.length - 1 && gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(i.CheckItem)}</th>`).join('')).join('');
 
     const bodyRows = [];
+    const nowForReport = new Date();
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${roundsMonthlyMonth}-${String(day).padStart(2, '0')}`;
       const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
       const cells = rounds.map((round, gi) => {
         const log = dayLogs.find(l => l.Shift === round);
+        const divider = gi < rounds.length - 1 ? DIVIDER : '';
+        if (!log) {
+          // Distinguish "missed" (window already closed, nothing was ever
+          // logged — same condition evaluateMissedRounds raises a task
+          // for) from "not yet due" (window hasn't closed yet, or this is
+          // a future date) — previously both looked identical as "—".
+          const win = roundWindowsCache.find(r => r.RoundKey === round);
+          const windowEnd = win ? new Date(y, mo - 1, day, parseInt(win.EndHour, 10) || 0, parseInt(win.EndMinute, 10) || 0) : null;
+          const missed = windowEnd && windowEnd <= nowForReport;
+          const cellHtml = missed
+            ? `<td style="padding:4px 6px;text-align:center;${ROW_H}${divider}"><span style="color:#b3261e;font-weight:700;">✕</span><div class="muted" style="font-size:0.65rem;">Missed</div></td>`
+            : `<td style="padding:4px 6px;text-align:center;color:#ccc;${ROW_H}${divider}">—</td>`;
+          // Repeat the same cell across all of this round's item columns
+          // (Main Gate / Location 2 / Location 3) — matches the shape the
+          // per-item branch below produces.
+          return items.map(() => cellHtml).join('');
+        }
         return items.map((item, ii) => {
-          const divider = (ii === items.length - 1 && gi < rounds.length - 1) ? DIVIDER : '';
-          if (!log) return `<td style="padding:4px 6px;text-align:center;color:#ccc;${ROW_H}${divider}">—</td>`;
+          const itemDivider = (ii === items.length - 1) ? divider : '';
           const r = results.find(rr => rr.LogID === log.LogID && rr.ItemID === item.ItemID);
           const remarks = r ? r.Remarks : '';
           const photoUrl = photoUrlFromRemarks(remarks);
@@ -1196,7 +1267,7 @@ const HSModule = (function () {
           // Time only shown alongside an actual photo — an item with no
           // photo (✕) has nothing that timestamp would even describe.
           const timeStr = photoUrl ? new Date(log.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-          return `<td style="padding:4px 6px;text-align:center;${ROW_H}${divider}">
+          return `<td style="padding:4px 6px;text-align:center;${ROW_H}${itemDivider}">
             <div>${photoUrl ? `<a href="${escapeHtml(photoUrl)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'}</div>
             <div class="muted" style="font-size:0.7rem;white-space:nowrap;min-height:1em;">${loc ? escapeHtml(loc) : ''}</div>
             <div class="muted" style="font-size:0.65rem;white-space:nowrap;min-height:1em;">${timeStr}</div>
@@ -2218,6 +2289,9 @@ const HSModule = (function () {
     // the background whenever someone opens this category on a Sunday,
     // never blocks rendering the screen itself.
     evaluateWeeklyItemCompliance(currentScan.qrTarget);
+    // Same passive, non-blocking treatment for rounds that were never
+    // logged at all once their window closed.
+    evaluateMissedRounds(currentScan.qrTarget);
 
     const targetTemplates = templatesCache
       .filter(t => t.QRTarget === currentScan.qrTarget)
