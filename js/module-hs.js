@@ -1705,25 +1705,37 @@ const HSModule = (function () {
     const legacyLevelItem = itemsCache.find(i => /^fuel level$/i.test((i.CheckItem || '').trim()));
     const results = await loadItemResults();
     const relevantIds = [hoursItem, kwhItem, beforeItem, afterItem, legacyLevelItem].filter(Boolean).map(i => i.ItemID);
-    const byLog = {};
+    // Keyed by "date|shift", NOT by LogID. Running Hours / kWh / Diesel
+    // Before-After live on the DG Set Operations round's log, while the
+    // legacy Fuel Level reading lives on a DIFFERENT round's log (the
+    // older DG Set - Daily checklist) — same equipment, same date and
+    // shift, but a different LogID, so keying strictly by LogID left
+    // the two never joining up and Fuel Level silently never reaching
+    // the diesel math. Grouping by date+shift instead merges whichever
+    // round(s) were actually submitted for that shift into one row.
+    const byDateShift = {};
     results.forEach(r => {
       if (!relevantIds.includes(r.ItemID)) return;
       const log = logsCache.find(l => l.LogID === r.LogID);
-      if (!log) return;
-      if (!byLog[r.LogID]) byLog[r.LogID] = { logId: r.LogID, timestamp: log.Timestamp, shift: log.Shift, performedBy: log.PerformedBy };
+      if (!log || !log.Shift) return;
+      const dateKey = new Date(log.Timestamp).toDateString();
+      const key = dateKey + '|' + log.Shift;
+      if (!byDateShift[key]) byDateShift[key] = { dateKey, shift: log.Shift, timestamp: log.Timestamp };
+      const entry = byDateShift[key];
+      if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp; // earliest of the merged rounds anchors sort order
       const val = parseFloat(r.Result);
       if (isNaN(val)) return;
-      if (hoursItem && r.ItemID === hoursItem.ItemID) byLog[r.LogID].hours = val;
-      if (kwhItem && r.ItemID === kwhItem.ItemID) byLog[r.LogID].kwh = val;
-      if (beforeItem && r.ItemID === beforeItem.ItemID) byLog[r.LogID].dieselBefore = val;
-      if (afterItem && r.ItemID === afterItem.ItemID) byLog[r.LogID].dieselAfter = val;
-      if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) byLog[r.LogID].legacyLevel = val;
+      if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
+      if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
+      if (beforeItem && r.ItemID === beforeItem.ItemID) entry.dieselBefore = val;
+      if (afterItem && r.ItemID === afterItem.ItemID) entry.dieselAfter = val;
+      if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) entry.legacyLevel = val;
     });
-    const rows = Object.values(byLog).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    // Fall back to the legacy Fuel Level reading wherever a log has no
-    // Before value of its own — covers every shift logged before the
-    // Before/After split shipped, without touching shifts that already
-    // have a real Before value.
+    const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    // Fall back to the legacy Fuel Level reading wherever a date+shift
+    // has no Before value of its own — covers every shift logged
+    // before the Before/After split shipped, without touching shifts
+    // that already have a real Before value.
     rows.forEach(r => {
       if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel;
     });
