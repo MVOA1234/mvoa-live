@@ -209,6 +209,7 @@ const HSModule = (function () {
         <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
         <button id="hs-reports-btn" class="btn-secondary">📈 More Reports</button>
         <button id="hs-eos-btn" class="btn-secondary">📝 End of Shift Report</button>
+        <button id="hs-diesel-btn" class="btn-secondary">⛽ Log Diesel Top-Up</button>
         <button id="hs-shiftduty-btn" class="btn-secondary">🗓️ Shift Duty</button>
         <button id="hs-amc-btn" class="btn-secondary">📋 AMC &amp; Compliance</button>
       </div>
@@ -238,8 +239,129 @@ const HSModule = (function () {
     container.querySelector('#hs-due-dashboard-btn').addEventListener('click', () => renderDueDashboard(container));
     container.querySelector('#hs-reports-btn').addEventListener('click', () => renderReportsMenu(container));
     container.querySelector('#hs-eos-btn').addEventListener('click', () => renderEndOfShiftPicker(container));
+    container.querySelector('#hs-diesel-btn').addEventListener('click', () => renderDieselTopUpEntry(container));
     container.querySelector('#hs-shiftduty-btn').addEventListener('click', () => renderShiftDuty(container));
     container.querySelector('#hs-amc-btn').addEventListener('click', () => renderAmcCompliance(container));
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // DIESEL TOP-UP QUICK ENTRY — the diesel level readings can happen
+  // at ANY point during a shift (whenever the operator actually goes
+  // to check/top up the tank), not just at shift start like the rest
+  // of that shift's readings. So this is deliberately NOT part of the
+  // QR-scan-and-submit flow, and deliberately doesn't get locked out
+  // once the shift's main checklist is submitted — same reasoning and
+  // same "pick from today's already-submitted shifts" shape as the
+  // End of Shift Report above, just updating two specific items on
+  // that shift's log instead of its Notes field.
+  // ───────────────────────────────────────────────────────────
+  function renderDieselTopUpEntry(container) {
+    const beforeItem = itemsCache.find(i => /diesel level before top up/i.test(i.CheckItem));
+    const afterItem = itemsCache.find(i => /diesel level after top up/i.test(i.CheckItem));
+    if (!beforeItem || !afterItem) {
+      container.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+          <strong>⛽ Log Diesel Top-Up</strong>
+        </div>
+        <p class="muted">Diesel Level Before/After Top Up items aren't configured yet.</p>
+      `;
+      container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+      return;
+    }
+    const template = templatesCache.find(t => t.TemplateID === beforeItem.TemplateID);
+    const user = MVOA.getUser();
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <strong>⛽ Log Diesel Top-Up</strong>
+      </div>
+      <p class="muted" style="margin:0 0 12px;">No QR scan needed. Log this any time during a shift that's already been logged today — before/after readings save independently and don't lock with the rest of that shift's checklist.</p>
+      <div id="hs-diesel-list"></div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+
+    const listEl = container.querySelector('#hs-diesel-list');
+    if (!template || !MVOA.canEditPlantRoundsSection(template.QRTarget, user)) {
+      listEl.innerHTML = '<p class="muted">You don\'t have edit access here.</p>';
+      return;
+    }
+    const shiftRows = ['1st', '2nd', '3rd'].map(shift => {
+      const log = todaysLogFor(template.TemplateID, shift);
+      return log ? { shift, log } : null;
+    }).filter(Boolean);
+    if (!shiftRows.length) {
+      listEl.innerHTML = '<p class="muted">No DG Set shift has been logged yet today — submit the regular shift checklist first, then diesel readings can be logged any time during that shift.</p>';
+      return;
+    }
+
+    async function loadExisting() {
+      const results = await loadItemResults();
+      return shiftRows.map(r => ({
+        ...r,
+        beforeResult: results.find(rr => rr.LogID === r.log.LogID && rr.ItemID === beforeItem.ItemID) || null,
+        afterResult: results.find(rr => rr.LogID === r.log.LogID && rr.ItemID === afterItem.ItemID) || null
+      }));
+    }
+
+    listEl.innerHTML = '<p class="muted">Loading…</p>';
+    loadExisting().then(rows => {
+      listEl.innerHTML = rows.map((r, i) => `
+        <div class="mvoa-list-item">
+          <strong>${shiftLabel(r.shift)} Shift</strong>
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">Shift logged by ${escapeHtml(r.log.PerformedBy)} · ${formatDate(r.log.Timestamp)}</p>
+          <label>Diesel Level Before Top Up (%)
+            <input type="number" class="hs-diesel-before" data-idx="${i}" value="${r.beforeResult ? escapeHtml(r.beforeResult.Result) : ''}" step="any">
+          </label>
+          <label>Diesel Level After Top Up (%)
+            <input type="number" class="hs-diesel-after" data-idx="${i}" value="${r.afterResult ? escapeHtml(r.afterResult.Result) : ''}" step="any">
+          </label>
+          <button class="btn-primary hs-diesel-save" data-idx="${i}" style="width:100%;margin-top:6px;">Save</button>
+          <p class="error-text hs-diesel-error" data-idx="${i}" style="min-height:1em;margin-top:4px;"></p>
+        </div>
+      `).join('');
+
+      listEl.querySelectorAll('.hs-diesel-save').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = btn.dataset.idx;
+          const row = rows[idx];
+          const errEl = listEl.querySelector(`.hs-diesel-error[data-idx="${idx}"]`);
+          const beforeVal = listEl.querySelector(`.hs-diesel-before[data-idx="${idx}"]`).value.trim();
+          const afterVal = listEl.querySelector(`.hs-diesel-after[data-idx="${idx}"]`).value.trim();
+          errEl.textContent = '';
+          btn.disabled = true;
+          btn.textContent = 'Saving…';
+          try {
+            const existingRows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
+            const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+            let nextNum = 1;
+            existingIds.forEach(id => {
+              const m = String(id).match(/^HSRES-(\d+)$/);
+              if (m) nextNum = Math.max(nextNum, parseInt(m[1], 10) + 1);
+            });
+            const toWrite = [
+              { existing: row.beforeResult, item: beforeItem, val: beforeVal },
+              { existing: row.afterResult, item: afterItem, val: afterVal }
+            ].filter(w => w.val !== '');
+            for (const w of toWrite) {
+              if (w.existing) {
+                await MVOA.sheetsUpdateRow(MVOA.TABS.hsItemResults, w.existing.rowNumber, RESULT_COLS.map(c => ({ ResultID: w.existing.ResultID, LogID: row.log.LogID, ItemID: w.item.ItemID, Result: w.val, Remarks: '' })[c]));
+              } else {
+                const resultId = 'HSRES-' + String(nextNum).padStart(5, '0');
+                nextNum++;
+                await MVOA.sheetsAppend(MVOA.TABS.hsItemResults, RESULT_COLS.map(c => ({ ResultID: resultId, LogID: row.log.LogID, ItemID: w.item.ItemID, Result: w.val, Remarks: '' })[c]));
+              }
+            }
+            btn.textContent = '✓ Saved';
+            setTimeout(() => { btn.disabled = false; btn.textContent = 'Save'; }, 1500);
+          } catch (e) {
+            errEl.textContent = 'Could not save: ' + e.message;
+            btn.disabled = false;
+            btn.textContent = 'Save';
+          }
+        });
+      });
+    });
   }
 
   // Called when a category tab on Home is tapped. RequiresScan=FALSE
