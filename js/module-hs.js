@@ -1158,7 +1158,8 @@ const HSModule = (function () {
         <button id="hs-report-failed" class="btn-secondary" style="width:100%;margin-bottom:8px;">❌ Failed Items Log</button>
         <button id="hs-report-tasks" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔗 Auto-Flagged Task Resolution</button>
         <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
-        <button id="hs-report-hours" class="btn-secondary" style="width:100%;margin-bottom:8px;">⏱️ DG Running Hours</button>
+        <button id="hs-report-dg-weekly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔧 DG Operations (Weekly)</button>
+        <button id="hs-report-dg-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔧 DG Set Operations (Monthly)</button>
         <button id="hs-report-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">📅 Monthly Report</button>
         <button id="hs-report-rounds-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🗓️ Rounds Monthly Report (Security)</button>
         <button id="hs-report-inout-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🚚 In/Out Monthly Report</button>
@@ -1169,7 +1170,8 @@ const HSModule = (function () {
     container.querySelector('#hs-report-failed').addEventListener('click', () => renderFailedItemsReport(container));
     container.querySelector('#hs-report-tasks').addEventListener('click', () => renderTaskResolutionReport(container));
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
-    container.querySelector('#hs-report-hours').addEventListener('click', () => renderRunningHoursReport(container));
+    container.querySelector('#hs-report-dg-weekly').addEventListener('click', () => renderDgOperationsReport(container, 'weekly'));
+    container.querySelector('#hs-report-dg-monthly').addEventListener('click', () => renderDgOperationsReport(container, 'monthly'));
     container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
     container.querySelector('#hs-report-rounds-monthly').addEventListener('click', () => renderRoundsMonthlyReport(container));
     container.querySelector('#hs-report-inout-monthly').addEventListener('click', () => renderInOutMonthlyReport(container));
@@ -1529,73 +1531,177 @@ const HSModule = (function () {
   // today's Shift 3 reading) — same logic regardless of which shift,
   // since it's just "next reading minus this one" in time order.
   // ───────────────────────────────────────────────────────────
-  async function renderRunningHoursReport(container) {
+  // ───────────────────────────────────────────────────────────
+  // DG SET OPERATIONS — Run Hours, kWh Generated, Diesel Consumed,
+  // Diesel Top Up, and Fuel Efficiency, per Date × Shift, with a
+  // Total column. Replaces the old single-metric "DG Running Hours"
+  // report. Shares one data-loading function between the Weekly and
+  // Monthly views (same 5 rows, just a different date range).
+  //
+  // Diesel math (per DG_Set.docx, confirmed with user): tank capacity
+  // 200L, so a level reading of X% = X/100 * 200 litres. All readings
+  // (Hours, kWh, diesel level) are taken at shift START.
+  //   - No top-up this shift: consumed = (this shift's "before top
+  //     up" level − next shift's "before top up" level), litres —
+  //     same "this reading vs next reading" pattern used for Run
+  //     Hours and kWh.
+  //   - Top-up THIS shift: "before top-up" already equals the
+  //     start-of-shift level (both taken at shift start, no gap
+  //     between them to measure), so the real interval is from right
+  //     after the top-up through the next shift's reading: consumed =
+  //     (this shift's "after top up" level − next shift's "before top
+  //     up" level), litres.
+  async function loadDgOperationsData() {
+    const hoursItem = itemsCache.find(i => /running hours/i.test(i.CheckItem));
+    const kwhItem = itemsCache.find(i => /cumulated kwh/i.test(i.CheckItem));
+    const beforeItem = itemsCache.find(i => /diesel level before top up/i.test(i.CheckItem));
+    const afterItem = itemsCache.find(i => /diesel level after top up/i.test(i.CheckItem));
+    const results = await loadItemResults();
+    const relevantIds = [hoursItem, kwhItem, beforeItem, afterItem].filter(Boolean).map(i => i.ItemID);
+    const byLog = {};
+    results.forEach(r => {
+      if (!relevantIds.includes(r.ItemID)) return;
+      const log = logsCache.find(l => l.LogID === r.LogID);
+      if (!log) return;
+      if (!byLog[r.LogID]) byLog[r.LogID] = { logId: r.LogID, timestamp: log.Timestamp, shift: log.Shift, performedBy: log.PerformedBy };
+      const val = parseFloat(r.Result);
+      if (isNaN(val)) return;
+      if (hoursItem && r.ItemID === hoursItem.ItemID) byLog[r.LogID].hours = val;
+      if (kwhItem && r.ItemID === kwhItem.ItemID) byLog[r.LogID].kwh = val;
+      if (beforeItem && r.ItemID === beforeItem.ItemID) byLog[r.LogID].dieselBefore = val;
+      if (afterItem && r.ItemID === afterItem.ItemID) byLog[r.LogID].dieselAfter = val;
+    });
+    const rows = Object.values(byLog).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const TANK_CAPACITY = 200; // litres, per DG_Set.docx
+    const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
+    const round2 = (n) => Math.round(n * 100) / 100;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i], next = rows[i + 1];
+      r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
+      r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
+      r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
+      if (r.dieselAfter != null) {
+        // Top-up this shift — readings are all taken at shift start, so
+        // "before top-up" IS the start-of-shift level (no separate gap
+        // to measure before the top-up itself). The real consumption
+        // interval runs from right after the top-up through to the
+        // next shift's reading — same "this vs next" pattern as
+        // everything else, just anchored to "after" for this one shift.
+        r.dieselConsumedLitres = (next && next.dieselBefore != null) ? round2(pctToLitres(r.dieselAfter - next.dieselBefore)) : null;
+      } else if (next && r.dieselBefore != null && next.dieselBefore != null) {
+        r.dieselConsumedLitres = round2(pctToLitres(r.dieselBefore - next.dieselBefore));
+      } else {
+        r.dieselConsumedLitres = null;
+      }
+      r.fuelEfficiency = (typeof r.dieselConsumedLitres === 'number' && r.kwhGenerated) ? Math.round((r.dieselConsumedLitres / r.kwhGenerated) * 1000) / 1000 : null;
+    }
+    return rows;
+  }
+
+  function dgOpsCellHtml(val) {
+    if (val === 'CONFIRM') return '<span style="color:#b3261e;font-size:0.75rem;">Confirm formula</span>';
+    if (val === null || val === undefined) return '<span class="muted">—</span>';
+    return val;
+  }
+
+  let dgOpsWeekStart = mondayOfWeek(new Date());
+  let dgOpsMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; })();
+
+  async function renderDgOperationsReport(container, mode) {
+    const isWeekly = mode === 'weekly';
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-reports" class="btn-secondary">← Reports</button>
-        <strong>⏱️ DG Running Hours</strong>
-        <button id="hs-hours-pdf" class="btn-secondary">🖨 Print to PDF</button>
+        <strong>🔧 DG ${isWeekly ? 'Operations' : 'Set Operations'} — ${isWeekly ? 'Weekly' : 'Monthly'} Report</strong>
       </div>
-      <div id="hs-hours-list"><p class="muted">Loading…</p></div>
+      <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
+        ${isWeekly
+          ? `<button id="hs-dg-week-prev" class="btn-secondary">← Prev Week</button><span class="muted" id="hs-dg-week-label"></span><button id="hs-dg-week-next" class="btn-secondary">Next Week →</button>`
+          : `<label class="muted">Month: <input id="hs-dg-month" type="month" value="${dgOpsMonth}"></label>`}
+      </div>
+      <div id="hs-dg-ops-body"><p class="muted">Loading…</p></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
-
-    const listEl = container.querySelector('#hs-hours-list');
-    const item = itemsCache.find(i => /running hours/i.test(i.CheckItem));
-    if (!item) {
-      listEl.innerHTML = '<p class="muted">No running-hours meter item is configured yet.</p>';
-      return;
+    if (isWeekly) {
+      const updateLabel = () => { container.querySelector('#hs-dg-week-label').textContent = `Week of ${dgOpsWeekStart.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`; };
+      updateLabel();
+      container.querySelector('#hs-dg-week-prev').addEventListener('click', () => { dgOpsWeekStart = new Date(dgOpsWeekStart.getTime() - 7 * 86400000); updateLabel(); loadDgOpsBody(container, mode); });
+      container.querySelector('#hs-dg-week-next').addEventListener('click', () => { dgOpsWeekStart = new Date(dgOpsWeekStart.getTime() + 7 * 86400000); updateLabel(); loadDgOpsBody(container, mode); });
+    } else {
+      container.querySelector('#hs-dg-month').addEventListener('change', (e) => { dgOpsMonth = e.target.value; loadDgOpsBody(container, mode); });
     }
-    let results;
+    loadDgOpsBody(container, mode);
+  }
+
+  async function loadDgOpsBody(container, mode) {
+    const bodyEl = container.querySelector('#hs-dg-ops-body');
+    if (!bodyEl) return;
+    let rows;
     try {
-      results = await loadItemResults();
+      rows = await loadDgOperationsData();
     } catch (e) {
-      listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
     }
-    const readings = results
-      .filter(r => r.ItemID === item.ItemID)
-      .map(r => {
-        const log = logsCache.find(l => l.LogID === r.LogID);
-        return log ? { value: parseFloat(r.Result), timestamp: log.Timestamp, shift: log.Shift, performedBy: log.PerformedBy } : null;
-      })
-      .filter(x => x && !isNaN(x.value))
-      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-
-    if (!readings.length) {
-      listEl.innerHTML = '<p class="muted">No readings logged yet.</p>';
-      return;
+    const isWeekly = mode === 'weekly';
+    let dates;
+    if (isWeekly) {
+      dates = Array.from({ length: 7 }, (_, i) => new Date(dgOpsWeekStart.getTime() + i * 86400000));
+    } else {
+      const [y, mo] = dgOpsMonth.split('-').map(Number);
+      const daysInMonth = new Date(y, mo, 0).getDate();
+      dates = Array.from({ length: daysInMonth }, (_, i) => new Date(y, mo - 1, i + 1));
     }
-    const rows = readings.map((r, i) => {
-      const next = readings[i + 1];
-      const hoursRun = next ? Math.round((next.value - r.value) * 100) / 100 : null;
-      return Object.assign({}, r, { hoursRun });
-    }).reverse(); // most recent first
+    const shifts = ['1st', '2nd', '3rd'];
+    const DIVIDER = 'border-right:2px solid #999;';
+    const ROW_H = 'height:30px;vertical-align:middle;';
 
-    listEl.innerHTML = `
-      <div class="card" style="max-width:600px;margin:0;max-height:72vh;overflow:auto;">
+    const headerDateCells = dates.map((d, di) => `<th colspan="3" style="padding:4px 6px;text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;${di < dates.length - 1 ? DIVIDER : ''}">Date ${isWeekly ? di + 1 : d.getDate()}</th>`).join('');
+    const headerShiftCells = dates.map((d, di) => shifts.map((s, si) => `<th style="padding:4px 6px;font-size:0.72rem;position:sticky;top:32px;z-index:3;background:#eef2f6;${si === shifts.length - 1 && di < dates.length - 1 ? DIVIDER : ''}">Shift ${si + 1}</th>`).join('')).join('');
+
+    function cellFor(d, shiftIdx, field) {
+      const shiftKey = shifts[shiftIdx];
+      const r = rows.find(rr => new Date(rr.timestamp).toDateString() === d.toDateString() && rr.shift === shiftKey);
+      return r ? r[field] : null;
+    }
+    function metricRow(label, unit, field, totalFn) {
+      const cells = dates.map((d, di) => shifts.map((s, si) => {
+        const divider = (si === shifts.length - 1 && di < dates.length - 1) ? DIVIDER : '';
+        const val = cellFor(d, si, field);
+        return `<td style="padding:4px 6px;text-align:center;${ROW_H}${divider}">${dgOpsCellHtml(val)}</td>`;
+      }).join('')).join('');
+      const total = totalFn();
+      return `<tr><td style="padding:4px 6px;font-weight:600;position:sticky;left:0;z-index:1;background:#fff;${ROW_H}">${label}</td><td style="padding:4px 6px;color:var(--muted);position:sticky;left:0;z-index:1;background:#fff;${ROW_H}"></td>${cells}<td style="padding:4px 6px;text-align:center;font-weight:700;${ROW_H}">${total !== null ? total : '—'}</td></tr>`;
+    }
+
+    const allRunHours = dates.flatMap((d, di) => shifts.map((s, si) => cellFor(d, si, 'hoursRun'))).filter(v => typeof v === 'number');
+    const allKwh = dates.flatMap((d, di) => shifts.map((s, si) => cellFor(d, si, 'kwhGenerated'))).filter(v => typeof v === 'number');
+    const allDiesel = dates.flatMap((d, di) => shifts.map((s, si) => cellFor(d, si, 'dieselConsumedLitres'))).filter(v => typeof v === 'number');
+    const allTopUp = dates.flatMap((d, di) => shifts.map((s, si) => cellFor(d, si, 'dieselTopUpLitres'))).filter(v => typeof v === 'number');
+    const sum = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) * 100) / 100 : null;
+    const totalRunHours = sum(allRunHours);
+    const totalKwh = sum(allKwh);
+    const totalDiesel = sum(allDiesel);
+    const totalTopUp = sum(allTopUp);
+    const totalEfficiency = (totalDiesel !== null && totalKwh) ? Math.round((totalDiesel / totalKwh) * 1000) / 1000 : null;
+
+    bodyEl.innerHTML = `
+      <div class="card" style="max-width:100%;margin:0;max-height:72vh;overflow:auto;">
         <table class="mvoa-table" style="border-collapse:separate;border-spacing:0;">
-          <thead><tr><th style="position:sticky;top:0;background:#eef2f6;">Date</th><th style="position:sticky;top:0;background:#eef2f6;">Shift</th><th style="position:sticky;top:0;background:#eef2f6;">Reading</th><th style="position:sticky;top:0;background:#eef2f6;">Hours Run</th></tr></thead>
+          <thead>
+            <tr><th rowspan="2" style="position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">&nbsp;</th><th rowspan="2" style="position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Unit</th>${headerDateCells}<th rowspan="2" style="position:sticky;top:0;z-index:3;background:#eef2f6;">Total for ${isWeekly ? 'Week' : 'Month'}</th></tr>
+            <tr>${headerShiftCells}</tr>
+          </thead>
           <tbody>
-            ${rows.map(r => `
-              <tr>
-                <td>${formatDate(r.timestamp)}</td>
-                <td>${shiftLabel(r.shift)}</td>
-                <td>${r.value}</td>
-                <td>${r.hoursRun !== null ? r.hoursRun : '<span class="muted">— (awaiting next reading)</span>'}</td>
-              </tr>
-            `).join('')}
+            ${metricRow('Run Hours', 'Hr', 'hoursRun', () => totalRunHours)}
+            ${metricRow('Unit Generated', 'kWh', 'kwhGenerated', () => totalKwh)}
+            ${metricRow('Diesel Consumed', 'litre', 'dieselConsumedLitres', () => totalDiesel)}
+            ${metricRow('Diesel Top up', 'litre', 'dieselTopUpLitres', () => totalTopUp)}
+            ${metricRow('Fuel Efficiency', 'litre/kWh', 'fuelEfficiency', () => totalEfficiency)}
           </tbody>
         </table>
       </div>
     `;
-    container.querySelector('#hs-hours-pdf').addEventListener('click', () => {
-      const pdfRows = rows.map(r => ({
-        Date: formatDate(r.timestamp), Shift: shiftLabel(r.shift), Reading: r.value,
-        HoursRun: r.hoursRun !== null ? r.hoursRun : 'awaiting next reading'
-      }));
-      printTablePdf('DG Running Hours', ['Date', 'Shift', 'Reading', 'HoursRun'], pdfRows);
-    });
   }
 
   // ───────────────────────────────────────────────────────────
