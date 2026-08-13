@@ -1683,13 +1683,28 @@ const HSModule = (function () {
   //     after the top-up through the next shift's reading: consumed =
   //     (this shift's "after top up" level − next shift's "before top
   //     up" level), litres.
+  //
+  // LEGACY "Fuel Level" fallback (ITM-0001, TPL-001) — before the
+  // Before/After Top-Up split existed, a single plain "Fuel Level" (%)
+  // item was filled in every shift instead. It's still Active (old
+  // rounds already reference it), just no longer what technicians fill
+  // in going forward. Its reading is the same "% of tank at shift
+  // start" meaning as the new Before item, so for any shift whose log
+  // has no Before value we fall back to its Fuel Level value as
+  // dieselBefore, letting the SAME this-vs-next math above compute
+  // Diesel Consumed / litres and Fuel Efficiency for those historic
+  // dates too. There's never a matching "after" value on those old
+  // shifts (no top-up event was recorded separately back then), so
+  // Diesel Top Up correctly stays blank for them — that's the one
+  // figure that genuinely can't be reconstructed from old data.
   async function loadDgOperationsData() {
     const hoursItem = itemsCache.find(i => /running hours/i.test(i.CheckItem));
     const kwhItem = itemsCache.find(i => /cumulated kwh/i.test(i.CheckItem));
     const beforeItem = itemsCache.find(i => /diesel level before top up/i.test(i.CheckItem));
     const afterItem = itemsCache.find(i => /diesel level after top up/i.test(i.CheckItem));
+    const legacyLevelItem = itemsCache.find(i => /^fuel level$/i.test((i.CheckItem || '').trim()));
     const results = await loadItemResults();
-    const relevantIds = [hoursItem, kwhItem, beforeItem, afterItem].filter(Boolean).map(i => i.ItemID);
+    const relevantIds = [hoursItem, kwhItem, beforeItem, afterItem, legacyLevelItem].filter(Boolean).map(i => i.ItemID);
     const byLog = {};
     results.forEach(r => {
       if (!relevantIds.includes(r.ItemID)) return;
@@ -1702,8 +1717,16 @@ const HSModule = (function () {
       if (kwhItem && r.ItemID === kwhItem.ItemID) byLog[r.LogID].kwh = val;
       if (beforeItem && r.ItemID === beforeItem.ItemID) byLog[r.LogID].dieselBefore = val;
       if (afterItem && r.ItemID === afterItem.ItemID) byLog[r.LogID].dieselAfter = val;
+      if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) byLog[r.LogID].legacyLevel = val;
     });
     const rows = Object.values(byLog).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    // Fall back to the legacy Fuel Level reading wherever a log has no
+    // Before value of its own — covers every shift logged before the
+    // Before/After split shipped, without touching shifts that already
+    // have a real Before value.
+    rows.forEach(r => {
+      if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel;
+    });
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
     const round2 = (n) => Math.round(n * 100) / 100;
