@@ -1231,8 +1231,8 @@ const HSModule = (function () {
     const DIVIDER = 'border-right:2px solid #999;';
     const ROW_H = 'height:58px;vertical-align:middle;';
 
-    const headerGroupCells = rounds.map((r, gi) => `<th colspan="${items.length}" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;${gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(shiftLabel(r))}</th>`).join('');
-    const headerItemCells = rounds.map((r, gi) => items.map((i, ii) => `<th style="padding:4px 6px;font-size:0.75rem;white-space:nowrap;${ii === items.length - 1 && gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(i.CheckItem)}</th>`).join('')).join('');
+    const headerGroupCells = rounds.map((r, gi) => `<th colspan="${items.length}" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;position:sticky;top:0;z-index:3;background:#eef2f6;${gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(shiftLabel(r))}</th>`).join('');
+    const headerItemCells = rounds.map((r, gi) => items.map((i, ii) => `<th style="padding:4px 6px;font-size:0.75rem;white-space:nowrap;position:sticky;top:32px;z-index:3;background:#eef2f6;${ii === items.length - 1 && gi < rounds.length - 1 ? DIVIDER : ''}">${escapeHtml(i.CheckItem)}</th>`).join('')).join('');
 
     const bodyRows = [];
     const nowForReport = new Date();
@@ -1274,13 +1274,13 @@ const HSModule = (function () {
           </td>`;
         }).join('');
       }).join('');
-      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;${ROW_H}">${day}</td>${cells}</tr>`);
+      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;z-index:1;background:#fff;${ROW_H}">${day}</td>${cells}</tr>`);
     }
 
     bodyEl.innerHTML = `
       <table class="mvoa-table" style="border-collapse:collapse;">
         <thead>
-          <tr><th rowspan="2" style="padding:4px 6px;position:sticky;left:0;background:#fff;">Date</th>${headerGroupCells}</tr>
+          <tr><th rowspan="2" style="padding:4px 6px;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Date</th>${headerGroupCells}</tr>
           <tr>${headerItemCells}</tr>
         </thead>
         <tbody>${bodyRows.join('')}</tbody>
@@ -1430,8 +1430,8 @@ const HSModule = (function () {
     const DIVIDER = 'border-right:2px solid #999;';
     const DIRECTIONS = ['IN', 'OUT'];
 
-    const headerGroupCells = IN_OUT_TYPES.map((t, gi) => `<th colspan="2" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;${gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${escapeHtml(t.key)}</th>`).join('');
-    const headerDirCells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((d, di) => `<th style="padding:4px 6px;font-size:0.75rem;text-align:center;${di === 1 && gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${d}</th>`).join('')).join('');
+    const headerGroupCells = IN_OUT_TYPES.map((t, gi) => `<th colspan="2" style="padding:4px 6px;text-align:center;border-bottom:1px solid #ccc;position:sticky;top:0;z-index:3;background:#eef2f6;${gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${escapeHtml(t.key)}</th>`).join('');
+    const headerDirCells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((d, di) => `<th style="padding:4px 6px;font-size:0.75rem;text-align:center;position:sticky;top:32px;z-index:3;background:#eef2f6;${di === 1 && gi < IN_OUT_TYPES.length - 1 ? DIVIDER : ''}">${d}</th>`).join('')).join('');
 
     const bodyRows = [];
     for (let day = 1; day <= daysInMonth; day++) {
@@ -1451,13 +1451,13 @@ const HSModule = (function () {
         }).join('');
         return `<td style="padding:4px 6px;text-align:center;${divider}">${linesHtml}</td>`;
       }).join('')).join('');
-      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;">${day}</td>${cells}</tr>`);
+      bodyRows.push(`<tr><td style="padding:4px 6px;font-weight:600;white-space:nowrap;position:sticky;left:0;z-index:1;background:#fff;">${day}</td>${cells}</tr>`);
     }
 
     bodyEl.innerHTML = `
       <table class="mvoa-table" style="border-collapse:collapse;">
         <thead>
-          <tr><th rowspan="2" style="padding:4px 6px;position:sticky;left:0;background:#fff;">Date</th>${headerGroupCells}</tr>
+          <tr><th rowspan="2" style="padding:4px 6px;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Date</th>${headerGroupCells}</tr>
           <tr>${headerDirCells}</tr>
         </thead>
         <tbody>${bodyRows.join('')}</tbody>
@@ -1481,10 +1481,10 @@ const HSModule = (function () {
       </div>
       <p class="muted" style="margin:0 0 12px;">Which frequency applies to each equipment/category — no item-level detail, just the cadence.</p>
       <div style="overflow-x:auto;">
-        <table class="mvoa-table" style="table-layout:fixed;width:100%;">
+        <table class="mvoa-table" style="table-layout:fixed;width:100%;border-collapse:collapse;">
           <thead><tr>
-            <th style="width:220px;text-align:left;">Equipment / Category</th>
-            <th style="text-align:center;">Daily</th><th style="text-align:center;">Weekly</th><th style="text-align:center;">Monthly</th><th style="text-align:center;">Bi-Monthly</th>
+            <th style="width:220px;text-align:left;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Equipment / Category</th>
+            <th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Daily</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Weekly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Monthly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Bi-Monthly</th>
           </tr></thead>
           <tbody id="hs-schedule-body"></tbody>
         </table>
@@ -1503,7 +1503,7 @@ const HSModule = (function () {
     const cellHtml = (val) => val ? `<span style="color:green;font-weight:700;">✓</span><br><span class="muted" style="font-size:0.72rem;">${escapeHtml(val === '✓' ? '' : val)}</span>` : '<span class="muted">—</span>';
     container.querySelector('#hs-schedule-body').innerHTML = rows.map(r => `
       <tr>
-        <td>${escapeHtml(r.label)}${r.group ? `<br><span class="muted" style="font-size:0.72rem;">${escapeHtml(r.group)}</span>` : ''}</td>
+        <td style="position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(r.label)}${r.group ? `<br><span class="muted" style="font-size:0.72rem;">${escapeHtml(r.group)}</span>` : ''}</td>
         <td style="text-align:center;">${cellHtml(r.Daily)}</td>
         <td style="text-align:center;">${cellHtml(r.Weekly)}</td>
         <td style="text-align:center;">${cellHtml(r.Monthly)}</td>
@@ -1574,8 +1574,8 @@ const HSModule = (function () {
 
     listEl.innerHTML = `
       <div class="card" style="max-width:600px;margin:0;overflow-x:auto;">
-        <table class="mvoa-table">
-          <thead><tr><th>Date</th><th>Shift</th><th>Reading</th><th>Hours Run</th></tr></thead>
+        <table class="mvoa-table" style="border-collapse:collapse;">
+          <thead><tr><th style="position:sticky;top:0;background:#eef2f6;">Date</th><th style="position:sticky;top:0;background:#eef2f6;">Shift</th><th style="position:sticky;top:0;background:#eef2f6;">Reading</th><th style="position:sticky;top:0;background:#eef2f6;">Hours Run</th></tr></thead>
           <tbody>
             ${rows.map(r => `
               <tr>
@@ -1761,7 +1761,7 @@ const HSModule = (function () {
           const notes = (resultObj._logNotes || '').trim();
           return notes ? `<span class="muted" style="font-size:0.68rem;white-space:normal;">${escapeHtml(notes)}</span>` : '<span class="muted">—</span>';
         }
-        return entries.map(e => `<span style="display:block;white-space:nowrap;font-size:0.62rem;line-height:1.3;">${escapeHtml(e)}</span>`).join('');
+        return entries.map(e => `<span style="display:block;white-space:normal;word-break:break-all;font-size:0.56rem;line-height:1.25;">${escapeHtml(e)}</span>`).join('');
       }
       if (resultObj.Result === 'Fail' || resultObj.Result === 'Pass') {
         const mark = resultObj.Result === 'Fail'
@@ -1807,20 +1807,20 @@ const HSModule = (function () {
     const pdfRows = [];
     shifts.forEach(shift => {
       if (shift) {
-        bodyHtml += `<tr><td colspan="${daysInMonth + 1}" style="background:var(--card-bg);font-weight:700;">${shiftLabel(shift)} Shift</td></tr>`;
+        bodyHtml += `<tr><td colspan="${daysInMonth + 1}" style="background:var(--card-bg);font-weight:700;position:sticky;left:0;">${shiftLabel(shift)} Shift</td></tr>`;
         const sectionRow = { Item: '— ' + shiftLabel(shift) + ' Shift —' };
         dayHeaders.forEach(d => sectionRow[String(d)] = '');
         pdfRows.push(sectionRow);
       }
       const performedByCells = dayHeaders.map(d => performedByFor(d, shift));
-      bodyHtml += `<tr><td style="font-style:italic;white-space:normal;word-wrap:break-word;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
+      bodyHtml += `<tr><td style="font-style:italic;white-space:normal;word-wrap:break-word;position:sticky;left:0;z-index:1;background:#fff;">Performed By</td>${performedByCells.map(v => `<td class="muted" style="font-size:0.8rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
       const performedByRow = { Item: 'Performed By' };
       dayHeaders.forEach((d, i) => performedByRow[String(d)] = performedByCells[i] || '');
       pdfRows.push(performedByRow);
 
       items.forEach(item => {
         const cells = dayHeaders.map(d => cellFor(item.ItemID, d, shift));
-        bodyHtml += `<tr><td style="white-space:normal;word-wrap:break-word;">${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td style="word-wrap:break-word;white-space:normal;">${cellHtml(item, v)}</td>`).join('')}</tr>`;
+        bodyHtml += `<tr><td style="white-space:normal;word-wrap:break-word;position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(item.CheckItem)}</td>${cells.map(v => `<td style="word-wrap:break-word;white-space:normal;">${cellHtml(item, v)}</td>`).join('')}</tr>`;
         const pdfRow = { Item: item.CheckItem };
         dayHeaders.forEach((d, i) => pdfRow[String(d)] = cellPdfValue(item, cells[i]));
         pdfRows.push(pdfRow);
@@ -1832,7 +1832,7 @@ const HSModule = (function () {
       // Performed By, just reading Notes instead) — previously this
       // only surfaced in Full History's per-entry drill-down.
       const notesCells = dayHeaders.map(d => notesFor(d, shift));
-      bodyHtml += `<tr><td style="font-style:italic;white-space:normal;word-wrap:break-word;">Overall Notes</td>${notesCells.map(v => `<td class="muted" style="font-size:0.72rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
+      bodyHtml += `<tr><td style="font-style:italic;white-space:normal;word-wrap:break-word;position:sticky;left:0;z-index:1;background:#fff;">Overall Notes</td>${notesCells.map(v => `<td class="muted" style="font-size:0.72rem;word-wrap:break-word;white-space:normal;">${v ? escapeHtml(v) : '—'}</td>`).join('')}</tr>`;
       const notesRow = { Item: 'Overall Notes' };
       dayHeaders.forEach((d, i) => notesRow[String(d)] = notesCells[i] || '');
       pdfRows.push(notesRow);
@@ -1844,8 +1844,8 @@ const HSModule = (function () {
         <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
-        <table class="mvoa-table" style="table-layout:fixed;">
-          <thead><tr><th style="width:160px;word-wrap:break-word;">Item</th>${dayHeaders.map(d => `<th style="width:100px;word-wrap:break-word;white-space:normal;">${d}</th>`).join('')}</tr></thead>
+        <table class="mvoa-table" style="table-layout:fixed;border-collapse:collapse;">
+          <thead><tr><th style="width:160px;word-wrap:break-word;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Item</th>${dayHeaders.map(d => `<th style="width:100px;word-wrap:break-word;white-space:normal;position:sticky;top:0;z-index:3;background:#eef2f6;">${d}</th>`).join('')}</tr></thead>
           <tbody>${bodyHtml}</tbody>
         </table>
       </div>
