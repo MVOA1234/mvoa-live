@@ -396,7 +396,7 @@ const HSModule = (function () {
 
     bodyEl.innerHTML = `
       <p class="muted" style="margin:0 0 10px;">Past days this week are locked. Today and the rest of the week can be adjusted (e.g. for leave/readjustment).</p>
-      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
+      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table">
           <thead><tr><th>Shift</th>${days.map((d, i) => `<th>${dayLabels[i]}<br><span class="muted" style="font-weight:400;">${d.toLocaleDateString()}</span></th>`).join('')}</tr></thead>
           <tbody>${cellsHtml}</tbody>
@@ -540,7 +540,7 @@ const HSModule = (function () {
         <button id="hs-amc-add-btn" class="btn-secondary">+ Add New Asset</button>
       </div>
       <div id="hs-amc-add-form"></div>
-      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
+      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table">
           <thead><tr><th>Asset Name</th><th>Asset Code</th><th>Nature</th><th>Last Done</th><th>Next Due</th><th>Status</th><th>Contract End</th><th></th></tr></thead>
           <tbody>
@@ -1198,7 +1198,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
         <label class="muted">Month: <input id="hs-rounds-month" type="month" value="${roundsMonthlyMonth}"></label>
       </div>
-      <div id="hs-rounds-monthly-body" style="overflow-x:auto;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
+      <div id="hs-rounds-monthly-body" style="overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
     container.querySelector('#hs-rounds-month').addEventListener('change', (e) => {
@@ -1278,7 +1278,7 @@ const HSModule = (function () {
     }
 
     bodyEl.innerHTML = `
-      <table class="mvoa-table" style="border-collapse:collapse;">
+      <table class="mvoa-table" style="border-collapse:separate;border-spacing:0;">
         <thead>
           <tr><th rowspan="2" style="padding:4px 6px;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Date</th>${headerGroupCells}</tr>
           <tr>${headerItemCells}</tr>
@@ -1396,7 +1396,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
         <label class="muted">Month: <input id="hs-inout-month" type="month" value="${inOutMonthlyMonth}"></label>
       </div>
-      <div id="hs-inout-monthly-body" style="overflow-x:auto;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
+      <div id="hs-inout-monthly-body" style="overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
     container.querySelector('#hs-inout-month').addEventListener('change', (e) => {
@@ -1455,7 +1455,7 @@ const HSModule = (function () {
     }
 
     bodyEl.innerHTML = `
-      <table class="mvoa-table" style="border-collapse:collapse;">
+      <table class="mvoa-table" style="border-collapse:separate;border-spacing:0;">
         <thead>
           <tr><th rowspan="2" style="padding:4px 6px;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Date</th>${headerGroupCells}</tr>
           <tr>${headerDirCells}</tr>
@@ -1480,8 +1480,8 @@ const HSModule = (function () {
         <button id="hs-schedule-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <p class="muted" style="margin:0 0 12px;">Which frequency applies to each equipment/category — no item-level detail, just the cadence.</p>
-      <div style="overflow-x:auto;">
-        <table class="mvoa-table" style="table-layout:fixed;width:100%;border-collapse:collapse;">
+      <div style="overflow-x:auto;overflow-y:hidden;">
+        <table class="mvoa-table" style="table-layout:fixed;width:100%;border-collapse:separate;border-spacing:0;">
           <thead><tr>
             <th style="width:220px;text-align:left;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Equipment / Category</th>
             <th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Daily</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Weekly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Monthly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Bi-Monthly</th>
@@ -1574,7 +1574,7 @@ const HSModule = (function () {
 
     listEl.innerHTML = `
       <div class="card" style="max-width:600px;margin:0;overflow-x:auto;">
-        <table class="mvoa-table" style="border-collapse:collapse;">
+        <table class="mvoa-table" style="border-collapse:separate;border-spacing:0;">
           <thead><tr><th style="position:sticky;top:0;background:#eef2f6;">Date</th><th style="position:sticky;top:0;background:#eef2f6;">Shift</th><th style="position:sticky;top:0;background:#eef2f6;">Reading</th><th style="position:sticky;top:0;background:#eef2f6;">Hours Run</th></tr></thead>
           <tbody>
             ${rows.map(r => `
@@ -1843,8 +1843,8 @@ const HSModule = (function () {
         <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${escapeHtml(template.Name)}</p>
         <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
-      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;-webkit-overflow-scrolling:touch;">
-        <table class="mvoa-table" style="table-layout:fixed;border-collapse:collapse;">
+      <div class="card" style="max-width:100%;margin:0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;">
+        <table class="mvoa-table" style="table-layout:fixed;border-collapse:separate;border-spacing:0;">
           <thead><tr><th style="width:160px;word-wrap:break-word;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Item</th>${dayHeaders.map(d => `<th style="width:100px;word-wrap:break-word;white-space:normal;position:sticky;top:0;z-index:3;background:#eef2f6;">${d}</th>`).join('')}</tr></thead>
           <tbody>${bodyHtml}</tbody>
         </table>
@@ -3315,7 +3315,7 @@ const HSModule = (function () {
     tablesEl.innerHTML = dailyTemplates.map(t => `
       <div class="card" style="max-width:600px;margin:0 0 16px 0;">
         <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${escapeHtml(categoryLabel(t.QRTarget))}</h3>
-        <div style="overflow-x:auto;">
+        <div style="overflow-x:auto;overflow-y:hidden;">
           <table class="mvoa-table">
             <thead><tr><th>Date</th><th>1st</th><th>2nd</th><th>3rd</th></tr></thead>
             <tbody>
