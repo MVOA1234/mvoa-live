@@ -676,7 +676,7 @@
             <img src="${logoUrl}" alt="MVOA" style="height:44px;display:block;">
           </div>
         </div>
-        <div style="grid-area:staffid;align-self:end;text-align:center;font-size:0.7rem;font-weight:700;letter-spacing:2px;opacity:0.9;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
+        <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.05rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
         <div style="grid-area:photo;display:flex;justify-content:center;">${photoBox}</div>
         <div style="grid-area:info;min-width:0;align-self:start;padding-top:2px;">
           <div style="font-size:1.05rem;font-weight:700;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
