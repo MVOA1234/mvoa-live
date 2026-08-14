@@ -729,10 +729,14 @@
     let stream, raf, processing = false;
     const cooldown = {};
 
-    function stop() {
+    async function stop() {
       if (raf) cancelAnimationFrame(raf);
       if (stream) stream.getTracks().forEach(t => t.stop());
       modal.remove();
+      // Scans write straight to the Sheet without touching allLogsCache —
+      // reload it now so the register reflects what was just scanned,
+      // instead of re-rendering from the stale pre-scan cache.
+      try { await loadAll(true); } catch (e) { /* register just won't refresh this time */ }
       renderAttendanceLogs(host, user);
     }
     modal.querySelector('#att-qr-cancel').addEventListener('click', stop);
@@ -809,8 +813,11 @@
     const statusEl = modal.querySelector('#att-code-status');
     input.focus();
 
-    function stop() {
+    async function stop() {
       modal.remove();
+      // Same reload as the QR scanner's stop() — the code-entry scan wrote
+      // straight to the Sheet, so the register needs a fresh read too.
+      try { await loadAll(true); } catch (e) { /* register just won't refresh this time */ }
       renderAttendanceLogs(host, user);
     }
     modal.querySelector('#att-code-cancel').addEventListener('click', stop);
