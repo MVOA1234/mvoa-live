@@ -1302,7 +1302,8 @@ const HSModule = (function () {
         <button id="hs-report-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">📅 Monthly Report</button>
         <button id="hs-report-rounds-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🗓️ Rounds Monthly Report (Security)</button>
         <button id="hs-report-inout-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🚚 In/Out Monthly Report</button>
-        <button id="hs-report-schedule" class="btn-secondary" style="width:100%;">🗂️ Inspection Schedule</button>
+        <button id="hs-report-schedule" class="btn-secondary" style="width:100%;margin-bottom:8px;">🗂️ Inspection Schedule</button>
+        <button id="hs-report-hk-schedule" class="btn-secondary" style="width:100%;">🧹 Housekeeping Schedule</button>
       </div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
@@ -1311,6 +1312,7 @@ const HSModule = (function () {
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
     container.querySelector('#hs-report-dg-weekly').addEventListener('click', () => renderDgOperationsReport(container, 'weekly'));
     container.querySelector('#hs-report-dg-monthly').addEventListener('click', () => renderDgOperationsReport(container, 'monthly'));
+    container.querySelector('#hs-report-hk-schedule').addEventListener('click', () => renderHousekeepingSchedule(container));
     container.querySelector('#hs-report-monthly').addEventListener('click', () => renderMonthlyReport(container));
     container.querySelector('#hs-report-rounds-monthly').addEventListener('click', () => renderRoundsMonthlyReport(container));
     container.querySelector('#hs-report-inout-monthly').addEventListener('click', () => renderInOutMonthlyReport(container));
@@ -1673,6 +1675,129 @@ const HSModule = (function () {
         Daily: r.Daily ? '✓' : '—', Weekly: r.Weekly || '—', Monthly: r.Monthly || '—', BiMonthly: r.BiMonthly || '—'
       }));
       printTablePdf('Inspection Schedule', ['Category', 'Daily', 'Weekly', 'Monthly', 'BiMonthly'], pdfRows);
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // HOUSEKEEPING SCHEDULE — a detailed, item-level version of the
+  // Inspection Schedule above, specifically for Housekeeping. The
+  // general schedule only shows which FREQUENCY applies per category
+  // (Daily/Weekly/Monthly/BiMonthly) — it has no concept of which
+  // zone/task happens on which actual day of the week. Housekeeping's
+  // real schedule lives at the ITEM level via DayApplicability (e.g.
+  // "Zone A: Mon/Wed/Fri", "Zone B: Tue/Thu") — the same field
+  // templateScheduleLabel() already summarizes for the checklist-
+  // picker screen, just expanded here into a full Mon-Sun matrix, one
+  // row per zone/task, grouped under its template (e.g. Zone Rotation
+  // vs Building Cleaning). An item with no DayApplicability on a Daily
+  // template is scheduled every day; DayApplicability === 'WeeklyOnce'
+  // has no fixed weekday at all, shown as a note instead of a checked
+  // day. The Housekeeping category itself is looked up by label match
+  // rather than a hardcoded key, same as the rest of this file's
+  // data-driven approach — if no category's label contains
+  // "Housekeeping", this screen says so instead of guessing.
+  // ───────────────────────────────────────────────────────────
+  const HK_SCHEDULE_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  function housekeepingCategory() {
+    return categoriesCache.find(c => /housekeeping/i.test(c.Label || '') || /housekeeping/i.test(c.CategoryKey || ''));
+  }
+
+  function itemDayFlags(item, templateFrequency) {
+    const raw = (item.DayApplicability || '').trim();
+    if (!raw) {
+      // No explicit day list: a Daily template's item runs every day;
+      // anything else (Weekly/Monthly/BiMonthly with no override) has
+      // no fixed weekday of its own — leave the row blank rather than
+      // guess one.
+      return { flags: HK_SCHEDULE_DAYS.map(() => templateFrequency === 'Daily'), note: '' };
+    }
+    if (raw === 'WeeklyOnce') {
+      return { flags: HK_SCHEDULE_DAYS.map(() => false), note: 'Weekly (any day)' };
+    }
+    const days = raw.split(',').map(s => s.trim());
+    return { flags: HK_SCHEDULE_DAYS.map(d => days.includes(d)), note: '' };
+  }
+
+  function renderHousekeepingSchedule(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>🧹 Housekeeping Schedule</strong>
+        <button id="hs-hk-schedule-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
+      <p class="muted" style="margin:0 0 12px;">Which zone/task is scheduled on which day of the week, per Housekeeping checklist.</p>
+      <div id="hs-hk-schedule-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const bodyEl = container.querySelector('#hs-hk-schedule-body');
+    const cat = housekeepingCategory();
+    if (!cat) {
+      bodyEl.innerHTML = '<p class="muted">No Housekeeping category found — check HSCategories has a row whose Label contains "Housekeeping".</p>';
+      return;
+    }
+
+    const templates = templatesCache.filter(t => t.QRTarget === cat.CategoryKey && !t.CustomScreen);
+    if (!templates.length) {
+      bodyEl.innerHTML = '<p class="muted">No checklist templates set up yet for Housekeeping.</p>';
+      return;
+    }
+
+    const groups = templates.map(t => {
+      const items = itemsCache
+        .filter(i => i.TemplateID === t.TemplateID && (i.Active === 'TRUE' || i.Active === 'true' || i.Active === true || i.Active === '1'))
+        .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0))
+        .map(i => ({ item: i, ...itemDayFlags(i, t.Frequency) }));
+      return { template: t, items };
+    }).filter(g => g.items.length);
+
+    if (!groups.length) {
+      bodyEl.innerHTML = '<p class="muted">No checklist items set up yet for Housekeeping.</p>';
+      return;
+    }
+
+    bodyEl.innerHTML = `
+      <div style="max-height:72vh;overflow:auto;">
+        <table class="mvoa-table" style="table-layout:fixed;width:100%;border-collapse:separate;border-spacing:0;">
+          <thead><tr>
+            <th style="width:220px;text-align:left;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Zone / Task</th>
+            ${HK_SCHEDULE_DAYS.map(d => `<th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">${d}</th>`).join('')}
+          </tr></thead>
+          <tbody>
+            ${groups.map(g => `
+              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;">${escapeHtml(g.template.Name)}</td></tr>
+              ${g.items.map(row => `
+                <tr>
+                  <td style="position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(row.item.CheckItem)}</td>
+                  ${row.note
+                    ? `<td colspan="${HK_SCHEDULE_DAYS.length}" style="text-align:center;" class="muted">${escapeHtml(row.note)}</td>`
+                    : row.flags.map(f => `<td style="text-align:center;">${f ? '<span style="color:green;font-weight:700;">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}
+                </tr>
+              `).join('')}
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    container.querySelector('#hs-hk-schedule-pdf').addEventListener('click', () => {
+      const pdfRows = [];
+      groups.forEach(g => {
+        const header = { 'Zone / Task': g.template.Name };
+        HK_SCHEDULE_DAYS.forEach(d => header[d] = '');
+        pdfRows.push(header);
+        g.items.forEach(row => {
+          const rowObj = { 'Zone / Task': row.item.CheckItem };
+          if (row.note) {
+            HK_SCHEDULE_DAYS.forEach((d, i) => rowObj[d] = i === 0 ? row.note : '');
+          } else {
+            HK_SCHEDULE_DAYS.forEach((d, i) => rowObj[d] = row.flags[i] ? '✓' : '—');
+          }
+          pdfRows.push(rowObj);
+        });
+      });
+      printTablePdf('Housekeeping Schedule', ['Zone / Task', ...HK_SCHEDULE_DAYS], pdfRows);
     });
   }
 
