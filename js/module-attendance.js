@@ -613,18 +613,42 @@
     const date = dateStr || isoDateLocal(new Date());
     const dayLogs = logsForDate(date);
     const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
-    const withLog = rows.map(s => ({ s, l: dayLogs.find(x => x.StaffID === s.StaffID) }));
+    // A staff member can have more than one session on the same Date now
+    // (shifts crossing midnight, or two separate shifts in one day) — take
+    // the most recently started one as "today's" row in this table.
+    const withLog = rows.map(s => {
+      const matches = dayLogs.filter(x => x.StaffID === s.StaffID).sort((a, b) => b.CheckInTime.localeCompare(a.CheckInTime));
+      return { s, l: matches[0] };
+    });
     const onsite = withLog.filter(r => r.l && r.l.Status === 'CheckedIn').length;
     const checkedOut = withLog.filter(r => r.l && r.l.Status === 'CheckedOut').length;
     const notScanned = rows.length - onsite - checkedOut;
 
+    // Shifts cross midnight, so someone can be genuinely on-site right now
+    // with their session's Date attributed to YESTERDAY (the day they
+    // checked in) — they'd otherwise vanish from today's table entirely.
+    // This panel always shows every open session, regardless of the date
+    // filter above, so nobody currently on-site is ever invisible.
+    const openNow = allLogsCache.filter(l => l.CheckInTime && !l.CheckOutTime)
+      .map(l => ({ l, s: staffById(l.StaffID) }))
+      .filter(r => r.s)
+      .sort((a, b) => a.l.CheckInTime.localeCompare(b.l.CheckInTime));
+
     host.innerHTML = `
       <div class="card">
+        ${openNow.length ? `
+          <div style="margin-bottom:14px;padding:10px 12px;background:#e3f1eb;border-radius:8px;">
+            <strong style="font-size:0.85rem;">🟢 Currently checked in (${openNow.length})</strong>
+            <div class="muted" style="font-size:0.82rem;margin-top:4px;">
+              ${openNow.map(({ l, s }) => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))}) — since ${escapeHtml(formatTime(l.CheckInTime))}${l.Date !== isoDateLocal(new Date()) ? ' on ' + escapeHtml(l.Date) : ''}`).join('<br>')}
+            </div>
+          </div>
+        ` : ''}
         <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:flex-end;">
           <label style="margin:0;">Date
             <input type="date" id="att-log-date" value="${date}" max="${isoDateLocal(new Date())}">
           </label>
-          <span class="muted" style="font-size:0.85rem;">On-site: <strong>${onsite}</strong> · Checked out: <strong>${checkedOut}</strong> · Not scanned: <strong>${notScanned}</strong> · Total active: <strong>${rows.length}</strong></span>
+          <span class="muted" style="font-size:0.85rem;">On-site (since this date): <strong>${onsite}</strong> · Checked out: <strong>${checkedOut}</strong> · Not scanned: <strong>${notScanned}</strong> · Total active: <strong>${rows.length}</strong></span>
         </div>
         ${editable ? `
           <div class="mvoa-row" style="margin-bottom:14px;gap:10px;">
@@ -661,31 +685,37 @@
     }
   }
 
-  // Applies the check-in / check-out / reject-3rd-scan rule for one staff
-  // member, right now — always against a FRESH read of AttLog (not the
-  // cached allLogsCache), because the whole point of the 3rd-scan guard
-  // is to hold up even if two gate stations scan the same person moments
-  // apart. Same conservative "read immediately before writing" approach
-  // already used elsewhere in this app for ID generation, for the same
-  // last-write-wins-on-Sheets reason.
+  // Applies the check-in/check-out rule for one staff member, right now —
+  // always against a FRESH read of AttLog (not the cached allLogsCache),
+  // so two gate stations scanning the same person moments apart still
+  // can't both "win". This is SESSION-based, not calendar-day-based: a
+  // scan closes whichever session is currently OPEN for this staff member
+  // (CheckInTime set, CheckOutTime blank), no matter what date that
+  // session started on. That's deliberate — staff work shifts that cross
+  // midnight (e.g. check in 9pm, check out 7am the next morning), so
+  // matching by "does today already have a row" would wrongly treat the
+  // 7am check-out scan as a brand new check-in and leave the overnight
+  // session open forever. Once a session is closed, its CheckOutTime is
+  // never touched again — a later scan always starts a fresh new session
+  // rather than overwriting a completed one, which is what "no 3rd scan
+  // overwriting the checkout" actually means once shifts aren't confined
+  // to a single calendar day.
   async function processAttendanceScan(staffId, photoFile, user) {
     const staff = staffById(staffId);
     if (!staff) return { type: 'error', message: 'Not recognised — this ID is not enrolled.' };
     if (!isActive(staff.Active)) return { type: 'error', message: `${staff.Name} is deactivated.` };
 
-    const date = isoDateLocal(new Date());
-    const now = new Date().toISOString();
+    const now = new Date();
+    const nowIso = now.toISOString();
     const rows = await MVOA.sheetsRead(MVOA.TABS.attLog);
-    const existing = rowsToObjs(rows, LOG_COLS).find(l => l.StaffID === staffId && l.Date === date);
-
-    if (existing && existing.CheckInTime && existing.CheckOutTime) {
-      return { type: 'blocked', message: `${staff.Name} already checked out today at ${formatTime(existing.CheckOutTime)}. A 3rd scan isn't allowed — contact an admin if this is wrong.`, staff };
-    }
+    const staffLogs = rowsToObjs(rows, LOG_COLS).filter(l => l.StaffID === staffId);
+    const open = staffLogs.filter(l => l.CheckInTime && !l.CheckOutTime)
+      .sort((a, b) => b.CheckInTime.localeCompare(a.CheckInTime))[0];
 
     let photoUrl = '';
     if (photoFile) {
       try {
-        photoUrl = await MVOA.uploadPhotoToDrive(photoFile, `${staffId}_${date}_${existing ? 'out' : 'in'}.jpg`);
+        photoUrl = await MVOA.uploadPhotoToDrive(photoFile, `${staffId}_${isoDateLocal(now)}_${open ? 'out' : 'in'}.jpg`);
       } catch (e) {
         // A failed photo upload shouldn't block the actual check-in/out —
         // the attendance record itself matters more; log without a photo.
@@ -693,15 +723,21 @@
       }
     }
 
-    if (!existing) {
+    if (!open) {
       const existingIds = rows.slice(1).map(r => r[0]).filter(Boolean);
       const logId = MVOA.nextId('LOG', existingIds);
-      await MVOA.sheetsAppend(MVOA.TABS.attLog, [logId, staffId, date, now, photoUrl, '', '', 'CheckedIn', (user && user.name) || '']);
-      return { type: 'in', message: `${staff.Name} — CHECK-IN at ${formatTime(now)}`, staff };
+      // Date = the day the shift STARTED (check-in date) — an overnight
+      // shift is attributed to the evening it began, not the morning it
+      // ended, matching how shift reporting is normally read. See the
+      // "Currently checked in" panel in renderAttendanceLogs for staff
+      // whose open session started on an earlier date than the one being
+      // viewed — the date-filtered table below only matches by this Date.
+      await MVOA.sheetsAppend(MVOA.TABS.attLog, [logId, staffId, isoDateLocal(now), nowIso, photoUrl, '', '', 'CheckedIn', (user && user.name) || '']);
+      return { type: 'in', message: `${staff.Name} — CHECK-IN at ${formatTime(nowIso)}`, staff };
     } else {
-      await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, existing.rowNumber,
-        [existing.LogID, existing.StaffID, existing.Date, existing.CheckInTime, existing.CheckInPhotoURL, now, photoUrl, 'CheckedOut', (user && user.name) || '']);
-      return { type: 'out', message: `${staff.Name} — CHECK-OUT at ${formatTime(now)}`, staff };
+      await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, open.rowNumber,
+        [open.LogID, open.StaffID, open.Date, open.CheckInTime, open.CheckInPhotoURL, nowIso, photoUrl, 'CheckedOut', (user && user.name) || '']);
+      return { type: 'out', message: `${staff.Name} — CHECK-OUT at ${formatTime(nowIso)}`, staff };
     }
   }
 
@@ -775,7 +811,7 @@
               captureFrameAsFile(`${staffId}_scan.jpg`)
                 .then(file => processAttendanceScan(staffId, file, user))
                 .then(result => {
-                  statusEl.innerHTML = (result.type === 'blocked' || result.type === 'error')
+                  statusEl.innerHTML = result.type === 'error'
                     ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
                   processing = false;
                   setTimeout(() => { if (statusEl) statusEl.textContent = "Point camera at the staff member's QR badge…"; }, 2500);
@@ -830,7 +866,7 @@
       statusEl.textContent = 'Processing…';
       try {
         const result = await processAttendanceScan(staff.StaffID, null, user);
-        statusEl.innerHTML = (result.type === 'blocked' || result.type === 'error')
+        statusEl.innerHTML = result.type === 'error'
           ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
         input.value = '';
       } catch (e) {
