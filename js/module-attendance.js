@@ -86,6 +86,13 @@
   const SECTION_STAFF = 'Staff';
   const SECTION_LOGS = 'Logs';
   const SECTION_SETTINGS = 'Settings';
+  // "Codes" (attendance-code management, this session's addition) is
+  // deliberately NOT part of the Agencies/Staff/Logs/Settings permissions
+  // matrix — like the hard-Delete actions elsewhere in this module, it's
+  // gated purely by MVOA.isAdmin(user), not by PermissionsMatrix_Attendance,
+  // so it's added to the tab list separately in mount()/renderShell()
+  // rather than living in NAV_TABS below.
+  const SECTION_CODES = 'Codes';
   const NAV_TABS = [
     { key: SECTION_AGENCIES, label: 'Agencies' },
     { key: SECTION_STAFF, label: 'Staff' },
@@ -179,7 +186,7 @@
       retentionCleanupRan = true;
       runPhotoRetentionCleanup(); // fire-and-forget, best-effort — see its own comment
     }
-    const accessibleTabs = NAV_TABS.filter(t => canViewSection(t.key, user));
+    const accessibleTabs = visibleTabsFor(user);
     if (!accessibleTabs.length) {
       container.innerHTML = `
         <div class="card">
@@ -191,15 +198,23 @@
     renderShell(container, user, accessibleTabs[0].key);
   }
 
+  // Codes is admin-only (MVOA.isAdmin), not part of the Agencies/Staff/
+  // Logs/Settings permissions matrix — see the comment on SECTION_CODES.
+  function visibleTabsFor(user) {
+    const tabs = NAV_TABS.filter(t => canViewSection(t.key, user));
+    if (MVOA.isAdmin(user)) tabs.push({ key: SECTION_CODES, label: 'Codes' });
+    return tabs;
+  }
+
   function renderShell(container, user, activeTab) {
-    const accessibleTabs = NAV_TABS.filter(t => canViewSection(t.key, user));
+    const accessibleTabs = visibleTabsFor(user);
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <strong>🪪 Staff Attendance</strong>
       </div>
       ${accessibleTabs.length > 1 ? `
-        <div class="mvoa-row" style="margin-bottom:12px;gap:6px;">
-          ${accessibleTabs.map(t => `<button class="${t.key === activeTab ? 'btn-primary' : 'btn-secondary'} att-tab-btn" data-tab="${t.key}" style="flex:1;min-width:0;padding:8px 4px;font-size:0.85rem;">${t.label}</button>`).join('')}
+        <div class="mvoa-row" style="margin-bottom:12px;gap:6px;flex-wrap:wrap;">
+          ${accessibleTabs.map(t => `<button class="${t.key === activeTab ? 'btn-primary' : 'btn-secondary'} att-tab-btn" data-tab="${t.key}" style="flex:1;min-width:78px;padding:8px 4px;font-size:0.85rem;">${t.label}</button>`).join('')}
         </div>
       ` : ''}
       <div id="att-tab-body"></div>
@@ -209,6 +224,7 @@
     if (activeTab === SECTION_STAFF) renderStaffList(host, user);
     else if (activeTab === SECTION_LOGS) renderAttendanceLogs(host, user);
     else if (activeTab === SECTION_SETTINGS) renderSettings(host, user);
+    else if (activeTab === SECTION_CODES) renderCodeManagement(host, user);
     else renderAgenciesList(host, user);
   }
 
@@ -1364,6 +1380,84 @@
         }
       });
     }
+  }
+
+  // ─────────────────────────────────────────────
+  // CODES (admin-only) — a Reset/manage screen for each staff member's
+  // 4-digit attendance Code (used for gate check-in/out), mirroring the
+  // app-wide PIN Management screen's list/reset/confirm/inline-message
+  // pattern (see MVOA_Live.html's "PIN Management screen" for the source
+  // pattern this was modeled on) — but scoped to attendance Codes rather
+  // than login PINs, since staff aren't app users and don't have their
+  // own login PINs. Reached only via the admin-only "Codes" tab added in
+  // visibleTabsFor().
+  // ─────────────────────────────────────────────
+  function renderCodeManagement(host, user) {
+    const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
+    host.innerHTML = `
+      <div class="card">
+        <p class="muted" style="margin:0 0 12px;">
+          Each staff member's 4-digit code is used for gate check-in/out (as a fallback to scanning their QR ID card).
+          Resetting a code here generates a new random 4-digit code immediately — remember to reprint that staff
+          member's ID card afterward so the printed code still matches.
+        </p>
+        <div id="att-codes-list">
+          ${rows.length ? rows.map(s => `
+            <div class="mvoa-list-item" data-staff-id="${escapeHtml(s.StaffID)}">
+              <div class="mvoa-row" style="justify-content:space-between;flex-wrap:wrap;">
+                <span>
+                  <strong>${escapeHtml(s.Name)}</strong> <span class="muted">(${escapeHtml(agencyName(s.AgencyID))})</span>
+                </span>
+                <span style="font-family:ui-monospace,Menlo,monospace;font-size:1.05rem;font-weight:700;letter-spacing:3px;" class="att-code-display">${escapeHtml(s.Code)}</span>
+              </div>
+              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn-secondary att-code-reset-btn">🔁 Reset Code</button>
+                <button class="btn-secondary att-code-idcard-btn">🪪 View ID Card</button>
+              </div>
+              <p class="error-text att-code-row-error"></p>
+              <p class="muted att-code-row-msg"></p>
+            </div>
+          `).join('') : '<p class="muted">No active staff enrolled yet.</p>'}
+        </div>
+      </div>
+    `;
+
+    host.querySelectorAll('.att-code-reset-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const row = btn.closest('[data-staff-id]');
+        const staffId = row.dataset.staffId;
+        const s = staffCache.find(x => x.StaffID === staffId);
+        if (!s) return;
+        const errEl = row.querySelector('.att-code-row-error');
+        const msgEl = row.querySelector('.att-code-row-msg');
+        errEl.textContent = ''; msgEl.textContent = '';
+        if (!confirm(`Reset ${s.Name}'s attendance code? A new 4-digit code will be generated — their current code (${s.Code}) will stop working immediately, and their printed ID card will need reprinting.`)) return;
+        btn.disabled = true;
+        try {
+          const freshRows = await MVOA.sheetsRead(MVOA.TABS.attStaff);
+          const freshStaff = rowsToObjs(freshRows, STAFF_COLS);
+          const fresh = freshStaff.find(x => x.StaffID === staffId);
+          if (!fresh) throw new Error('Staff record no longer exists.');
+          const newCode = genStaffCode(freshStaff.map(x => x.Code));
+          await MVOA.sheetsUpdateRow(MVOA.TABS.attStaff, fresh.rowNumber,
+            [fresh.StaffID, fresh.AgencyID, fresh.Name, fresh.Role, fresh.Phone, fresh.AadhaarNumber, fresh.AadhaarPhotoURL, newCode, fresh.PhotoURL, fresh.Active, fresh.CreatedDate, fresh.CreatedBy]);
+          await loadAll(true);
+          row.querySelector('.att-code-display').textContent = newCode;
+          msgEl.textContent = `✓ New code: ${newCode}. Tell ${s.Name} the new code and reprint their ID card.`;
+        } catch (e) {
+          errEl.textContent = 'Reset failed: ' + e.message;
+        }
+        btn.disabled = false;
+      });
+    });
+
+    host.querySelectorAll('.att-code-idcard-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const row = btn.closest('[data-staff-id]');
+        const s = staffCache.find(x => x.StaffID === row.dataset.staffId);
+        if (s) showStaffIdCard(s);
+      });
+    });
   }
 
   // Passive, best-effort cleanup — fired once per session from mount(),
