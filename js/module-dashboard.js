@@ -50,6 +50,15 @@
 //     Efficiency here is a single period-total ratio (total litres ÷
 //     total kWh), simpler than the detailed report's per-day-average
 //     approach, since this is a compact summary tile.
+//   - DRILL-DOWN: every stat tile except Fuel Efficiency (a pure ratio,
+//     nothing to list) and the DG tiles individually (they all open the
+//     same combined per-date/shift table) is clickable, as is each By
+//     Assignee row. Clicking swaps the whole screen to a list view with
+//     a "← Back to Dashboard" button, built entirely from `lastLoaded`
+//     — the same snapshot the tile counts were computed from — so the
+//     list always matches what the tile showed, with no extra sheet
+//     reads. In/Out Log isn't a tile and already shows its full
+//     IN/OUT list inline, so it has no separate drill-down.
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('dashboard', {
@@ -86,9 +95,21 @@ const DashboardModule = (function () {
 
   let currentPeriod = 'day'; // 'day' | 'week' | 'month'
 
+  // Snapshot of the last successful load, kept so a tile click can
+  // drill into the underlying list without re-fetching from the
+  // sheet — refreshed every time loadAndRender() completes.
+  let lastLoaded = null;
+
   function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
+
+  function formatDateShort(iso) {
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  const DG_SHIFT_LABEL = { '1st': '1st Shift', '2nd': '2nd Shift', '3rd': '3rd Shift' };
 
   function rowsToObjs(rows, cols) {
     return rows.slice(1).map((r, i) => {
@@ -171,6 +192,7 @@ const DashboardModule = (function () {
       const list = byAssignee[key];
       const avgDays = Math.round(list.reduce((sum, t) => sum + daysOpen(t.CreatedDate), 0) / list.length * 10) / 10;
       return {
+        key, // raw AssignedTo value ('' = Unassigned) — used to drill down on click
         label: key ? MVOA.assigneeLabel(key, assigneeOptions) : 'Unassigned',
         count: list.length,
         avgDays
@@ -277,7 +299,7 @@ const DashboardModule = (function () {
     const totalDiesel = sum(inPeriodRows.map(r => r.dieselConsumedLitres).filter(v => typeof v === 'number'));
     const totalTopUp = sum(inPeriodRows.map(r => r.dieselTopUpLitres).filter(v => typeof v === 'number'));
     const fuelEfficiency = (typeof totalDiesel === 'number' && totalKwh) ? Math.round((totalDiesel / totalKwh) * 1000) / 1000 : null;
-    return { totalHours, totalKwh, totalDiesel, totalTopUp, fuelEfficiency };
+    return { totalHours, totalKwh, totalDiesel, totalTopUp, fuelEfficiency, rows: inPeriodRows };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -298,11 +320,17 @@ const DashboardModule = (function () {
   // ───────────────────────────────────────────────────────────
   // RENDER
   // ───────────────────────────────────────────────────────────
-  function statTile(value, label, color) {
+  // `key` (optional) makes the tile clickable — it's read back by the
+  // click handler wired in loadAndRender() to decide which drill-down
+  // list to show. A tile with no key (e.g. Fuel Efficiency, a pure
+  // ratio with no underlying list of its own) just isn't clickable.
+  function statTile(value, label, color, key) {
+    const clickableAttrs = key ? ` data-dash-tile="${key}" tabindex="0" role="button"` : '';
+    const clickableStyle = key ? 'cursor:pointer;' : '';
     return `
-      <div style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);text-align:center;">
+      <div class="dash-tile" style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);text-align:center;${clickableStyle}"${clickableAttrs}>
         <div style="font-size:1.6rem;font-weight:700;${color ? `color:${color};` : ''}">${value === null || value === undefined ? '—' : escapeHtml(String(value))}</div>
-        <div class="muted" style="font-size:0.75rem;margin-top:2px;">${escapeHtml(label)}</div>
+        <div class="muted" style="font-size:0.75rem;margin-top:2px;">${escapeHtml(label)}${key ? ' ›' : ''}</div>
       </div>
     `;
   }
@@ -356,20 +384,24 @@ const DashboardModule = (function () {
     const opsStats = computeDailyOpsStats(tasks, range, assigneeOptions);
     const prTaskStats = computePlantRoundsTaskStats(tasks, range);
 
+    // Stashed so tile/row click handlers (wired below) can build each
+    // drill-down list without re-fetching anything.
+    lastLoaded = { tasks, range, assigneeOptions, dgRows: dg.rows || [] };
+
     bodyEl.innerHTML = `
       <div class="card" style="max-width:900px;margin:0 0 18px 0;">
         <h3 style="margin:0 0 12px;color:var(--mvoa-blue);">Daily Operations</h3>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
-          ${statTile(opsStats.newTickets, 'New Tickets')}
-          ${statTile(opsStats.openDailyOps, 'Open — Daily Operations')}
-          ${statTile(opsStats.openFailedTasks, 'Open — Failed Tasks (Plant Rounds)', opsStats.openFailedTasks ? '#b3261e' : null)}
+          ${statTile(opsStats.newTickets, 'New Tickets', null, 'newTickets')}
+          ${statTile(opsStats.openDailyOps, 'Open — Daily Operations', null, 'openDailyOps')}
+          ${statTile(opsStats.openFailedTasks, 'Open — Failed Tasks (Plant Rounds)', opsStats.openFailedTasks ? '#b3261e' : null, 'openFailedTasks')}
         </div>
         <p style="margin:0 0 6px;font-weight:600;">By Assignee (top 3, open this period)</p>
         ${opsStats.assigneeRows.length ? `
           <table class="mvoa-table" style="max-width:520px;">
             <thead><tr><th>Assignee</th><th>Open</th><th>Avg Days Open</th></tr></thead>
             <tbody>
-              ${opsStats.assigneeRows.map(r => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td><td>${r.avgDays}</td></tr>`).join('')}
+              ${opsStats.assigneeRows.map(r => `<tr class="dash-assignee-row" data-assignee-key="${escapeHtml(r.key)}" data-assignee-label="${escapeHtml(r.label)}" style="cursor:pointer;"><td>${escapeHtml(r.label)} ›</td><td>${r.count}</td><td>${r.avgDays}</td></tr>`).join('')}
             </tbody>
           </table>
         ` : '<p class="muted">No open tickets this period.</p>'}
@@ -378,17 +410,17 @@ const DashboardModule = (function () {
       <div class="card" style="max-width:900px;margin:0;">
         <h3 style="margin:0 0 12px;color:var(--mvoa-blue);">Plant Rounds &amp; Compliance</h3>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
-          ${statTile(prTaskStats.totalFailedTasks, 'Total Failed Tasks', prTaskStats.totalFailedTasks ? '#b3261e' : null)}
-          ${statTile(prTaskStats.notPerformed, 'Total Tasks Not Performed', prTaskStats.notPerformed ? '#b3261e' : null)}
+          ${statTile(prTaskStats.totalFailedTasks, 'Total Failed Tasks', prTaskStats.totalFailedTasks ? '#b3261e' : null, 'totalFailedTasks')}
+          ${statTile(prTaskStats.notPerformed, 'Total Tasks Not Performed', prTaskStats.notPerformed ? '#b3261e' : null, 'totalNotPerformed')}
         </div>
 
         <p style="margin:0 0 6px;font-weight:600;">DG Set Operations</p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
-          ${statTile(dg.totalHours ?? '—', 'Run Hours')}
-          ${statTile(dg.totalKwh ?? '—', 'Units Generated (kWh)')}
-          ${statTile(dg.totalDiesel ?? '—', 'Diesel Consumed (L)')}
-          ${statTile(dg.totalTopUp ?? '—', 'Diesel Top Up (L)')}
-          ${statTile(dg.fuelEfficiency ?? '—', 'Fuel Efficiency (L/kWh)')}
+          ${statTile(dg.totalHours ?? '—', 'Run Hours', null, 'dgDetail')}
+          ${statTile(dg.totalKwh ?? '—', 'Units Generated (kWh)', null, 'dgDetail')}
+          ${statTile(dg.totalDiesel ?? '—', 'Diesel Consumed (L)', null, 'dgDetail')}
+          ${statTile(dg.totalTopUp ?? '—', 'Diesel Top Up (L)', null, 'dgDetail')}
+          ${statTile(dg.fuelEfficiency ?? '—', 'Fuel Efficiency (L/kWh)', null, 'dgDetail')}
         </div>
 
         <p style="margin:0 0 6px;font-weight:600;">In/Out Log</p>
@@ -402,6 +434,123 @@ const DashboardModule = (function () {
         `).join('') : '<p class="muted">No Sewage/Garbage/Water Tanker/Garden Waste activity logged this period.</p>'}
       </div>
     `;
+
+    // Wire drill-down clicks — each stat tile with a data-dash-tile key,
+    // plus each By Assignee row.
+    bodyEl.querySelectorAll('[data-dash-tile]').forEach(el => {
+      el.addEventListener('click', () => showDetail(container, el.dataset.dashTile));
+    });
+    bodyEl.querySelectorAll('.dash-assignee-row').forEach(el => {
+      el.addEventListener('click', () => showAssigneeDetail(container, el.dataset.assigneeKey, el.dataset.assigneeLabel));
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // DRILL-DOWN — clicking a stat tile or By Assignee row swaps the
+  // WHOLE module container over to a full-screen list (same "replace
+  // container, wire a back button" pattern module-hs.js uses for its
+  // own sub-screens), rather than expanding in place. "← Back to
+  // Dashboard" re-mounts the summary from scratch, which also picks up
+  // any data that changed while the list was open. Everything drawn
+  // here reads from `lastLoaded` — the exact snapshot the summary tile
+  // was computed from, so counts and list contents always agree.
+  // ───────────────────────────────────────────────────────────
+  function detailShell(container, title, bodyHtml) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="dash-detail-back" class="btn-secondary">← Back to Dashboard</button>
+        <strong>${escapeHtml(title)}</strong>
+      </div>
+      ${bodyHtml}
+    `;
+    container.querySelector('#dash-detail-back').addEventListener('click', () => mount(container));
+  }
+
+  function taskListHtml(list, assigneeOptions) {
+    if (!list.length) return '<p class="muted">Nothing here.</p>';
+    const sorted = list.slice().sort((a, b) => (b.CreatedDate || '').localeCompare(a.CreatedDate || ''));
+    return `
+      <div class="card" style="max-width:700px;margin:0;">
+        ${sorted.map(t => `
+          <div class="mvoa-list-item" style="padding:8px 0;border-bottom:1px solid var(--border);">
+            <div class="mvoa-row">
+              <span style="font-weight:600;">${escapeHtml(t.Title || '(untitled)')}</span>
+              <span class="muted" style="font-size:0.8rem;">${escapeHtml(t.Status || '')}</span>
+            </div>
+            <p class="muted" style="margin:2px 0;font-size:0.8rem;">
+              ${escapeHtml(t.AssignedTo ? MVOA.assigneeLabel(t.AssignedTo, assigneeOptions) : 'Unassigned')} · Created ${escapeHtml(formatDateShort(t.CreatedDate))}${t.Priority ? ' · ' + escapeHtml(t.Priority) : ''}${t.AssetName ? ' · ' + escapeHtml(t.AssetName) : ''}
+            </p>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  function dgDetailHtml(rows) {
+    if (!rows.length) return '<p class="muted">No DG Set Operations readings in this period.</p>';
+    const sorted = rows.slice().sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    return `
+      <div class="card" style="max-width:700px;margin:0;overflow-x:auto;">
+        <table class="mvoa-table">
+          <thead><tr><th>Date</th><th>Shift</th><th>Run Hours</th><th>kWh</th><th>Diesel Consumed (L)</th><th>Diesel Top Up (L)</th></tr></thead>
+          <tbody>
+            ${sorted.map(r => `
+              <tr>
+                <td>${escapeHtml(formatDateShort(r.timestamp))}</td>
+                <td>${escapeHtml(DG_SHIFT_LABEL[r.shift] || r.shift || '')}</td>
+                <td>${r.hoursRun ?? '—'}</td>
+                <td>${r.kwhGenerated ?? '—'}</td>
+                <td>${r.dieselConsumedLitres ?? '—'}</td>
+                <td>${r.dieselTopUpLitres ?? '—'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function showDetail(container, key) {
+    if (!lastLoaded) return;
+    const { tasks, range, assigneeOptions, dgRows } = lastLoaded;
+    const openTasks = tasks.filter(t => t.Status === 'Open');
+
+    if (key === 'newTickets') {
+      const list = tasks.filter(t => inRange(t.CreatedDate, range));
+      detailShell(container, `New Tickets — ${range.label}`, taskListHtml(list, assigneeOptions));
+      return;
+    }
+    if (key === 'openDailyOps') {
+      const list = openTasks.filter(t => !isPlantRoundsTask(t));
+      detailShell(container, 'Open — Daily Operations', taskListHtml(list, assigneeOptions));
+      return;
+    }
+    if (key === 'openFailedTasks') {
+      const list = openTasks.filter(isPlantRoundsTask);
+      detailShell(container, 'Open — Failed Tasks (Plant Rounds)', taskListHtml(list, assigneeOptions));
+      return;
+    }
+    if (key === 'totalFailedTasks') {
+      const list = tasks.filter(t => isPlantRoundsTask(t) && inRange(t.CreatedDate, range) && !isNotPerformedTask(t));
+      detailShell(container, `Total Failed Tasks — ${range.label}`, taskListHtml(list, assigneeOptions));
+      return;
+    }
+    if (key === 'totalNotPerformed') {
+      const list = tasks.filter(t => inRange(t.CreatedDate, range) && isNotPerformedTask(t));
+      detailShell(container, `Total Tasks Not Performed — ${range.label}`, taskListHtml(list, assigneeOptions));
+      return;
+    }
+    if (key === 'dgDetail') {
+      detailShell(container, `DG Set Operations — ${range.label}`, dgDetailHtml(dgRows));
+      return;
+    }
+  }
+
+  function showAssigneeDetail(container, rawKey, label) {
+    if (!lastLoaded) return;
+    const { tasks, assigneeOptions } = lastLoaded;
+    const list = tasks.filter(t => t.Status === 'Open' && (t.AssignedTo || '') === rawKey);
+    detailShell(container, `Open Tickets — ${label}`, taskListHtml(list, assigneeOptions));
   }
 
   return { mount };
