@@ -189,6 +189,9 @@
   function renderAgencyForm(host, agency, user) {
     const isEdit = !!agency;
     host.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="att-agency-form-back" class="btn-secondary">← Back to Agencies</button>
+      </div>
       <div class="card">
         <h3 style="margin-top:0;">${isEdit ? 'Edit Agency' : 'Add Agency'}</h3>
         <label>Name
@@ -204,6 +207,7 @@
         <p class="error-text" id="att-agency-form-error"></p>
       </div>
     `;
+    host.querySelector('#att-agency-form-back').addEventListener('click', () => renderAgenciesList(host, user));
     host.querySelector('#att-agency-cancel').addEventListener('click', () => renderAgenciesList(host, user));
     host.querySelector('#att-agency-save').addEventListener('click', async () => {
       const name = host.querySelector('#att-agency-name').value.trim();
@@ -319,6 +323,9 @@
     const previewCode = isEdit ? staff.Code : genStaffCode(allStaffCache.map(s => s.Code));
 
     host.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="att-staff-form-back" class="btn-secondary">← Back to Staff</button>
+      </div>
       <div class="card">
         <h3 style="margin-top:0;">${isEdit ? 'Edit Staff' : 'Enrol Staff'}</h3>
         <label>Full name
@@ -370,6 +377,7 @@
       </div>
     `;
 
+    host.querySelector('#att-staff-form-back').addEventListener('click', () => renderStaffList(host, user));
     host.querySelector('#att-staff-cancel').addEventListener('click', () => renderStaffList(host, user));
 
     host.querySelector('#att-photo-pick').addEventListener('click', async () => {
