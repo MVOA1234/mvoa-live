@@ -665,8 +665,8 @@
     return `
       <div style="width:min(440px,94vw);background:${ID_CARD_GREEN};border-radius:18px;padding:18px 20px;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;box-sizing:border-box;display:flex;align-items:center;gap:14px;">
         <div style="flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:8px;">
-          <div style="background:#fff;border-radius:8px;padding:5px 9px;">
-            <img src="${logoUrl}" alt="MVOA" style="height:24px;display:block;">
+          <div style="background:#fff;border-radius:8px;padding:6px 10px;">
+            <img src="${logoUrl}" alt="MVOA" style="height:44px;display:block;">
           </div>
           ${photoBox}
         </div>
@@ -831,20 +831,30 @@
   // Days Present / Sessions / Total Hours for that month, with a
   // "Print to PDF" button using the browser's native print-to-PDF (same
   // pattern as module-hs.js's printTablePdf).
-  function renderMonthlyReport(host, user, monthStr, agencyFilter) {
-    const month = monthStr || isoDateLocal(new Date()).slice(0, 7); // YYYY-MM
-    const agencyId = agencyFilter || 'ALL';
+  // Day-of-month helpers shared by the two grid-style reports below.
+  function ordinalDay(n) {
+    const s = ['th', 'st', 'nd', 'rd'], v = n % 100;
+    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  }
+  function daysInMonthFor(month) {
+    const [y, m] = month.split('-').map(Number);
+    return new Date(y, m, 0).getDate();
+  }
+  // How many days of the selected month have actually elapsed — a future
+  // month shows no P/A marks at all, the current month stops at today
+  // (later days haven't happened yet), and a past month is shown in full.
+  function capDayFor(month) {
+    const [y, m] = month.split('-').map(Number);
+    const today = new Date();
+    if (y === today.getFullYear() && m === today.getMonth() + 1) return today.getDate();
+    if (y > today.getFullYear() || (y === today.getFullYear() && m > today.getMonth() + 1)) return 0;
+    return daysInMonthFor(month);
+  }
 
-    // Staff pool for the dropdown/report: active staff, optionally narrowed
-    // to one agency. Agencies list includes inactive ones too (allAgenciesCache)
-    // so a report can still be pulled for an agency that's since been
-    // deactivated, as long as its staff still have log rows.
-    const staffPool = staffCache.filter(s => agencyId === 'ALL' || s.AgencyID === agencyId)
-      .slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
-
-    const monthLogs = allLogsCache.filter(l => l.Date && l.Date.slice(0, 7) === month);
-
-    const summary = staffPool.map(s => {
+  // Summary view (original report): one row per staff member with totals
+  // for the month.
+  function buildSummaryReportHtml(monthLabel, staffPool, monthLogs) {
+    const rows = staffPool.map(s => {
       const sessions = monthLogs.filter(l => l.StaffID === s.StaffID);
       const daysPresent = new Set(sessions.map(l => l.Date)).size;
       let totalMs = 0;
@@ -854,26 +864,155 @@
           if (ms > 0) totalMs += ms;
         }
       });
-      const totalHours = (totalMs / 3600000);
-      return {
-        Name: s.Name,
-        Agency: agencyName(s.AgencyID),
-        'Days Present': daysPresent,
-        Sessions: sessions.length,
-        'Total Hours': totalHours ? totalHours.toFixed(1) : '0.0'
-      };
+      const totalHours = totalMs / 3600000;
+      return { Name: s.Name, Agency: agencyName(s.AgencyID), Days: daysPresent, Sessions: sessions.length, Hours: totalHours ? totalHours.toFixed(1) : '0.0' };
+    });
+    return `
+      <table class="mvoa-table">
+        <thead>
+          <tr><th colspan="5" style="text-align:center;">Monthly Attendance Summary — ${escapeHtml(monthLabel)}</th></tr>
+          <tr><th>Name</th><th>Agency</th><th>Days Present</th><th>Sessions</th><th>Total Hours</th></tr>
+        </thead>
+        <tbody>
+          ${rows.length ? rows.map(r => `
+            <tr><td>${escapeHtml(r.Name)}</td><td>${escapeHtml(r.Agency)}</td><td>${r.Days}</td><td>${r.Sessions}</td><td>${r.Hours}</td></tr>
+          `).join('') : `<tr><td colspan="5" class="muted">No staff.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+  }
+
+  // "Attendance Record" — a P/A grid, one column per day of the month, one
+  // row per staff member (grouped visually by agency, agency name shown
+  // only on the first row of each group — matches the layout the user
+  // asked for). P = at least one session logged that day; A = none, but
+  // only for days that have actually happened (see capDayFor).
+  function buildAttendancePAGridHtml(month, monthLabel, staffPool, monthLogs) {
+    const daysInMonth = daysInMonthFor(month);
+    const capDay = capDayFor(month);
+    const [y, m] = month.split('-').map(Number);
+    const dayHeaders = [];
+    for (let d = 1; d <= daysInMonth; d++) dayHeaders.push(ordinalDay(d));
+
+    let lastAgency = null;
+    const bodyRows = staffPool.map(s => {
+      const ag = agencyName(s.AgencyID);
+      const showAgency = ag !== lastAgency;
+      lastAgency = ag;
+      const sessions = monthLogs.filter(l => l.StaffID === s.StaffID);
+      const datesPresent = new Set(sessions.map(l => l.Date));
+      const cells = [];
+      for (let d = 1; d <= daysInMonth; d++) {
+        if (d > capDay) { cells.push('<td></td>'); continue; }
+        const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const present = datesPresent.has(iso);
+        cells.push(`<td style="color:${present ? '#1e6b33' : '#b3261e'};font-weight:700;text-align:center;">${present ? 'P' : 'A'}</td>`);
+      }
+      return `<tr><td>${showAgency ? escapeHtml(ag) : ''}</td><td>${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
     });
 
+    return `
+      <table class="mvoa-table">
+        <thead>
+          <tr><th colspan="${2 + daysInMonth}" style="text-align:center;">Attendance Record for the Month of ${escapeHtml(monthLabel)}</th></tr>
+          <tr><th>Agency</th><th>Staff Name</th>${dayHeaders.map(h => `<th style="text-align:center;">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows.length ? bodyRows.join('') : `<tr><td colspan="${2 + daysInMonth}" class="muted">No staff.</td></tr>`}
+        </tbody>
+        <tfoot>
+          <tr><td colspan="${2 + daysInMonth}" style="font-weight:400;font-size:0.78rem;">
+            <span style="color:#1e6b33;font-weight:700;">P</span> = Present (logged in that day) &nbsp;&nbsp;
+            <span style="color:#b3261e;font-weight:700;">A</span> = Absent (no login that day)
+          </td></tr>
+        </tfoot>
+      </table>
+    `;
+  }
+
+  // "Check-in/Check-out Times" — Agency / Staff Name, then a Check-in and
+  // Check-out sub-column per day. If a staff member has more than one
+  // session on the same day (an overnight shift plus a same-day shift),
+  // every session's times are stacked on separate lines within that day's
+  // two cells rather than only showing one.
+  function buildCheckInOutGridHtml(month, monthLabel, staffPool, monthLogs) {
+    const daysInMonth = daysInMonthFor(month);
+    const capDay = capDayFor(month);
+    const [y, m] = month.split('-').map(Number);
+    const dayHeaders = [];
+    for (let d = 1; d <= daysInMonth; d++) dayHeaders.push(ordinalDay(d));
+
+    let lastAgency = null;
+    const bodyRows = staffPool.map(s => {
+      const ag = agencyName(s.AgencyID);
+      const showAgency = ag !== lastAgency;
+      lastAgency = ag;
+      const sessions = monthLogs.filter(l => l.StaffID === s.StaffID).sort((a, b) => a.CheckInTime.localeCompare(b.CheckInTime));
+      const cells = [];
+      for (let d = 1; d <= daysInMonth; d++) {
+        if (d > capDay) { cells.push('<td></td><td></td>'); continue; }
+        const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const daySessions = sessions.filter(l => l.Date === iso);
+        if (!daySessions.length) { cells.push('<td>—</td><td>—</td>'); continue; }
+        const ins = daySessions.map(l => l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) : '—').join('<br>');
+        const outs = daySessions.map(l => l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) : '—').join('<br>');
+        cells.push(`<td style="text-align:center;">${ins}</td><td style="text-align:center;">${outs}</td>`);
+      }
+      return `<tr><td>${showAgency ? escapeHtml(ag) : ''}</td><td>${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
+    });
+
+    return `
+      <table class="mvoa-table">
+        <thead>
+          <tr><th colspan="${2 + daysInMonth * 2}" style="text-align:center;">Daily Check in/out time Report for the Month of ${escapeHtml(monthLabel)}</th></tr>
+          <tr><th rowspan="2">Agency</th><th rowspan="2">Staff Name</th>${dayHeaders.map(h => `<th colspan="2" style="text-align:center;">${h}</th>`).join('')}</tr>
+          <tr>${dayHeaders.map(() => `<th style="text-align:center;">Check in</th><th style="text-align:center;">Check out</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows.length ? bodyRows.join('') : `<tr><td colspan="${2 + daysInMonth * 2}" class="muted">No staff.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+  }
+
+  function renderMonthlyReport(host, user, monthStr, agencyFilter, reportType, staffFilterIds) {
+    const month = monthStr || isoDateLocal(new Date()).slice(0, 7); // YYYY-MM
+    const agencyId = agencyFilter || 'ALL';
+    const type = reportType || 'pa'; // 'summary' | 'pa' | 'times'
+    const staffFilter = staffFilterIds || [];
+
+    // Staff pool for the report: active staff, optionally narrowed to one
+    // agency. Agencies list includes inactive ones too (allAgenciesCache)
+    // so a report can still be pulled for an agency that's since been
+    // deactivated, as long as its staff still have log rows. The staff
+    // multi-select (Check-in/out view only) further narrows this.
+    const staffPoolAll = staffCache.filter(s => agencyId === 'ALL' || s.AgencyID === agencyId)
+      .slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
+    const staffPool = (type === 'times' && staffFilter.length) ? staffPoolAll.filter(s => staffFilter.includes(s.StaffID)) : staffPoolAll;
+
+    const monthLogs = allLogsCache.filter(l => l.Date && l.Date.slice(0, 7) === month);
     const monthLabel = (() => {
       const [y, m] = month.split('-').map(Number);
       return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
     })();
 
+    let tableHtml;
+    if (type === 'summary') tableHtml = buildSummaryReportHtml(monthLabel, staffPoolAll, monthLogs);
+    else if (type === 'times') tableHtml = buildCheckInOutGridHtml(month, monthLabel, staffPool, monthLogs);
+    else tableHtml = buildAttendancePAGridHtml(month, monthLabel, staffPoolAll, monthLogs);
+
+    const typeLabel = { summary: 'Summary', pa: 'Attendance Record', times: 'Check-in/Check-out Times' }[type];
+
     host.innerHTML = `
       <div class="card">
         <button id="att-report-back" class="btn-secondary" style="margin-bottom:14px;">← Back to Attendance Log</button>
         <h3 style="margin-top:0;">📊 Monthly Attendance Report</h3>
-        <div class="mvoa-row" style="margin-bottom:14px;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+        <div class="mvoa-row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;">
+          <button class="${type === 'summary' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="summary" style="font-size:0.8rem;padding:6px 12px;">Summary</button>
+          <button class="${type === 'pa' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="pa" style="font-size:0.8rem;padding:6px 12px;">Attendance Record</button>
+          <button class="${type === 'times' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="times" style="font-size:0.8rem;padding:6px 12px;">Check-in/Check-out Times</button>
+        </div>
+        <div class="mvoa-row" style="margin-bottom:14px;gap:14px;flex-wrap:wrap;align-items:flex-start;">
           <label style="margin:0;">Month
             <input type="month" id="att-report-month" value="${escapeHtml(month)}">
           </label>
@@ -883,47 +1022,54 @@
               ${allAgenciesCache.map(a => `<option value="${escapeHtml(a.AgencyID)}" ${a.AgencyID === agencyId ? 'selected' : ''}>${escapeHtml(a.Name)}</option>`).join('')}
             </select>
           </label>
-          <button id="att-report-print" class="btn-primary">🖨 Print to PDF</button>
+          ${type === 'times' ? `
+            <label style="margin:0;">Staff (optional)
+              <select id="att-report-staff" multiple size="5" style="min-width:200px;">
+                ${staffPoolAll.map(s => `<option value="${escapeHtml(s.StaffID)}" ${staffFilter.includes(s.StaffID) ? 'selected' : ''}>${escapeHtml(s.Name)}</option>`).join('')}
+              </select>
+              <div class="muted" style="font-size:0.72rem;max-width:200px;margin-top:2px;">Ctrl/Cmd-click (or tap-select on mobile) for multiple. Leave empty for all staff.</div>
+            </label>
+          ` : ''}
+          <button id="att-report-print" class="btn-primary" style="margin-top:22px;">🖨 Print to PDF</button>
         </div>
-        <div style="overflow-x:auto;">
-          <table class="mvoa-table">
-            <thead><tr><th>Name</th><th>Agency</th><th>Days Present</th><th>Sessions</th><th>Total Hours</th></tr></thead>
-            <tbody>
-              ${summary.length ? summary.map(r => `
-                <tr>
-                  <td>${escapeHtml(r.Name)}</td>
-                  <td>${escapeHtml(r.Agency)}</td>
-                  <td>${r['Days Present']}</td>
-                  <td>${r.Sessions}</td>
-                  <td>${r['Total Hours']}</td>
-                </tr>
-              `).join('') : `<tr><td colspan="5" class="muted">No staff${agencyId === 'ALL' ? '' : ' for this agency'}.</td></tr>`}
-            </tbody>
-          </table>
+        <div style="overflow-x:auto;max-height:65vh;overflow-y:auto;">
+          ${tableHtml}
         </div>
       </div>
     `;
     host.querySelector('#att-report-back').addEventListener('click', () => renderAttendanceLogs(host, user));
-    host.querySelector('#att-report-month').addEventListener('change', (e) => renderMonthlyReport(host, user, e.target.value, agencyId));
-    host.querySelector('#att-report-agency').addEventListener('change', (e) => renderMonthlyReport(host, user, month, e.target.value));
+    host.querySelectorAll('.att-report-type-btn').forEach(btn => {
+      btn.addEventListener('click', () => renderMonthlyReport(host, user, month, agencyId, btn.dataset.type, staffFilter));
+    });
+    host.querySelector('#att-report-month').addEventListener('change', (e) => renderMonthlyReport(host, user, e.target.value, agencyId, type, staffFilter));
+    // Changing agency invalidates the staff multi-select's option list, so
+    // reset that filter rather than carry over StaffIDs that may no longer
+    // even be in the dropdown.
+    host.querySelector('#att-report-agency').addEventListener('change', (e) => renderMonthlyReport(host, user, month, e.target.value, type, []));
+    const staffSel = host.querySelector('#att-report-staff');
+    if (staffSel) {
+      staffSel.addEventListener('change', (e) => {
+        const selected = Array.from(e.target.selectedOptions).map(o => o.value);
+        renderMonthlyReport(host, user, month, agencyId, type, selected);
+      });
+    }
     host.querySelector('#att-report-print').addEventListener('click', () => {
       const agencyLabel = agencyId === 'ALL' ? 'All Agencies' : agencyName(agencyId);
-      printAttendanceReportPdf(
-        `Monthly Attendance — ${monthLabel} — ${agencyLabel}`,
-        ['Name', 'Agency', 'Days Present', 'Sessions', 'Total Hours'],
-        summary
-      );
+      printReportHtmlPdf(`${typeLabel} — ${monthLabel} — ${agencyLabel}`, tableHtml);
     });
   }
 
   // Browser print-to-PDF for the monthly report — same pattern as
   // module-hs.js's printTablePdf: opens a blank tab, writes a standalone
-  // styled HTML page, and triggers window.print() on load (user picks
-  // "Save as PDF" in the print dialog). Module-local since only this
-  // module needs it.
-  function printAttendanceReportPdf(title, columns, rows) {
+  // styled HTML page (reusing the already-built table markup as-is, so the
+  // printed layout always matches the on-screen preview exactly), and
+  // triggers window.print() on load (user picks "Save as PDF" in the print
+  // dialog). Module-local since only this module needs it. Wide grids
+  // (a full month, all agencies) print in landscape and may still span
+  // multiple pages — narrowing via the Agency/Staff filters before
+  // printing keeps it to a single page.
+  function printReportHtmlPdf(title, tableHtml) {
     const win = window.open('', '_blank');
-    const tableRows = rows.map(r => `<tr>${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' && r[c] !== null ? r[c] : '—'))}</td>`).join('')}</tr>`).join('');
     win.document.write(`
       <html>
       <head>
@@ -932,25 +1078,22 @@
           body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
           h1 { color: #2e5e1e; font-size: 1.3rem; margin-bottom: 4px; }
           .muted { color: #6b7280; font-size: 0.85rem; margin-top: 0; }
-          table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-          th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.8rem; white-space: nowrap; }
+          table { border-collapse: collapse; margin-top: 16px; width: max-content; max-width: 100%; }
+          th, td { border: 1px solid #dde1e6; padding: 5px 7px; text-align: left; font-size: 0.72rem; white-space: nowrap; }
           th { background: #f5f6f8; }
           .back-btn {
             display: inline-block; margin-bottom: 16px; padding: 10px 18px;
             border-radius: 8px; border: none; background: #2e5e1e; color: white;
             font-size: 0.95rem; font-weight: 600; cursor: pointer;
           }
-          @media print { .back-btn { display: none; } }
+          @media print { .back-btn { display: none; } @page { size: landscape; } }
         </style>
       </head>
       <body>
         <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
         <h1>MVOA Staff Attendance — ${escapeHtml(title)}</h1>
         <p class="muted">Generated ${new Date().toLocaleString()}</p>
-        <table>
-          <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
-          <tbody>${tableRows || `<tr><td colspan="${columns.length}">No data.</td></tr>`}</tbody>
-        </table>
+        ${tableHtml}
         <script>
           window.onload = () => { window.print(); };
           document.getElementById('back-to-app-btn').addEventListener('click', () => {
