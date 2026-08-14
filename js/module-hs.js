@@ -184,6 +184,13 @@ const HSModule = (function () {
   // ───────────────────────────────────────────────────────────
   function renderHome(container) {
     const user = MVOA.getUser();
+    // Passive, non-blocking, system-wide overdue check — every time
+    // anyone opens this home screen, not just whenever a specific
+    // category happens to get scanned. Covers every Plant Rounds
+    // category (see the functions' own comments for the two mechanisms
+    // this actually runs). Never awaited — never blocks this render.
+    evaluateAllMissedRounds();
+    evaluateAllOverdueChecklists();
     const recent = logsCache.slice().sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || '')).slice(0, 5);
     const visibleCategories = categoriesCache.filter(c => MVOA.canViewPlantRoundsSection(c.CategoryKey, user));
     const ungrouped = visibleCategories.filter(c => !c.Group);
@@ -2529,17 +2536,24 @@ const HSModule = (function () {
     const lastText = last ? `Last: ${formatDate(last.Timestamp)}` : 'Never logged';
     const now = new Date();
 
+    // cycleKey is a stable per-due-window identifier (added alongside
+    // text/overdue, non-breaking for existing callers that only read
+    // those two) — used by evaluateAllOverdueChecklists() to dedupe
+    // auto-created tasks: one per template+asset+cycle, not one per
+    // check run. A new cycle (new day/week/month window) naturally
+    // gets a new key, so it can flag again once genuinely overdue in
+    // that new window.
     if (template.Frequency === 'Daily') {
       const doneToday = last && new Date(last.Timestamp).toDateString() === now.toDateString();
-      return { text: lastText, overdue: !doneToday };
+      return { text: lastText, overdue: !doneToday, cycleKey: isoDate(now) };
     }
 
     if (template.Frequency === 'Weekly') {
       const monday = mostRecentMonday(now);
       const done = hasLogSince(template.TemplateID, monday, assetId);
-      if (done) return { text: lastText, overdue: false };
+      if (done) return { text: lastText, overdue: false, cycleKey: isoDate(monday) };
       const isMonday = now.getDay() === 1;
-      return isMonday ? { text: 'Due today (Monday)', overdue: false } : { text: `Not done since ${formatDate(monday)}`, overdue: true };
+      return isMonday ? { text: 'Due today (Monday)', overdue: false, cycleKey: isoDate(monday) } : { text: `Not done since ${formatDate(monday)}`, overdue: true, cycleKey: isoDate(monday) };
     }
 
     // Fixed day-of-month window (WindowStartDay/WindowEndDay set on the
@@ -2556,20 +2570,101 @@ const HSModule = (function () {
       const windowEnd = new Date(y, m0, winEnd); windowEnd.setHours(23, 59, 59, 999);
       const monthStart = new Date(y, m0, 1); monthStart.setHours(0, 0, 0, 0);
       const done = hasLogSince(template.TemplateID, monthStart, assetId);
-      if (done) return { text: lastText, overdue: false };
-      if (now <= windowEnd) return { text: `Due this week (days ${winStart}-${winEnd} of month)`, overdue: false };
-      return { text: `Overdue since ${formatDate(new Date(y, m0, winEnd + 1))}`, overdue: true };
+      if (done) return { text: lastText, overdue: false, cycleKey: isoDate(windowStart) };
+      if (now <= windowEnd) return { text: `Due this week (days ${winStart}-${winEnd} of month)`, overdue: false, cycleKey: isoDate(windowStart) };
+      return { text: `Overdue since ${formatDate(new Date(y, m0, winEnd + 1))}`, overdue: true, cycleKey: isoDate(windowStart) };
     }
 
     // Monthly and BiMonthly share the same "last week of a cycle month" shape
     const interval = template.Frequency === 'BiMonthly' ? 2 : 1;
     const anchor0 = 6; // July, 0-based — only relevant when interval=2
     const win = currentOrLastCycleWindow(now, interval, anchor0);
-    if (!win) return { text: lastText, overdue: true };
+    if (!win) return { text: lastText, overdue: true, cycleKey: isoDate(now) };
     const done = hasLogSince(template.TemplateID, win.start, assetId);
-    if (done) return { text: lastText, overdue: false };
-    if (win.isCurrentMonth) return { text: 'Due this week', overdue: false };
-    return { text: `Overdue since ${formatDate(win.start)}`, overdue: true };
+    if (done) return { text: lastText, overdue: false, cycleKey: isoDate(win.start) };
+    if (win.isCurrentMonth) return { text: 'Due this week', overdue: false, cycleKey: isoDate(win.start) };
+    return { text: `Overdue since ${formatDate(win.start)}`, overdue: true, cycleKey: isoDate(win.start) };
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SYSTEM-WIDE OVERDUE CHECK — generalizes the two passive "flag it
+  // as an auto-task" checks that used to only run for whichever single
+  // category a user happened to scan (evaluateMissedRounds) or open
+  // (evaluateWeeklyItemCompliance), to run across EVERY Plant Rounds
+  // category instead. Both pieces below are triggered from renderHome()
+  // — i.e. every time anyone opens the Plant Rounds & Compliance home
+  // screen — so a missed DG Set/Housekeeping/etc. round now gets
+  // auto-flagged the same way Security's rounds already were, not just
+  // whichever category someone happens to visit. Both are best-effort
+  // and non-blocking: errors are swallowed, never block rendering.
+  // ───────────────────────────────────────────────────────────
+  async function evaluateAllMissedRounds() {
+    // Round-window-based templates (Security's QR-scan rounds, and any
+    // other category set up the same way) — reuses evaluateMissedRounds()
+    // completely as-is, just calling it for every RoundBased category's
+    // QRTarget instead of only the one just scanned.
+    const targets = [...new Set(
+      templatesCache.filter(t => t.RoundBased === 'TRUE' || t.RoundBased === 'true').map(t => t.QRTarget)
+    )];
+    for (const target of targets) {
+      try { await evaluateMissedRounds(target); } catch (e) { /* best-effort */ }
+    }
+  }
+
+  async function evaluateAllOverdueChecklists() {
+    // Frequency-based templates (Daily/Weekly/Monthly/BiMonthly, NOT
+    // round-window-based — those are handled by evaluateAllMissedRounds
+    // above, and CustomScreen templates like the In/Out Log don't have
+    // a due concept at all) — same per-asset expansion renderDueDashboard()
+    // already uses, but instead of just displaying overdue ones, this
+    // creates a real OpsTask for each, deduped by title so re-running
+    // this on every home-screen visit doesn't create duplicates.
+    let existingTitles;
+    try {
+      const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+      existingTitles = new Set(opsTaskRows.slice(1).map(r => r[OPS_TASK_COL_IDX.Title] || ''));
+    } catch (e) {
+      return; // best-effort — retries next time this screen opens
+    }
+
+    const candidates = [];
+    categoriesCache.forEach(cat => {
+      templatesCache
+        .filter(t => t.QRTarget === cat.CategoryKey && !t.CustomScreen && t.RoundBased !== 'TRUE' && t.RoundBased !== 'true')
+        .forEach(t => {
+          const registeredIds = categoryAssetsCache.filter(a => a.CategoryKey === t.QRTarget).map(a => a.AssetID);
+          const loggedIds = [...new Set(logsCache.filter(l => l.TemplateID === t.TemplateID && l.AssetID).map(l => l.AssetID))];
+          const assetIds = [...new Set([...registeredIds, ...loggedIds])];
+          if (!assetIds.length) {
+            candidates.push({ template: t, due: dueInfo(t), assetLabel: '' });
+          } else {
+            assetIds.forEach(aid => {
+              const registered = categoryAssetsCache.find(a => a.CategoryKey === t.QRTarget && a.AssetID === aid);
+              const sample = logsCache.find(l => l.TemplateID === t.TemplateID && l.AssetID === aid);
+              const label = (registered && registered.AssetLabel) || (sample && sample.AssetName) || aid;
+              candidates.push({ template: t, due: dueInfo(t, aid), assetLabel: label });
+            });
+          }
+        });
+    });
+
+    for (const c of candidates.filter(c => c.due.overdue)) {
+      const title = `Plant Rounds: ${c.template.Name}${c.assetLabel ? ` (${c.assetLabel})` : ''} not performed — ${categoryLabel(c.template.QRTarget)} (${c.due.cycleKey})`;
+      if (existingTitles.has(title)) continue;
+      try {
+        await MVOA.createOpsTask({
+          categoryName: effectiveFailTaskCategory(c.template, c.template.QRTarget),
+          title,
+          description: `${c.template.Name}${c.assetLabel ? ` (${c.assetLabel})` : ''} was due and has not been logged. ${c.due.text}.`,
+          assigneeTitle: 'Facility Manager',
+          priority: 'High',
+          createdBy: 'System (Plant Rounds — overdue checklist check)'
+        });
+        existingTitles.add(title);
+      } catch (e) {
+        // best-effort — retries next time this screen opens
+      }
+    }
   }
 
   function frequencyRuleText(template) {
