@@ -163,6 +163,12 @@
         <p class="muted">Edit the Title × Category access grid for Plant Rounds & Compliance — changes save in place.</p>
         <button id="open-pr-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
       </div>
+      <!-- Attendance Permissions Matrix entry -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Attendance Permissions</h2>
+        <p class="muted">Edit the Title × Section access grid for Staff Attendance — changes save in place.</p>
+        <button id="open-att-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
+      </div>
       <!-- Manage Users -->
       <div class="card" id="manage-users-card">
         <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
@@ -271,6 +277,27 @@
     </div>
   </div>
 
+  <!-- ═══════════════ ATTENDANCE PERMISSIONS MATRIX SCREEN (admin only) ═══════════════ -->
+  <div id="att-perm-matrix-screen" class="screen hidden">
+    <div class="card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">Attendance Permissions Matrix</h1>
+        <button id="att-perm-matrix-back-btn" class="btn-secondary">&larr; Settings</button>
+      </div>
+      <p class="muted">Edit access directly. Changes update the existing row in place — no duplicate rows are created. A cell set back to "No access" is blanked, not deleted. A section with no rows at all stays open to everyone until you add its first row here.</p>
+      <div class="mvoa-row" style="gap:8px;flex-wrap:wrap;margin:10px 0;">
+        <input id="am-new-title" type="text" placeholder="New title name (e.g. Pool Lead)" style="flex:1;min-width:180px;">
+        <button id="am-add-title-btn" class="btn-secondary">+ Add Title Column</button>
+      </div>
+      <div id="am-grid-wrap" style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <p class="muted">Loading…</p>
+      </div>
+      <button id="am-save-btn" class="btn-primary" style="margin-top:14px;">Save Changes</button>
+      <p class="error-text" id="am-error"></p>
+      <p class="muted" id="am-saved-msg"></p>
+    </div>
+  </div>
+
   <!-- ═══════════════ MODULE CONTAINER (a module renders itself in here) ═══════════════ -->
   <div id="module-screen" class="screen hidden">
     <header class="module-header">
@@ -304,7 +331,6 @@
       .then(() => loadScript('js/module-hs.js?v=' + v))
       .then(() => loadScript('js/module-finance.js?v=' + v))
       .then(() => loadScript('js/module-dashboard.js?v=' + v))
-      .then(() => loadScript('js/module-attendance.js?v=' + v))
       // .then(() => loadScript('js/module-expense.js?v=' + v)) // add here later, no other changes needed
       .then(() => boot())
       .catch(err => {
@@ -492,6 +518,11 @@
       renderPrPermMatrixGrid();
     });
     document.getElementById('pr-perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
+    document.getElementById('open-att-perm-matrix-btn').addEventListener('click', () => {
+      show('att-perm-matrix-screen');
+      renderAttPermMatrixGrid();
+    });
+    document.getElementById('att-perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
     document.getElementById('settings-save-btn').addEventListener('click', () => {
       const sheetId = document.getElementById('settings-sheet-id').value.trim();
       const apiKey = document.getElementById('settings-api-key').value.trim();
@@ -917,6 +948,148 @@
         prExtraTitles = [];
         savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
         await renderPrPermMatrixGrid();
+      } catch (e) {
+        errEl.textContent = 'Could not save changes: ' + e.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+    });
+
+    // ---- Attendance Permissions Matrix grid editor (DEV/admin only) ----
+    // Same shape and edit-in-place approach as the Plant Rounds matrix
+    // above, pointed at PermissionsMatrix_Attendance. The one structural
+    // difference: Staff Attendance has no separate "categories" sheet —
+    // its four Sections (Agencies/Staff/Logs/Settings) are hardcoded in
+    // module-attendance.js itself, so this editor uses a fixed list
+    // instead of reading a category sheet. Same fail-open behavior as
+    // Plant Rounds too: a Section with zero matrix rows stays open to
+    // everyone until its first row is added here (see
+    // canViewAttendanceSection in shared.js).
+    const AM_SECTIONS = [
+      { key: 'Agencies', label: 'Agencies' },
+      { key: 'Staff', label: 'Staff' },
+      { key: 'Logs', label: 'Attendance Log' },
+      { key: 'Settings', label: 'Settings' }
+    ];
+    let amTitles = [];
+    let amRowNumberByKey = {};
+    let amOriginalByKey = {};
+    let amExtraTitles = [];
+
+    function amKey(section, title) { return section + '||' + title; }
+
+    async function renderAttPermMatrixGrid() {
+      const wrap = document.getElementById('am-grid-wrap');
+      const errEl = document.getElementById('am-error');
+      const savedEl = document.getElementById('am-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+      wrap.innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        await MVOA.loadAttendancePermissionsMatrix();
+        const rawRows = MVOA.getAttendancePermissionsMatrixRows();
+        const users = await MVOA.loadRoles();
+
+        const titleSet = new Set();
+        users.filter(u => u.active).forEach(u => titleSet.add(MVOA.displayTitle(u)));
+        rawRows.forEach(r => titleSet.add(r.Title));
+        amExtraTitles.forEach(t => titleSet.add(t));
+        amTitles = [...titleSet].filter(Boolean).sort((a, b) => a.localeCompare(b));
+
+        amRowNumberByKey = {};
+        amOriginalByKey = {};
+        rawRows.forEach(r => {
+          const key = amKey(r.Section, r.Title);
+          amRowNumberByKey[key] = r.rowNumber;
+          amOriginalByKey[key] = r.AccessLevel || '';
+        });
+      } catch (e) {
+        wrap.innerHTML = '<p class="error-text">Could not load permissions matrix: ' + e.message + '</p>';
+        return;
+      }
+
+      if (!amTitles.length) {
+        wrap.innerHTML = '<p class="muted">No titles yet — add one above, or create a user with a Title set.</p>';
+        return;
+      }
+
+      const headerCells = amTitles.map(t => `<th style="padding:6px 8px;white-space:nowrap;">${t}</th>`).join('');
+      const bodyRows = AM_SECTIONS.map(sec => {
+        const cells = amTitles.map(title => {
+          const key = amKey(sec.key, title);
+          const current = amOriginalByKey[key] || '';
+          return `
+            <td style="padding:4px 6px;">
+              <select class="am-cell" data-section="${sec.key}" data-title="${title}" style="width:auto;min-width:110px;">
+                <option value="" ${current===''?'selected':''}>No access</option>
+                <option value="ReadOnly" ${current==='ReadOnly'?'selected':''}>Read Only</option>
+                <option value="Edit" ${current==='Edit'?'selected':''}>Edit</option>
+              </select>
+            </td>`;
+        }).join('');
+        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">${sec.label}</td>${cells}</tr>`;
+      }).join('');
+
+      wrap.innerHTML = `
+        <table class="mvoa-table" style="border-collapse:collapse;">
+          <thead><tr><th style="padding:6px 8px;position:sticky;left:0;background:#fff;z-index:2;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">Section</th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      `;
+    }
+
+    document.getElementById('am-add-title-btn').addEventListener('click', () => {
+      const input = document.getElementById('am-new-title');
+      const title = input.value.trim();
+      const errEl = document.getElementById('am-error');
+      errEl.textContent = '';
+      if (!title) { errEl.textContent = 'Enter a title name first.'; return; }
+      if (amTitles.includes(title)) { errEl.textContent = 'That title column already exists.'; return; }
+      amExtraTitles.push(title);
+      input.value = '';
+      renderAttPermMatrixGrid();
+    });
+
+    document.getElementById('am-save-btn').addEventListener('click', async () => {
+      const errEl = document.getElementById('am-error');
+      const savedEl = document.getElementById('am-saved-msg');
+      const btn = document.getElementById('am-save-btn');
+      errEl.textContent = ''; savedEl.textContent = '';
+
+      const toUpdate = [];
+      const toAppend = [];
+      document.querySelectorAll('.am-cell').forEach(sel => {
+        const section = sel.dataset.section;
+        const title = sel.dataset.title;
+        const newVal = sel.value;
+        const key = amKey(section, title);
+        const original = amOriginalByKey[key] || '';
+        if (newVal === original) return;
+        const rowNumber = amRowNumberByKey[key];
+        if (rowNumber) {
+          toUpdate.push({ rowNumber, row: [section, title, newVal] });
+        } else if (newVal) {
+          toAppend.push([section, title, newVal]);
+        }
+      });
+
+      if (!toUpdate.length && !toAppend.length) {
+        savedEl.textContent = 'No changes to save.';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        for (const u of toUpdate) {
+          await MVOA.sheetsUpdateRow(MVOA.TABS.permissionsMatrixAttendance, u.rowNumber, u.row);
+        }
+        if (toAppend.length) {
+          await MVOA.sheetsAppendMany(MVOA.TABS.permissionsMatrixAttendance, toAppend);
+        }
+        await MVOA.loadAttendancePermissionsMatrix(true);
+        amExtraTitles = [];
+        savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
+        await renderAttPermMatrixGrid();
       } catch (e) {
         errEl.textContent = 'Could not save changes: ' + e.message;
       }
