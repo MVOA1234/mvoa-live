@@ -981,6 +981,30 @@ const MVOA = (function () {
     return d.url;
   }
 
+  // Deletes a previously-uploaded photo from Drive via the SAME Apps
+  // Script proxy used for uploads — actually reclaims storage, unlike
+  // just clearing a URL out of a Sheet cell (which is all sheetsUpdateRow
+  // can do). The script itself is responsible for turning this URL back
+  // into a Drive file ID, since it generated the URL in the first place —
+  // this just forwards it. Requires the Apps Script to have a 'delete'
+  // action added (it won't by default); see the app's deployment notes.
+  // Throws on failure so callers can decide whether to still clear the
+  // link even when the file itself couldn't be removed (e.g. the script
+  // hasn't been updated with the delete branch yet).
+  async function deletePhotoFromDrive(url) {
+    if (!url) return;
+    if (!CFG.photoUploadUrl) throw new Error('No photo upload URL configured (Settings → Photo Upload URL)');
+    const r = await fetchWithTimeout(CFG.photoUploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ secret: CFG.photoUploadSecret, action: 'delete', url })
+    }, 20000);
+    if (!r.ok) throw new Error('Photo delete proxy error: ' + r.status);
+    const d = await r.json();
+    if (d.error) throw new Error('Photo delete failed: ' + d.error);
+    return true;
+  }
+
   function fileToBase64(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1108,7 +1132,7 @@ const MVOA = (function () {
     loadAttendancePermissionsMatrix, canEditAttendanceSection, canViewAttendanceSection, getAttendancePermissionsMatrixRows,
     loadNotesForTask, appendNote,
     logAudit, nextId, createOpsTask,
-    capturePhoto, pickAttachment, uploadPhotoToDrive,
+    capturePhoto, pickAttachment, uploadPhotoToDrive, deletePhotoFromDrive,
     logoSvg,
     statusBadgeHtml, STATUS_STYLES,
     setAppBadge,
