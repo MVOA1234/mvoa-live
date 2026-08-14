@@ -25,14 +25,29 @@
 //                                 app PIN — access is controlled by the
 //                                 same login + PermissionsMatrix_* model
 //                                 as Daily Ops / Plant Rounds (see below)
-//   Phase 4 (last, largest)   — Attendance Logs: QR scan check-in/out,
-//                                 daily/monthly registers. Confirmed
-//                                 rules for this phase: a 3rd scan in a
-//                                 day must NOT be allowed to overwrite
-//                                 an existing check-out; real status
-//                                 tracking (not just "has a log row");
-//                                 deleting an agency deletes its staff's
-//                                 attendance history too (not orphaned).
+//   Phase 4 (THIS UPDATE)     — Attendance Logs: QR scan check-in/out
+//                                 (plus a 4-digit code fallback for staff
+//                                 without a badge in hand), a live daily
+//                                 register with real per-staff status
+//                                 ('Not scanned' / 'On-site' / 'Checked
+//                                 out' — a genuine Status column on each
+//                                 AttLog row, not just derived from
+//                                 whether a row exists). A 3rd scan in a
+//                                 day is rejected outright rather than
+//                                 silently overwriting the checkout —
+//                                 re-checked against a fresh read right
+//                                 before writing, so two gate stations
+//                                 scanning the same person moments apart
+//                                 still can't both "win". Agencies/Staff
+//                                 now also have a genuine hard "Delete"
+//                                 (admin-only, separate from the existing
+//                                 "Deactivate") that cascades: deleting an
+//                                 agency deletes its staff AND all of
+//                                 their attendance history, deleting a
+//                                 staff member deletes their attendance
+//                                 history too — nothing is orphaned the
+//                                 way the original standalone app left
+//                                 attendance logs behind after a delete.
 //
 // ACCESS MODEL (all phases): no standalone PIN screen like the old app.
 // Access is gated per-Section by PermissionsMatrix_Attendance, exactly
@@ -40,18 +55,26 @@
 // AccessLevel rows, edited directly in the Sheet. A Title with no row
 // for a Section has NO access to it; 'Edit' vs 'ReadOnly' controls
 // whether they can change data. DEV role always has full access.
-// Phase 2 adds a second Section, 'Staff', independent of 'Agencies' —
-// e.g. Security can be given view-only on Staff but no Agencies access
-// at all, just by adding/omitting the relevant matrix rows.
+// Three independent Sections exist: 'Agencies', 'Staff', 'Logs' (the
+// scan/register screen) — e.g. Security can be given Edit on Logs (so
+// they can run the scan station) but no access to Agencies/Staff at all.
+// Separately, the new hard-Delete actions (as opposed to Deactivate) are
+// further restricted to MVOA.isAdmin(user) regardless of the matrix —
+// permanently destroying attendance history is treated like the app's
+// other admin-only actions (PIN Management, unmasked config), not just
+// gated by ordinary section Edit access.
 // ═══════════════════════════════════════════════════════════════
 (function () {
   const AGENCY_COLS = ['AgencyID', 'Name', 'Type', 'Active', 'CreatedDate', 'CreatedBy'];
   const STAFF_COLS = ['StaffID', 'AgencyID', 'Name', 'Role', 'Phone', 'AadhaarNumber', 'AadhaarPhotoURL', 'Code', 'PhotoURL', 'Active', 'CreatedDate', 'CreatedBy'];
+  const LOG_COLS = ['LogID', 'StaffID', 'Date', 'CheckInTime', 'CheckInPhotoURL', 'CheckOutTime', 'CheckOutPhotoURL', 'Status', 'LoggedBy'];
   const SECTION_AGENCIES = 'Agencies';
   const SECTION_STAFF = 'Staff';
+  const SECTION_LOGS = 'Logs';
   const NAV_TABS = [
     { key: SECTION_AGENCIES, label: 'Agencies' },
-    { key: SECTION_STAFF, label: 'Staff' }
+    { key: SECTION_STAFF, label: 'Staff' },
+    { key: SECTION_LOGS, label: 'Attendance Log' }
   ];
 
   let allAgenciesCache = [];   // every agency, active or not — used for name lookups so a
@@ -60,8 +83,11 @@
   let agenciesCache = [];      // active agencies only — used for lists/dropdowns
   let allStaffCache = [];      // every staff row, active or not — used for StaffID/Code
                                 // uniqueness checks (a deactivated staff member's code must
-                                // still be treated as taken, not recycled)
-  let staffCache = [];         // active staff only — used for the list/table
+                                // still be treated as taken, not recycled) and QR/code lookup
+  let staffCache = [];         // active staff only — used for the list/table and the register
+  let allLogsCache = [];       // every AttLog row, all dates — filtered client-side per date;
+                                // re-read fresh (not from this cache) at the moment of an
+                                // actual scan, see processAttendanceScan()
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -79,25 +105,38 @@
   function formatKB(bytes) {
     return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
   }
+  function isoDateLocal(d) {
+    const pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+  function formatTime(iso) {
+    if (!iso) return '';
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
 
   function canEditSection(section, user) { return MVOA.canEditAttendanceSection(section, user); }
   function canViewSection(section, user) { return MVOA.canViewAttendanceSection(section, user); }
 
   async function loadAll(force) {
-    const [agencyRows, staffRows] = await Promise.all([
+    const [agencyRows, staffRows, logRows] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.attAgencies),
       MVOA.sheetsRead(MVOA.TABS.attStaff),
+      MVOA.sheetsRead(MVOA.TABS.attLog),
       MVOA.loadAttendancePermissionsMatrix(force)
     ]);
     allAgenciesCache = rowsToObjs(agencyRows, AGENCY_COLS);
     agenciesCache = allAgenciesCache.filter(a => isActive(a.Active));
     allStaffCache = rowsToObjs(staffRows, STAFF_COLS);
     staffCache = allStaffCache.filter(s => isActive(s.Active));
+    allLogsCache = rowsToObjs(logRows, LOG_COLS);
   }
 
   function agencyName(agencyId) {
     const a = allAgenciesCache.find(x => x.AgencyID === agencyId);
     return a ? a.Name : agencyId;
+  }
+  function staffById(staffId) {
+    return allStaffCache.find(s => s.StaffID === staffId);
   }
 
   // ─────────────────────────────────────────────
@@ -142,6 +181,7 @@
     container.querySelectorAll('.att-tab-btn').forEach(btn => btn.addEventListener('click', () => renderShell(container, user, btn.dataset.tab)));
     const host = container.querySelector('#att-tab-body');
     if (activeTab === SECTION_STAFF) renderStaffList(host, user);
+    else if (activeTab === SECTION_LOGS) renderAttendanceLogs(host, user);
     else renderAgenciesList(host, user);
   }
 
@@ -151,6 +191,7 @@
   // ─────────────────────────────────────────────
   function renderAgenciesList(host, user) {
     const editable = canEditSection(SECTION_AGENCIES, user);
+    const canHardDelete = editable && MVOA.isAdmin(user);
     const rows = agenciesCache.slice().sort((a, b) => a.Name.localeCompare(b.Name));
     host.innerHTML = `
       <div class="card">
@@ -166,9 +207,10 @@
                 <td>${escapeHtml(a.Name)}</td>
                 <td>${escapeHtml(a.Type)}</td>
                 ${editable ? `
-                  <td style="white-space:nowrap;">
+                  <td style="white-space:normal;">
                     <button class="btn-secondary att-agency-edit" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;">Edit</button>
                     <button class="btn-secondary att-agency-delete" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;">Deactivate</button>
+                    ${canHardDelete ? `<button class="btn-secondary att-agency-harddelete" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;color:#b3261e;">Delete</button>` : ''}
                   </td>` : ''}
               </tr>
             `).join('') : `<tr><td colspan="${editable ? 3 : 2}" class="muted">No agencies yet.</td></tr>`}
@@ -183,6 +225,7 @@
         if (a) renderAgencyForm(host, a, user);
       }));
       host.querySelectorAll('.att-agency-delete').forEach(btn => btn.addEventListener('click', () => confirmDeleteAgency(host, btn.dataset.id, user)));
+      host.querySelectorAll('.att-agency-harddelete').forEach(btn => btn.addEventListener('click', () => confirmHardDeleteAgency(host, btn.dataset.id, user)));
     }
   }
 
@@ -252,6 +295,36 @@
     }
   }
 
+  // Permanent, cascading delete — admin-only (see canHardDelete above).
+  // Removes the agency row itself, every staff row under it, and every
+  // AttLog row belonging to that staff — the fix for the original app's
+  // orphaned-logs bug, where deleting an agency deleted its staff but
+  // left their attendance history behind pointing at nothing.
+  async function confirmHardDeleteAgency(host, agencyId, user) {
+    const agency = allAgenciesCache.find(a => a.AgencyID === agencyId);
+    if (!agency) return;
+    const agencyStaff = allStaffCache.filter(s => s.AgencyID === agencyId);
+    const staffIds = agencyStaff.map(s => s.StaffID);
+    const logCount = allLogsCache.filter(l => staffIds.includes(l.StaffID)).length;
+    const msg = agencyStaff.length
+      ? `Agency "${agency.Name}" has ${agencyStaff.length} staff member(s) enrolled${logCount ? `, with ${logCount} attendance record(s) between them` : ''}.\n\nPermanently deleting this agency will ALSO permanently delete all of its staff and their attendance history. This cannot be undone.\n\nContinue?`
+      : `Permanently delete agency "${agency.Name}"? This cannot be undone.`;
+    if (!confirm(msg)) return;
+    try {
+      if (agencyStaff.length) {
+        const logRows = await MVOA.sheetsRead(MVOA.TABS.attLog);
+        const logRowNumbers = rowsToObjs(logRows, LOG_COLS).filter(l => staffIds.includes(l.StaffID)).map(l => l.rowNumber);
+        if (logRowNumbers.length) await MVOA.sheetsDeleteRows(MVOA.TABS.attLog, logRowNumbers);
+        await MVOA.sheetsDeleteRows(MVOA.TABS.attStaff, agencyStaff.map(s => s.rowNumber));
+      }
+      await MVOA.sheetsDeleteRows(MVOA.TABS.attAgencies, [agency.rowNumber]);
+      await loadAll(true);
+      renderAgenciesList(host, user);
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
+  }
+
   // ─────────────────────────────────────────────
   // STAFF (Phase 2 — NEW)
   // ─────────────────────────────────────────────
@@ -269,19 +342,20 @@
 
   function renderStaffList(host, user) {
     const editable = canEditSection(SECTION_STAFF, user);
+    const canHardDelete = editable && MVOA.isAdmin(user);
     const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
     host.innerHTML = `
       <div class="card">
         <p class="muted" style="margin:0 0 10px;">
           Staff enrolled per agency, with photo, Aadhaar and a 4-digit attendance code for gate entry.
-          QR scanning and attendance registers are being added in the next phase.
+          Use "QR" to view/print a staff member's scan badge.
         </p>
         ${editable ? `
           <button id="att-staff-add" class="btn-primary" style="margin-bottom:12px;" ${agenciesCache.length ? '' : 'disabled'}>+ Add Staff</button>
           ${agenciesCache.length ? '' : '<p class="muted" style="margin:0 0 12px;">Add an agency first (Agencies tab) before enrolling staff.</p>'}
         ` : ''}
         <table class="mvoa-table">
-          <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Code</th>${editable ? '<th></th>' : ''}</tr></thead>
+          <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Code</th><th></th></tr></thead>
           <tbody>
             ${rows.length ? rows.map(s => `
               <tr>
@@ -289,17 +363,24 @@
                 <td>${escapeHtml(agencyName(s.AgencyID))}</td>
                 <td>${escapeHtml(s.Role)}</td>
                 <td style="font-family:ui-monospace,Menlo,monospace;letter-spacing:2px;">${escapeHtml(s.Code)}</td>
-                ${editable ? `
-                  <td style="white-space:nowrap;">
+                <td style="white-space:normal;">
+                  <button class="btn-secondary att-staff-qr" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;">QR</button>
+                  ${editable ? `
                     <button class="btn-secondary att-staff-edit" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;">Edit</button>
                     <button class="btn-secondary att-staff-delete" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;">Deactivate</button>
-                  </td>` : ''}
+                    ${canHardDelete ? `<button class="btn-secondary att-staff-harddelete" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;color:#b3261e;">Delete</button>` : ''}
+                  ` : ''}
+                </td>
               </tr>
-            `).join('') : `<tr><td colspan="${editable ? 5 : 4}" class="muted">No staff enrolled yet.</td></tr>`}
+            `).join('') : `<tr><td colspan="5" class="muted">No staff enrolled yet.</td></tr>`}
           </tbody>
         </table>
       </div>
     `;
+    host.querySelectorAll('.att-staff-qr').forEach(btn => btn.addEventListener('click', () => {
+      const s = staffCache.find(x => x.StaffID === btn.dataset.id);
+      if (s) showStaffQrBadge(s);
+    }));
     if (editable) {
       const addBtn = host.querySelector('#att-staff-add');
       if (addBtn) addBtn.addEventListener('click', () => renderStaffForm(host, null, user));
@@ -308,6 +389,7 @@
         if (s) renderStaffForm(host, s, user);
       }));
       host.querySelectorAll('.att-staff-delete').forEach(btn => btn.addEventListener('click', () => confirmDeleteStaff(host, btn.dataset.id, user)));
+      host.querySelectorAll('.att-staff-harddelete').forEach(btn => btn.addEventListener('click', () => confirmHardDeleteStaff(host, btn.dataset.id, user)));
     }
   }
 
@@ -469,6 +551,287 @@
     } catch (e) {
       alert('Deactivate failed: ' + e.message);
     }
+  }
+
+  // Permanent delete — admin-only (see canHardDelete above). Also removes
+  // every AttLog row for this staff member, so nothing is left pointing
+  // at a StaffID that no longer exists.
+  async function confirmHardDeleteStaff(host, staffId, user) {
+    const staff = allStaffCache.find(s => s.StaffID === staffId);
+    if (!staff) return;
+    const logCount = allLogsCache.filter(l => l.StaffID === staffId).length;
+    const msg = logCount
+      ? `Permanently delete "${staff.Name}" AND all ${logCount} of their attendance record(s)? This cannot be undone.`
+      : `Permanently delete "${staff.Name}"? This cannot be undone.`;
+    if (!confirm(msg)) return;
+    try {
+      const logRows = await MVOA.sheetsRead(MVOA.TABS.attLog);
+      const logRowNumbers = rowsToObjs(logRows, LOG_COLS).filter(l => l.StaffID === staffId).map(l => l.rowNumber);
+      if (logRowNumbers.length) await MVOA.sheetsDeleteRows(MVOA.TABS.attLog, logRowNumbers);
+      await MVOA.sheetsDeleteRows(MVOA.TABS.attStaff, [staff.rowNumber]);
+      await loadAll(true);
+      renderStaffList(host, user);
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
+  }
+
+  // Read-only QR badge viewer/printer — generates the same 'MVOA-ATT:'
+  // payload the scanner expects via a public QR-image API (no new QR-
+  // generation library needed client-side, mirroring how this app already
+  // depends on external services for Sheets/Drive). Staff ID only, no
+  // personal data, is encoded in the image.
+  function showStaffQrBadge(staff) {
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent('MVOA-ATT:' + staff.StaffID)}`;
+    modal.innerHTML = `
+      <div class="ops-qr-box">
+        <h3 style="margin-top:0;">${escapeHtml(staff.Name)}</h3>
+        <p class="muted" style="margin:0 0 10px;">${escapeHtml(agencyName(staff.AgencyID))}${staff.Role ? ' · ' + escapeHtml(staff.Role) : ''}</p>
+        <img src="${qrUrl}" alt="QR badge" style="width:200px;height:200px;">
+        <p class="muted" style="margin:10px 0;">Scan to check in/out · Code: <strong>${escapeHtml(staff.Code)}</strong></p>
+        <div class="mvoa-row">
+          <button id="att-badge-close" class="btn-secondary">Close</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('#att-badge-close').addEventListener('click', () => modal.remove());
+  }
+
+  // ─────────────────────────────────────────────
+  // ATTENDANCE LOG (Phase 4 — NEW): live daily register + QR / 4-digit
+  // code scan check-in/check-out.
+  // ─────────────────────────────────────────────
+  function logsForDate(dateStr) {
+    return allLogsCache.filter(l => l.Date === dateStr);
+  }
+
+  function renderAttendanceLogs(host, user, dateStr) {
+    const editable = canEditSection(SECTION_LOGS, user);
+    const date = dateStr || isoDateLocal(new Date());
+    const dayLogs = logsForDate(date);
+    const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
+    const withLog = rows.map(s => ({ s, l: dayLogs.find(x => x.StaffID === s.StaffID) }));
+    const onsite = withLog.filter(r => r.l && r.l.Status === 'CheckedIn').length;
+    const checkedOut = withLog.filter(r => r.l && r.l.Status === 'CheckedOut').length;
+    const notScanned = rows.length - onsite - checkedOut;
+
+    host.innerHTML = `
+      <div class="card">
+        <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+          <label style="margin:0;">Date
+            <input type="date" id="att-log-date" value="${date}" max="${isoDateLocal(new Date())}">
+          </label>
+          <span class="muted" style="font-size:0.85rem;">On-site: <strong>${onsite}</strong> · Checked out: <strong>${checkedOut}</strong> · Not scanned: <strong>${notScanned}</strong> · Total active: <strong>${rows.length}</strong></span>
+        </div>
+        ${editable ? `
+          <div class="mvoa-row" style="margin-bottom:14px;gap:10px;">
+            <button id="att-log-scan" class="btn-primary">📷 Scan QR</button>
+            <button id="att-log-code" class="btn-secondary">🔢 Enter Code</button>
+          </div>
+        ` : ''}
+        <div style="max-height:60vh;overflow:auto;">
+          <table class="mvoa-table">
+            <thead><tr><th>Name</th><th>Agency</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
+            <tbody>
+              ${withLog.length ? withLog.map(({ s, l }) => {
+                const status = !l ? 'Not scanned' : (l.Status === 'CheckedOut' ? 'Checked out' : 'On-site');
+                const statusColor = !l ? '#6b7280' : (l.Status === 'CheckedOut' ? '#41464b' : '#1e6b33');
+                return `
+                  <tr>
+                    <td>${escapeHtml(s.Name)}</td>
+                    <td>${escapeHtml(agencyName(s.AgencyID))}</td>
+                    <td>${l && l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) + (l.CheckInPhotoURL ? ` <a href="${l.CheckInPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') : '—'}</td>
+                    <td>${l && l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) + (l.CheckOutPhotoURL ? ` <a href="${l.CheckOutPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') : '—'}</td>
+                    <td style="color:${statusColor};font-weight:600;">${status}</td>
+                  </tr>
+                `;
+              }).join('') : `<tr><td colspan="5" class="muted">No active staff enrolled yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    host.querySelector('#att-log-date').addEventListener('change', (e) => renderAttendanceLogs(host, user, e.target.value));
+    if (editable) {
+      host.querySelector('#att-log-scan').addEventListener('click', () => openAttendanceScanner(host, user));
+      host.querySelector('#att-log-code').addEventListener('click', () => openCodeEntry(host, user));
+    }
+  }
+
+  // Applies the check-in / check-out / reject-3rd-scan rule for one staff
+  // member, right now — always against a FRESH read of AttLog (not the
+  // cached allLogsCache), because the whole point of the 3rd-scan guard
+  // is to hold up even if two gate stations scan the same person moments
+  // apart. Same conservative "read immediately before writing" approach
+  // already used elsewhere in this app for ID generation, for the same
+  // last-write-wins-on-Sheets reason.
+  async function processAttendanceScan(staffId, photoFile, user) {
+    const staff = staffById(staffId);
+    if (!staff) return { type: 'error', message: 'Not recognised — this ID is not enrolled.' };
+    if (!isActive(staff.Active)) return { type: 'error', message: `${staff.Name} is deactivated.` };
+
+    const date = isoDateLocal(new Date());
+    const now = new Date().toISOString();
+    const rows = await MVOA.sheetsRead(MVOA.TABS.attLog);
+    const existing = rowsToObjs(rows, LOG_COLS).find(l => l.StaffID === staffId && l.Date === date);
+
+    if (existing && existing.CheckInTime && existing.CheckOutTime) {
+      return { type: 'blocked', message: `${staff.Name} already checked out today at ${formatTime(existing.CheckOutTime)}. A 3rd scan isn't allowed — contact an admin if this is wrong.`, staff };
+    }
+
+    let photoUrl = '';
+    if (photoFile) {
+      try {
+        photoUrl = await MVOA.uploadPhotoToDrive(photoFile, `${staffId}_${date}_${existing ? 'out' : 'in'}.jpg`);
+      } catch (e) {
+        // A failed photo upload shouldn't block the actual check-in/out —
+        // the attendance record itself matters more; log without a photo.
+        photoUrl = '';
+      }
+    }
+
+    if (!existing) {
+      const existingIds = rows.slice(1).map(r => r[0]).filter(Boolean);
+      const logId = MVOA.nextId('LOG', existingIds);
+      await MVOA.sheetsAppend(MVOA.TABS.attLog, [logId, staffId, date, now, photoUrl, '', '', 'CheckedIn', (user && user.name) || '']);
+      return { type: 'in', message: `${staff.Name} — CHECK-IN at ${formatTime(now)}`, staff };
+    } else {
+      await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, existing.rowNumber,
+        [existing.LogID, existing.StaffID, existing.Date, existing.CheckInTime, existing.CheckInPhotoURL, now, photoUrl, 'CheckedOut', (user && user.name) || '']);
+      return { type: 'out', message: `${staff.Name} — CHECK-OUT at ${formatTime(now)}`, staff };
+    }
+  }
+
+  // QR scan station — a persistent camera modal (stays open across
+  // multiple scans, like a real gate station) reusing the same
+  // video/canvas/jsQR pattern as Plant Rounds' equipment QR scanner.
+  // Per-staff cooldown avoids one held-up badge re-triggering on every
+  // animation frame; `processing` pauses decoding while a scan's already
+  // being written, so overlapping scans can't race each other client-side.
+  function openAttendanceScanner(host, user) {
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box">
+        <video id="att-qr-video" autoplay playsinline muted></video>
+        <canvas id="att-qr-canvas" style="display:none;"></canvas>
+        <p class="muted" id="att-qr-status">Point camera at the staff member's QR badge…</p>
+        <button id="att-qr-cancel" class="btn-secondary">Close</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const video = modal.querySelector('#att-qr-video');
+    const canvas = modal.querySelector('#att-qr-canvas');
+    const statusEl = modal.querySelector('#att-qr-status');
+    let stream, raf, processing = false;
+    const cooldown = {};
+
+    function stop() {
+      if (raf) cancelAnimationFrame(raf);
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      modal.remove();
+      renderAttendanceLogs(host, user);
+    }
+    modal.querySelector('#att-qr-cancel').addEventListener('click', stop);
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      .then(s => { stream = s; video.srcObject = s; tick(); })
+      .catch(e => { statusEl.textContent = 'Camera access failed: ' + e.message; });
+
+    function captureFrameAsFile(filename) {
+      return new Promise((resolve) => {
+        const side = Math.min(video.videoWidth, video.videoHeight);
+        const c = document.createElement('canvas');
+        c.width = 320; c.height = 320;
+        c.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
+        c.toBlob(blob => resolve(blob ? new File([blob], filename, { type: 'image/jpeg' }) : null), 'image/jpeg', 0.7);
+      });
+    }
+
+    function tick() {
+      if (!processing && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = typeof jsQR === 'function' ? jsQR(img.data, img.width, img.height) : null;
+        if (code) {
+          const m = (code.data || '').match(/^MVOA-ATT:(.+)$/);
+          if (m) {
+            const staffId = m[1];
+            const nowMs = Date.now();
+            if (!cooldown[staffId] || nowMs - cooldown[staffId] > 8000) {
+              cooldown[staffId] = nowMs;
+              processing = true;
+              statusEl.textContent = 'Processing…';
+              captureFrameAsFile(`${staffId}_scan.jpg`)
+                .then(file => processAttendanceScan(staffId, file, user))
+                .then(result => {
+                  statusEl.innerHTML = (result.type === 'blocked' || result.type === 'error')
+                    ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
+                  processing = false;
+                  setTimeout(() => { if (statusEl) statusEl.textContent = "Point camera at the staff member's QR badge…"; }, 2500);
+                })
+                .catch(e => {
+                  statusEl.textContent = 'Scan failed: ' + e.message;
+                  processing = false;
+                });
+            }
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    }
+  }
+
+  // 4-digit code fallback — same check-in/out/3rd-scan logic, no camera
+  // or photo involved, for staff without a badge or a working camera.
+  function openCodeEntry(host, user) {
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box">
+        <h3 style="margin-top:0;">Enter 4-digit code</h3>
+        <input type="text" id="att-code-input" inputmode="numeric" maxlength="4" placeholder="0000" style="width:100%;max-width:200px;font-size:28px;letter-spacing:10px;text-align:center;font-family:ui-monospace,Menlo,monospace;padding:10px;margin:10px 0;">
+        <p class="muted" id="att-code-status">Staff types their code, then Submit.</p>
+        <div class="mvoa-row">
+          <button id="att-code-submit" class="btn-primary">Submit</button>
+          <button id="att-code-cancel" class="btn-secondary">Close</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('#att-code-input');
+    const statusEl = modal.querySelector('#att-code-status');
+    input.focus();
+
+    function stop() {
+      modal.remove();
+      renderAttendanceLogs(host, user);
+    }
+    modal.querySelector('#att-code-cancel').addEventListener('click', stop);
+
+    async function submit() {
+      const code = input.value.trim();
+      if (!/^\d{4}$/.test(code)) { statusEl.textContent = 'Enter exactly 4 digits.'; return; }
+      const staff = allStaffCache.find(s => s.Code === code && isActive(s.Active));
+      if (!staff) { statusEl.textContent = 'No active staff member has that code.'; input.value = ''; return; }
+      statusEl.textContent = 'Processing…';
+      try {
+        const result = await processAttendanceScan(staff.StaffID, null, user);
+        statusEl.innerHTML = (result.type === 'blocked' || result.type === 'error')
+          ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
+        input.value = '';
+      } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+      }
+    }
+    modal.querySelector('#att-code-submit').addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
   }
 
   MVOA.registerModule('attendance', {
