@@ -622,22 +622,66 @@
   // separate about:blank print window below, which has no base URL of
   // its own to resolve a relative path against.
   const ID_CARD_GREEN = '#2e5e1e';
+
+  // Staff photos are stored in Drive (via uploadPhotoToDrive) and PhotoURL
+  // holds the normal Drive "view" page link (drive.google.com/file/d/ID/view)
+  // — that page URL does NOT serve raw image bytes, so it can't be dropped
+  // straight into an <img src>. Converting to the Drive thumbnail endpoint
+  // (which DOES serve an actual image, and works for anyone-with-link files,
+  // same sharing level uploadPhotoToDrive already sets) is what makes the
+  // photo actually render on the card. onerror on the <img> falls back to a
+  // "No photo" placeholder rather than a broken-image icon if the thumbnail
+  // ever 404s (e.g. file was deleted by retention cleanup).
+  function driveFileIdFromUrl(url) {
+    if (!url) return null;
+    let m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+    if (m) return m[1];
+    m = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (m) return m[1];
+    m = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (m) return m[1];
+    return null;
+  }
+  function drivePhotoThumbUrl(url, sizePx) {
+    const id = driveFileIdFromUrl(url);
+    return id ? `https://drive.google.com/thumbnail?id=${id}&sz=w${sizePx || 200}` : '';
+  }
+
+  // Horizontal (landscape) layout: logo + staff photo on the left, name/
+  // agency/role/code in the middle, QR on the right — standard ID-badge
+  // proportions rather than the earlier portrait design.
   function idCardInnerHtml(staff, logoUrl, qrUrl) {
+    const photoThumb = staff.PhotoURL ? drivePhotoThumbUrl(staff.PhotoURL, 200) : '';
+    const photoBox = `
+      <div style="width:84px;height:84px;border-radius:10px;background:#fff;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+        ${photoThumb ? `
+          <img src="${photoThumb}" alt="${escapeHtml(staff.Name)}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+          <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;color:#9ca3af;font-size:0.6rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>
+        ` : `
+          <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:0.6rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>
+        `}
+      </div>
+    `;
     return `
-      <div style="width:280px;background:${ID_CARD_GREEN};border-radius:18px;padding:22px 20px;text-align:center;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;">
-        <div style="background:#fff;border-radius:10px;padding:8px 14px;display:inline-block;margin-bottom:14px;">
-          <img src="${logoUrl}" alt="MVOA" style="height:38px;display:block;">
+      <div style="width:min(440px,94vw);background:${ID_CARD_GREEN};border-radius:18px;padding:18px 20px;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;box-sizing:border-box;display:flex;align-items:center;gap:14px;">
+        <div style="flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:8px;">
+          <div style="background:#fff;border-radius:8px;padding:5px 9px;">
+            <img src="${logoUrl}" alt="MVOA" style="height:24px;display:block;">
+          </div>
+          ${photoBox}
         </div>
-        <div style="font-size:0.68rem;letter-spacing:2px;opacity:0.85;margin-bottom:8px;">STAFF ID</div>
-        <div style="font-size:1.1rem;font-weight:700;margin-bottom:2px;line-height:1.3;">${escapeHtml(staff.Name)}</div>
-        <div style="font-size:0.82rem;opacity:0.92;margin-bottom:2px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
-        <div style="font-size:0.75rem;opacity:0.8;margin-bottom:14px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
-        <div style="background:#fff;border-radius:10px;padding:10px;display:inline-block;">
-          <img src="${qrUrl}" alt="QR" style="width:140px;height:140px;display:block;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:0.62rem;letter-spacing:2px;opacity:0.85;margin-bottom:4px;">STAFF ID</div>
+          <div style="font-size:1.1rem;font-weight:700;margin-bottom:2px;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
+          <div style="font-size:0.8rem;opacity:0.92;margin-bottom:2px;overflow-wrap:break-word;">${escapeHtml(agencyName(staff.AgencyID))}</div>
+          <div style="font-size:0.72rem;opacity:0.8;margin-bottom:8px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
+          <div style="font-size:0.65rem;opacity:0.85;">Code</div>
+          <div style="font-family:ui-monospace,Menlo,monospace;font-size:1.05rem;font-weight:700;letter-spacing:4px;margin-bottom:4px;">${escapeHtml(staff.Code)}</div>
+          <div style="font-size:0.6rem;opacity:0.7;">${escapeHtml(staff.StaffID)}</div>
         </div>
-        <div style="margin-top:12px;font-size:0.7rem;opacity:0.85;">Code</div>
-        <div style="font-family:ui-monospace,Menlo,monospace;font-size:1.25rem;font-weight:700;letter-spacing:6px;">${escapeHtml(staff.Code)}</div>
-        <div style="margin-top:10px;font-size:0.62rem;opacity:0.7;">${escapeHtml(staff.StaffID)}</div>
+        <div style="background:#fff;border-radius:10px;padding:8px;flex:0 0 auto;">
+          <img src="${qrUrl}" alt="QR" style="width:100px;height:100px;display:block;">
+        </div>
       </div>
     `;
   }
@@ -648,7 +692,7 @@
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
-      <div class="ops-qr-box">
+      <div class="ops-qr-box" style="width:min(480px,96vw);max-width:none;">
         ${idCardInnerHtml(staff, logoUrl, qrUrl)}
         <div class="mvoa-row" style="margin-top:16px;justify-content:center;gap:10px;">
           <button id="att-badge-print" class="btn-primary">🖨 Print ID Card</button>
@@ -669,7 +713,7 @@
         <title>ID Card — ${escapeHtml(staff.Name)}</title>
         <style>
           body { margin:0; padding:24px; display:flex; align-items:center; justify-content:center; min-height:100vh; font-family:-apple-system, Arial, sans-serif; background:#f2f2f2; box-sizing:border-box; }
-          @media print { body { background:#fff; padding:0; } }
+          @media print { body { background:#fff; padding:0; } @page { size: landscape; } }
         </style>
       </head>
       <body>
