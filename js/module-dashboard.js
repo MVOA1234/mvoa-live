@@ -398,12 +398,15 @@ const DashboardModule = (function () {
         </div>
         <p style="margin:0 0 6px;font-weight:600;">By Assignee (top 3, open this period)</p>
         ${opsStats.assigneeRows.length ? `
-          <table class="mvoa-table" style="max-width:520px;">
-            <thead><tr><th>Assignee</th><th>Open</th><th>Avg Days Open</th></tr></thead>
-            <tbody>
-              ${opsStats.assigneeRows.map(r => `<tr class="dash-assignee-row" data-assignee-key="${escapeHtml(r.key)}" data-assignee-label="${escapeHtml(r.label)}" style="cursor:pointer;"><td>${escapeHtml(r.label)} ›</td><td>${r.count}</td><td>${r.avgDays}</td></tr>`).join('')}
-            </tbody>
-          </table>
+          <div style="overflow-x:auto;max-width:520px;">
+            <table class="mvoa-table" style="width:100%;table-layout:fixed;">
+              <colgroup><col style="width:52%;"><col style="width:18%;"><col style="width:30%;"></colgroup>
+              <thead><tr><th>Assignee</th><th>Open</th><th style="white-space:normal;">Avg Days Open</th></tr></thead>
+              <tbody>
+                ${opsStats.assigneeRows.map(r => `<tr class="dash-assignee-row" data-assignee-key="${escapeHtml(r.key)}" data-assignee-label="${escapeHtml(r.label)}" style="cursor:pointer;"><td style="white-space:normal;overflow-wrap:break-word;">${escapeHtml(r.label)} ›</td><td>${r.count}</td><td>${r.avgDays}</td></tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
         ` : '<p class="muted">No open tickets this period.</p>'}
       </div>
 
