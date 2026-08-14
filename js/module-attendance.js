@@ -662,25 +662,31 @@
         `}
       </div>
     `;
+    // Grid layout matching the requested arrangement: logo (top-left) and
+    // photo (below it) share a narrow left column across both rows;
+    // "STAFF ID" heads the middle column on row 1 with the name/agency/
+    // code/role/StaffID stack below it on row 2; the QR code sits in its
+    // own column on the right, spanning the full height of both rows (the
+    // same named grid-area 'qr' repeated in both template rows merges into
+    // one tall cell — that's what makes it span, not a manual row-span).
     return `
-      <div style="width:min(440px,94vw);background:${ID_CARD_GREEN};border-radius:18px;padding:18px 20px;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;box-sizing:border-box;display:flex;align-items:center;gap:14px;">
-        <div style="flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:8px;">
+      <div style="width:min(440px,94vw);background:${ID_CARD_GREEN};border-radius:18px;padding:18px 20px;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;box-sizing:border-box;display:grid;grid-template-columns:92px 1fr auto;grid-template-areas:'logo staffid qr' 'photo info qr';gap:8px 16px;align-items:center;">
+        <div style="grid-area:logo;display:flex;justify-content:center;">
           <div style="background:#fff;border-radius:8px;padding:6px 10px;">
             <img src="${logoUrl}" alt="MVOA" style="height:44px;display:block;">
           </div>
-          ${photoBox}
         </div>
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:0.62rem;letter-spacing:2px;opacity:0.85;margin-bottom:4px;">STAFF ID</div>
-          <div style="font-size:1.1rem;font-weight:700;margin-bottom:2px;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
-          <div style="font-size:0.8rem;opacity:0.92;margin-bottom:2px;overflow-wrap:break-word;">${escapeHtml(agencyName(staff.AgencyID))}</div>
-          <div style="font-size:0.72rem;opacity:0.8;margin-bottom:8px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
-          <div style="font-size:0.65rem;opacity:0.85;">Code</div>
-          <div style="font-family:ui-monospace,Menlo,monospace;font-size:1.05rem;font-weight:700;letter-spacing:4px;margin-bottom:4px;">${escapeHtml(staff.Code)}</div>
-          <div style="font-size:0.6rem;opacity:0.7;">${escapeHtml(staff.StaffID)}</div>
+        <div style="grid-area:staffid;align-self:end;text-align:center;font-size:0.7rem;font-weight:700;letter-spacing:2px;opacity:0.9;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
+        <div style="grid-area:photo;display:flex;justify-content:center;">${photoBox}</div>
+        <div style="grid-area:info;min-width:0;align-self:start;padding-top:2px;">
+          <div style="font-size:1.05rem;font-weight:700;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
+          <div style="font-size:0.78rem;opacity:0.92;overflow-wrap:break-word;margin-top:1px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
+          <div style="font-family:ui-monospace,Menlo,monospace;font-size:0.95rem;font-weight:700;letter-spacing:3px;margin-top:3px;">${escapeHtml(staff.Code)}</div>
+          <div style="font-size:0.72rem;opacity:0.82;margin-top:3px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
+          <div style="font-size:0.6rem;opacity:0.7;margin-top:3px;">${escapeHtml(staff.StaffID)}</div>
         </div>
-        <div style="background:#fff;border-radius:10px;padding:8px;flex:0 0 auto;">
-          <img src="${qrUrl}" alt="QR" style="width:100px;height:100px;display:block;">
+        <div style="grid-area:qr;align-self:center;justify-self:center;background:#fff;border-radius:10px;padding:8px;">
+          <img src="${qrUrl}" alt="QR" style="width:96px;height:96px;display:block;">
         </div>
       </div>
     `;
