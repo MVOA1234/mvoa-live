@@ -613,15 +613,26 @@
     const date = dateStr || isoDateLocal(new Date());
     const dayLogs = logsForDate(date);
     const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
-    // A staff member can have more than one session on the same Date now
-    // (shifts crossing midnight, or two separate shifts in one day) — take
-    // the most recently started one as "today's" row in this table.
-    const withLog = rows.map(s => {
-      const matches = dayLogs.filter(x => x.StaffID === s.StaffID).sort((a, b) => b.CheckInTime.localeCompare(a.CheckInTime));
-      return { s, l: matches[0] };
+    // One row per SESSION, not per staff member — a staff member can have
+    // more than one session on the same Date (shifts crossing midnight, or
+    // two separate shifts in one day), and every one of them stays visible
+    // here, not just the latest. Staff with no session that date get a
+    // single "Not scanned" row instead.
+    const tableRows = [];
+    rows.forEach(s => {
+      const sessions = dayLogs.filter(x => x.StaffID === s.StaffID).sort((a, b) => a.CheckInTime.localeCompare(b.CheckInTime));
+      if (!sessions.length) { tableRows.push({ s, l: null }); return; }
+      sessions.forEach(l => tableRows.push({ s, l }));
     });
-    const onsite = withLog.filter(r => r.l && r.l.Status === 'CheckedIn').length;
-    const checkedOut = withLog.filter(r => r.l && r.l.Status === 'CheckedOut').length;
+
+    // Person-level summary (not session-level): "on-site" means currently
+    // has an open session anywhere, regardless of what date it started on
+    // — matches the "Currently checked in" panel below, not just this
+    // date's rows.
+    const openStaffIds = new Set(allLogsCache.filter(l => l.CheckInTime && !l.CheckOutTime).map(l => l.StaffID));
+    const scannedTodayIds = new Set(dayLogs.map(l => l.StaffID));
+    const onsite = rows.filter(s => openStaffIds.has(s.StaffID)).length;
+    const checkedOut = rows.filter(s => scannedTodayIds.has(s.StaffID) && !openStaffIds.has(s.StaffID)).length;
     const notScanned = rows.length - onsite - checkedOut;
 
     // Shifts cross midnight, so someone can be genuinely on-site right now
@@ -660,7 +671,7 @@
           <table class="mvoa-table">
             <thead><tr><th>Name</th><th>Agency</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
             <tbody>
-              ${withLog.length ? withLog.map(({ s, l }) => {
+              ${tableRows.length ? tableRows.map(({ s, l }) => {
                 const status = !l ? 'Not scanned' : (l.Status === 'CheckedOut' ? 'Checked out' : 'On-site');
                 const statusColor = !l ? '#6b7280' : (l.Status === 'CheckedOut' ? '#41464b' : '#1e6b33');
                 return `
