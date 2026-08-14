@@ -107,15 +107,19 @@ const HSModule = (function () {
     const today = WEEKDAY_ABBR[(now || new Date()).getDay()];
     return item.DayApplicability.split(',').map(s => s.trim()).includes(today);
   }
-  // Which landscape zone is due today, for the Zone Rotation template's
-  // banner (ShowZoneOfDay=TRUE) — Mon=Zone1..Fri=Zone5, Sat/Sun=catch-up
-  // for whatever zone didn't get finished that week. Purely a display
-  // label; the checklist items themselves are the same 7 activities
-  // regardless of which zone they're being applied to that day.
+  // Which landscape zone is due on a given day, for the Zone Rotation
+  // template's banner (ShowZoneOfDay=TRUE) — Mon=Zone1..Fri=Zone5,
+  // Sat/Sun=catch-up for whatever zone didn't get finished that week.
+  // Purely a display label; the checklist items themselves are the
+  // same 7 activities regardless of which zone they're being applied
+  // to that day. Exported as a day-indexed table (0=Sun..6=Sat, same
+  // as Date.getDay()) rather than just a "for today" function, so the
+  // Housekeeping Schedule report below can show every weekday's zone
+  // at once, not just today's.
+  const LANDSCAPE_ZONE_BY_DOW = { 1: 'Zone 1', 2: 'Zone 2', 3: 'Zone 3', 4: 'Zone 4', 5: 'Zone 5' };
   function landscapeZoneForToday(now) {
     const day = (now || new Date()).getDay(); // 0=Sun..6=Sat
-    const zoneByDay = { 1: 'Zone 1', 2: 'Zone 2', 3: 'Zone 3', 4: 'Zone 4', 5: 'Zone 5' };
-    return zoneByDay[day] || 'Catch-up / Pending Work';
+    return LANDSCAPE_ZONE_BY_DOW[day] || 'Catch-up / Pending Work';
   }
 
   function rowsToObjs(rows, cols) {
@@ -1696,8 +1700,26 @@ const HSModule = (function () {
   // rather than a hardcoded key, same as the rest of this file's
   // data-driven approach — if no category's label contains
   // "Housekeeping", this screen says so instead of guessing.
+  //
+  // SPECIAL CASE — Zone Rotation (ShowZoneOfDay=TRUE): here the 7
+  // checklist items themselves run every day (that's genuinely correct
+  // — DayApplicability is blank on them), but WHICH physical zone
+  // they're applied to changes by day (Mon=Zone1..Fri=Zone5, Sat/Sun=
+  // catch-up), and that per-day zone number is what the user actually
+  // wants to see here, not a same-every-day checkmark. So for any
+  // template with ShowZoneOfDay=TRUE, every item row shows the zone
+  // label (via LANDSCAPE_ZONE_BY_DOW, the same table the checklist
+  // screen's own "today's zone" banner uses) instead of a ✓/— cell.
   // ───────────────────────────────────────────────────────────
   const HK_SCHEDULE_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const HK_SCHEDULE_DOW_INDEX = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 };
+
+  function isZoneRotationTemplate(t) {
+    return t.ShowZoneOfDay === 'TRUE' || t.ShowZoneOfDay === 'true' || t.ShowZoneOfDay === true || t.ShowZoneOfDay === '1';
+  }
+  function zoneLabelForScheduleDay(day) {
+    return LANDSCAPE_ZONE_BY_DOW[HK_SCHEDULE_DOW_INDEX[day]] || 'Catch-up';
+  }
 
   function housekeepingCategory() {
     return categoriesCache.find(c => /housekeeping/i.test(c.Label || '') || /housekeeping/i.test(c.CategoryKey || ''));
@@ -1766,13 +1788,15 @@ const HSModule = (function () {
           </tr></thead>
           <tbody>
             ${groups.map(g => `
-              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;">${escapeHtml(g.template.Name)}</td></tr>
+              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;">${escapeHtml(g.template.Name)}${isZoneRotationTemplate(g.template) ? ' <span class="muted" style="font-weight:400;font-size:0.75rem;">— same tasks, different zone each weekday; Sat/Sun = catch-up</span>' : ''}</td></tr>
               ${g.items.map(row => `
                 <tr>
                   <td style="position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(row.item.CheckItem)}</td>
                   ${row.note
                     ? `<td colspan="${HK_SCHEDULE_DAYS.length}" style="text-align:center;" class="muted">${escapeHtml(row.note)}</td>`
-                    : row.flags.map(f => `<td style="text-align:center;">${f ? '<span style="color:green;font-weight:700;">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}
+                    : isZoneRotationTemplate(g.template)
+                      ? HK_SCHEDULE_DAYS.map(d => `<td style="text-align:center;font-size:0.78rem;">${escapeHtml(zoneLabelForScheduleDay(d))}</td>`).join('')
+                      : row.flags.map(f => `<td style="text-align:center;">${f ? '<span style="color:green;font-weight:700;">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}
                 </tr>
               `).join('')}
             `).join('')}
@@ -1784,6 +1808,7 @@ const HSModule = (function () {
     container.querySelector('#hs-hk-schedule-pdf').addEventListener('click', () => {
       const pdfRows = [];
       groups.forEach(g => {
+        const zoneRotation = isZoneRotationTemplate(g.template);
         const header = { 'Zone / Task': g.template.Name };
         HK_SCHEDULE_DAYS.forEach(d => header[d] = '');
         pdfRows.push(header);
@@ -1791,6 +1816,8 @@ const HSModule = (function () {
           const rowObj = { 'Zone / Task': row.item.CheckItem };
           if (row.note) {
             HK_SCHEDULE_DAYS.forEach((d, i) => rowObj[d] = i === 0 ? row.note : '');
+          } else if (zoneRotation) {
+            HK_SCHEDULE_DAYS.forEach(d => rowObj[d] = zoneLabelForScheduleDay(d));
           } else {
             HK_SCHEDULE_DAYS.forEach((d, i) => rowObj[d] = row.flags[i] ? '✓' : '—');
           }
