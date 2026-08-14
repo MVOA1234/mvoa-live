@@ -7,19 +7,26 @@
 // module.
 //
 // Everything on this screen is scoped by the Day / Week / Month
-// dropdown at the top, EXCEPT that "open"/"outstanding" counts are
-// deliberately NOT period-scoped — see the note below. Definitions
-// used throughout:
+// dropdown at the top EXCEPT the Daily Operations "Open" tiles and
+// "By Assignee" — see the note below. Definitions used throughout:
 //   - "New Tickets" = CreatedDate falls inside the selected range
 //     (same shape as the rest of the app's weekly/monthly reports).
-//   - "Open" / "Total Failed Tasks" / "Total Tasks Not Performed" /
-//     "By Assignee" = every matching ticket that is open RIGHT NOW,
+//   - "Open — Daily Operations" / "Open — Failed Tasks (Plant Rounds)"
+//     / "By Assignee" = every matching ticket that is open RIGHT NOW,
 //     regardless of when it was created — the Day/Week/Month dropdown
-//     does not filter these. This matches how Daily Operations' own
-//     always-current Open Tickets / By Assignee views work; only
-//     "New Tickets" and the DG Set Operations / In-Out Log figures
-//     below (which are genuinely period-windowed activity, not a
-//     standing backlog) move with the dropdown.
+//     does NOT filter these (confirmed with the user: "open" means
+//     "all open till now", a standing backlog, not a per-period count).
+//     This matches Daily Operations' own always-current Open Tickets /
+//     By Assignee views.
+//   - Everything else DOES move with the dropdown: "New Tickets"
+//     above, "Total Failed Tasks" / "Total Tasks Not Performed" below
+//     (CreatedDate within the selected range — also confirmed with the
+//     user, since these sit alongside the already period-windowed DG
+//     Set Operations and In/Out Log tiles in the same section and
+//     should move together with them, not stay pinned like the Daily
+//     Ops open-ticket counts do), and the DG Set Operations / In-Out
+//     Log figures themselves (genuinely period-windowed activity, not
+//     a standing backlog).
 //   - A Plant-Rounds-originated OpsTask is identified the same way
 //     module-hs.js's own Failed Items Log / Task Resolution reports
 //     already do: Title starts with "Plant Rounds: " (every
@@ -178,16 +185,17 @@ const DashboardModule = (function () {
     };
   }
 
-  function computePlantRoundsTaskStats(tasks) {
-    // Also NOT period-scoped, for the same reason as Open Daily Ops
-    // above — these are the currently-outstanding failed / not-
-    // performed items, not just ones that surfaced within the
-    // selected window. openFailedTasks (Daily Ops tile, above) always
-    // equals totalFailedTasks + notPerformed (this function) — same
-    // underlying open Plant-Rounds tickets, just split by subtype here.
-    const openPlantRounds = tasks.filter(t => t.Status === 'Open' && isPlantRoundsTask(t));
-    const notPerformed = openPlantRounds.filter(isNotPerformedTask).length;
-    return { totalFailedTasks: openPlantRounds.length - notPerformed, notPerformed };
+  function computePlantRoundsTaskStats(tasks, range) {
+    // UNLIKE the Daily Ops "Open" tiles above, this IS period-scoped —
+    // it counts failures/not-performed events that occurred within the
+    // selected Day/Week/Month window (by CreatedDate), matching the DG
+    // Set Operations and In/Out Log tiles in this same section, which
+    // are also period-windowed. Confirmed with the user: these numbers
+    // should move with the dropdown, not stay pinned to "currently
+    // open" the way the Daily Ops open-ticket counts do.
+    const inPeriod = tasks.filter(t => isPlantRoundsTask(t) && inRange(t.CreatedDate, range));
+    const notPerformed = inPeriod.filter(isNotPerformedTask).length;
+    return { totalFailedTasks: inPeriod.length - notPerformed, notPerformed };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -346,7 +354,7 @@ const DashboardModule = (function () {
     }
 
     const opsStats = computeDailyOpsStats(tasks, range, assigneeOptions);
-    const prTaskStats = computePlantRoundsTaskStats(tasks);
+    const prTaskStats = computePlantRoundsTaskStats(tasks, range);
 
     bodyEl.innerHTML = `
       <div class="card" style="max-width:900px;margin:0 0 18px 0;">
