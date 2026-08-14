@@ -58,7 +58,10 @@
                                 // staff member's agency name still resolves even after that
                                 // agency is deactivated
   let agenciesCache = [];      // active agencies only — used for lists/dropdowns
-  let staffCache = [];
+  let allStaffCache = [];      // every staff row, active or not — used for StaffID/Code
+                                // uniqueness checks (a deactivated staff member's code must
+                                // still be treated as taken, not recycled)
+  let staffCache = [];         // active staff only — used for the list/table
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -88,7 +91,8 @@
     ]);
     allAgenciesCache = rowsToObjs(agencyRows, AGENCY_COLS);
     agenciesCache = allAgenciesCache.filter(a => isActive(a.Active));
-    staffCache = rowsToObjs(staffRows, STAFF_COLS).filter(s => isActive(s.Active));
+    allStaffCache = rowsToObjs(staffRows, STAFF_COLS);
+    staffCache = allStaffCache.filter(s => isActive(s.Active));
   }
 
   function agencyName(agencyId) {
@@ -309,6 +313,10 @@
     let pendingAadhaarPhoto = null;
     const existingPhotoUrl = isEdit ? staff.PhotoURL : '';
     const existingAadhaarUrl = isEdit ? staff.AadhaarPhotoURL : '';
+    // Shown immediately (not just "generated on save") so the field
+    // never looks like an unresponsive button — re-checked for
+    // collisions against the freshest data at actual save time below.
+    const previewCode = isEdit ? staff.Code : genStaffCode(allStaffCache.map(s => s.Code));
 
     host.innerHTML = `
       <div class="card">
@@ -342,8 +350,8 @@
 
         <label>4-digit attendance code</label>
         <div class="mvoa-row" style="margin:4px 0 12px;">
-          <input type="text" id="att-staff-code" readonly value="${isEdit && staff.Code ? escapeHtml(staff.Code) : '(generated on save)'}" style="max-width:150px;font-family:ui-monospace,Menlo,monospace;font-size:18px;font-weight:700;letter-spacing:4px;text-align:center;">
-          <span class="muted" style="font-size:0.8rem;">Auto-generated · staff uses this to check in/out without a phone</span>
+          <input type="text" id="att-staff-code" readonly value="${escapeHtml(previewCode)}" style="max-width:110px;font-family:ui-monospace,Menlo,monospace;font-size:18px;font-weight:700;letter-spacing:4px;text-align:center;">
+          <span class="muted" style="font-size:0.8rem;">Auto-generated (not clickable) · staff uses this to check in/out without a phone</span>
         </div>
 
         <label>Staff photo (required)</label>
@@ -406,7 +414,10 @@
           const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
           const existingCodes = existingRows.slice(1).map(r => r[7]).filter(Boolean); // Code column
           staffId = MVOA.nextId('STF', existingIds);
-          code = genStaffCode(existingCodes);
+          // Reuse the code already shown on screen unless someone else just
+          // took it in the meantime (rare) — avoids the displayed code
+          // silently differing from what actually gets saved.
+          code = existingCodes.includes(previewCode) ? genStaffCode(existingCodes) : previewCode;
         }
 
         let photoUrl = existingPhotoUrl;
