@@ -20,12 +20,25 @@
 //                                 4-digit numeric Code, for gate entry
 //                                 without a phone — mirrors the original
 //                                 standalone app's scheme exactly.
-//   Phase 3 (next)            — Settings (retention days for old scan
-//                                 photos). NOTE: there is no separate
-//                                 app PIN — access is controlled by the
-//                                 same login + PermissionsMatrix_* model
-//                                 as Daily Ops / Plant Rounds (see below)
-//   Phase 4 (THIS UPDATE)     — Attendance Logs: QR scan check-in/out
+//   Phase 3 (THIS UPDATE)     — Settings: a single "Retention (days)"
+//                                 value. Attendance records (who/when/
+//                                 status) are kept forever — only the
+//                                 CheckIn/CheckOutPhotoURL LINKS on old
+//                                 AttLog rows are cleared once they pass
+//                                 this age, run passively (best-effort,
+//                                 once per session) whenever the module
+//                                 opens. This does NOT delete the actual
+//                                 photo file from Google Drive — clearing
+//                                 the link in the Sheet is all this app
+//                                 can do client-side; reclaiming Drive
+//                                 storage itself would need a small addition
+//                                 to the photoUploadUrl Apps Script, which
+//                                 lives outside this codebase. NOTE: there
+//                                 is no separate app PIN — access is
+//                                 controlled by the same login +
+//                                 PermissionsMatrix_* model as Daily Ops /
+//                                 Plant Rounds (see below)
+//   Phase 4 (done)            — Attendance Logs: QR scan check-in/out
 //                                 (plus a 4-digit code fallback for staff
 //                                 without a badge in hand), a live daily
 //                                 register with real per-staff status
@@ -55,9 +68,10 @@
 // AccessLevel rows, edited directly in the Sheet. A Title with no row
 // for a Section has NO access to it; 'Edit' vs 'ReadOnly' controls
 // whether they can change data. DEV role always has full access.
-// Three independent Sections exist: 'Agencies', 'Staff', 'Logs' (the
-// scan/register screen) — e.g. Security can be given Edit on Logs (so
-// they can run the scan station) but no access to Agencies/Staff at all.
+// Four independent Sections exist: 'Agencies', 'Staff', 'Logs' (the
+// scan/register screen), 'Settings' — e.g. Security can be given Edit on
+// Logs (so they can run the scan station) but no access to Agencies/
+// Staff/Settings at all.
 // Separately, the new hard-Delete actions (as opposed to Deactivate) are
 // further restricted to MVOA.isAdmin(user) regardless of the matrix —
 // permanently destroying attendance history is treated like the app's
@@ -68,13 +82,16 @@
   const AGENCY_COLS = ['AgencyID', 'Name', 'Type', 'Active', 'CreatedDate', 'CreatedBy'];
   const STAFF_COLS = ['StaffID', 'AgencyID', 'Name', 'Role', 'Phone', 'AadhaarNumber', 'AadhaarPhotoURL', 'Code', 'PhotoURL', 'Active', 'CreatedDate', 'CreatedBy'];
   const LOG_COLS = ['LogID', 'StaffID', 'Date', 'CheckInTime', 'CheckInPhotoURL', 'CheckOutTime', 'CheckOutPhotoURL', 'Status', 'LoggedBy'];
+  const SETTINGS_COLS = ['Key', 'Value'];
   const SECTION_AGENCIES = 'Agencies';
   const SECTION_STAFF = 'Staff';
   const SECTION_LOGS = 'Logs';
+  const SECTION_SETTINGS = 'Settings';
   const NAV_TABS = [
     { key: SECTION_AGENCIES, label: 'Agencies' },
     { key: SECTION_STAFF, label: 'Staff' },
-    { key: SECTION_LOGS, label: 'Attendance Log' }
+    { key: SECTION_LOGS, label: 'Attendance Log' },
+    { key: SECTION_SETTINGS, label: 'Settings' }
   ];
 
   let allAgenciesCache = [];   // every agency, active or not — used for name lookups so a
@@ -88,6 +105,9 @@
   let allLogsCache = [];       // every AttLog row, all dates — filtered client-side per date;
                                 // re-read fresh (not from this cache) at the moment of an
                                 // actual scan, see processAttendanceScan()
+  let attSettingsCache = {};   // Key -> Value map from AttSettings, e.g. {RetentionDays: '90'}
+  let retentionCleanupRan = false; // throttle: run the passive photo-link cleanup at most
+                                    // once per session, not on every mount()
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -118,10 +138,11 @@
   function canViewSection(section, user) { return MVOA.canViewAttendanceSection(section, user); }
 
   async function loadAll(force) {
-    const [agencyRows, staffRows, logRows] = await Promise.all([
+    const [agencyRows, staffRows, logRows, settingsRows] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.attAgencies),
       MVOA.sheetsRead(MVOA.TABS.attStaff),
       MVOA.sheetsRead(MVOA.TABS.attLog),
+      MVOA.sheetsRead(MVOA.TABS.attSettings),
       MVOA.loadAttendancePermissionsMatrix(force)
     ]);
     allAgenciesCache = rowsToObjs(agencyRows, AGENCY_COLS);
@@ -129,6 +150,8 @@
     allStaffCache = rowsToObjs(staffRows, STAFF_COLS);
     staffCache = allStaffCache.filter(s => isActive(s.Active));
     allLogsCache = rowsToObjs(logRows, LOG_COLS);
+    attSettingsCache = {};
+    rowsToObjs(settingsRows, SETTINGS_COLS).forEach(o => { attSettingsCache[o.Key] = o.Value; });
   }
 
   function agencyName(agencyId) {
@@ -152,6 +175,10 @@
     } catch (e) {
       container.innerHTML = `<p class="error-text">Could not load Staff Attendance: ${escapeHtml(e.message)}</p>`;
       return;
+    }
+    if (!retentionCleanupRan) {
+      retentionCleanupRan = true;
+      runPhotoRetentionCleanup(); // fire-and-forget, best-effort — see its own comment
     }
     const accessibleTabs = NAV_TABS.filter(t => canViewSection(t.key, user));
     if (!accessibleTabs.length) {
@@ -182,6 +209,7 @@
     const host = container.querySelector('#att-tab-body');
     if (activeTab === SECTION_STAFF) renderStaffList(host, user);
     else if (activeTab === SECTION_LOGS) renderAttendanceLogs(host, user);
+    else if (activeTab === SECTION_SETTINGS) renderSettings(host, user);
     else renderAgenciesList(host, user);
   }
 
@@ -886,6 +914,94 @@
     }
     modal.querySelector('#att-code-submit').addEventListener('click', submit);
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  }
+
+  // ─────────────────────────────────────────────
+  // SETTINGS (Phase 3 — NEW): a single Retention (days) value.
+  // ─────────────────────────────────────────────
+  async function saveSetting(key, value) {
+    const rows = await MVOA.sheetsRead(MVOA.TABS.attSettings);
+    const existing = rowsToObjs(rows, SETTINGS_COLS).find(o => o.Key === key);
+    if (existing) {
+      await MVOA.sheetsUpdateRow(MVOA.TABS.attSettings, existing.rowNumber, [key, value]);
+    } else {
+      await MVOA.sheetsAppend(MVOA.TABS.attSettings, [key, value]);
+    }
+  }
+
+  function renderSettings(host, user) {
+    const editable = canEditSection(SECTION_SETTINGS, user);
+    const days = attSettingsCache.RetentionDays || '';
+    host.innerHTML = `
+      <div class="card">
+        <h3 style="margin-top:0;">Attendance Photo Retention</h3>
+        <p class="muted" style="margin:0 0 12px;">
+          Check-in/check-out photo LINKS on attendance records older than this many days are cleared automatically (the record itself — who, when, status — is always kept). Leave blank or 0 to keep photo links forever.
+        </p>
+        <p class="muted" style="margin:0 0 12px;font-size:0.82rem;">
+          Note: this only clears the link stored here — it does not delete the photo file itself from Google Drive. Reclaiming that storage would need to be done separately in Drive, or by extending the photo-upload script.
+        </p>
+        <label>Retention (days)
+          <input type="number" id="att-settings-retention" min="0" step="1" value="${escapeHtml(days)}" placeholder="e.g. 90" ${editable ? '' : 'disabled'} style="max-width:150px;">
+        </label>
+        ${editable ? `
+          <div class="mvoa-row" style="margin-top:12px;">
+            <button id="att-settings-save" class="btn-primary">Save</button>
+          </div>
+          <p class="error-text" id="att-settings-error"></p>
+          <p class="muted" id="att-settings-saved" style="font-size:0.85rem;"></p>
+        ` : ''}
+      </div>
+    `;
+    if (editable) {
+      host.querySelector('#att-settings-save').addEventListener('click', async () => {
+        const val = host.querySelector('#att-settings-retention').value.trim();
+        const errEl = host.querySelector('#att-settings-error');
+        const savedEl = host.querySelector('#att-settings-saved');
+        errEl.textContent = ''; savedEl.textContent = '';
+        if (val && !/^\d+$/.test(val)) { errEl.textContent = 'Enter a whole number of days, or leave blank.'; return; }
+        const btn = host.querySelector('#att-settings-save');
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          await saveSetting('RetentionDays', val);
+          attSettingsCache.RetentionDays = val;
+          savedEl.textContent = 'Saved.';
+        } catch (e) {
+          errEl.textContent = 'Save failed: ' + e.message;
+        } finally {
+          btn.disabled = false; btn.textContent = 'Save';
+        }
+      });
+    }
+  }
+
+  // Passive, best-effort cleanup — fired once per session from mount(),
+  // never awaited/blocking. Clears CheckInPhotoURL/CheckOutPhotoURL on
+  // AttLog rows whose check-out (or check-in, if still open somehow past
+  // retention) is older than RetentionDays. Capped at 40 rows per run so
+  // a large first-time backlog doesn't fire dozens of writes at once —
+  // it just catches up gradually over the next several app opens instead.
+  async function runPhotoRetentionCleanup() {
+    try {
+      const days = parseInt(attSettingsCache.RetentionDays, 10);
+      if (!days || days <= 0) return; // blank/0 = keep forever
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      const logRows = await MVOA.sheetsRead(MVOA.TABS.attLog);
+      const logs = rowsToObjs(logRows, LOG_COLS);
+      let cleaned = 0;
+      for (const l of logs) {
+        if (cleaned >= 40) break;
+        if (!l.CheckInPhotoURL && !l.CheckOutPhotoURL) continue;
+        const refDate = l.CheckOutTime || l.CheckInTime;
+        if (!refDate || new Date(refDate) >= cutoff) continue;
+        try {
+          await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, l.rowNumber,
+            [l.LogID, l.StaffID, l.Date, l.CheckInTime, '', l.CheckOutTime, '', l.Status, l.LoggedBy]);
+          cleaned++;
+        } catch (e) { /* best-effort — retried next session */ }
+      }
+    } catch (e) { /* best-effort — retention cleanup should never block the app */ }
   }
 
   MVOA.registerModule('attendance', {
