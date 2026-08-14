@@ -20,21 +20,20 @@
 //                                 4-digit numeric Code, for gate entry
 //                                 without a phone — mirrors the original
 //                                 standalone app's scheme exactly.
-//   Phase 3 (THIS UPDATE)     — Settings: a single "Retention (days)"
+//   Phase 3 (done)             — Settings: a single "Retention (days)"
 //                                 value. Attendance records (who/when/
 //                                 status) are kept forever — only the
-//                                 CheckIn/CheckOutPhotoURL LINKS on old
-//                                 AttLog rows are cleared once they pass
+//                                 CheckIn/CheckOutPhotoURL photos on old
+//                                 AttLog rows are cleaned up once they pass
 //                                 this age, run passively (best-effort,
 //                                 once per session) whenever the module
-//                                 opens. This does NOT delete the actual
-//                                 photo file from Google Drive — clearing
-//                                 the link in the Sheet is all this app
-//                                 can do client-side; reclaiming Drive
-//                                 storage itself would need a small addition
-//                                 to the photoUploadUrl Apps Script, which
-//                                 lives outside this codebase. NOTE: there
-//                                 is no separate app PIN — access is
+//                                 opens: the actual Drive file is deleted
+//                                 via MVOA.deletePhotoFromDrive (reclaims
+//                                 storage — needs a 'delete' action added
+//                                 to the photoUploadUrl Apps Script; see
+//                                 deployment notes), then the link is
+//                                 cleared from the Sheet either way. NOTE:
+//                                 there is no separate app PIN — access is
 //                                 controlled by the same login +
 //                                 PermissionsMatrix_* model as Daily Ops /
 //                                 Plant Rounds (see below)
@@ -199,8 +198,8 @@
         <strong>🪪 Staff Attendance</strong>
       </div>
       ${accessibleTabs.length > 1 ? `
-        <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
-          ${accessibleTabs.map(t => `<button class="${t.key === activeTab ? 'btn-primary' : 'btn-secondary'} att-tab-btn" data-tab="${t.key}">${t.label}</button>`).join('')}
+        <div class="mvoa-row" style="margin-bottom:12px;gap:6px;">
+          ${accessibleTabs.map(t => `<button class="${t.key === activeTab ? 'btn-primary' : 'btn-secondary'} att-tab-btn" data-tab="${t.key}" style="flex:1;min-width:0;padding:8px 4px;font-size:0.85rem;">${t.label}</button>`).join('')}
         </div>
       ` : ''}
       <div id="att-tab-body"></div>
@@ -227,6 +226,7 @@
           Service-provider agencies whose staff attend site (Security, Housekeeping, Landscaping, etc.).
         </p>
         ${editable ? '<button id="att-agency-add" class="btn-primary" style="margin-bottom:12px;">+ Add Agency</button>' : ''}
+        <div style="overflow-x:auto;">
         <table class="mvoa-table">
           <thead><tr><th>Name</th><th>Type</th>${editable ? '<th></th>' : ''}</tr></thead>
           <tbody>
@@ -235,15 +235,18 @@
                 <td>${escapeHtml(a.Name)}</td>
                 <td>${escapeHtml(a.Type)}</td>
                 ${editable ? `
-                  <td style="white-space:normal;">
-                    <button class="btn-secondary att-agency-edit" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;">Edit</button>
-                    <button class="btn-secondary att-agency-delete" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;">Deactivate</button>
-                    ${canHardDelete ? `<button class="btn-secondary att-agency-harddelete" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;color:#b3261e;">Delete</button>` : ''}
+                  <td>
+                    <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;">
+                      <button class="btn-secondary att-agency-edit" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">Edit</button>
+                      <button class="btn-secondary att-agency-delete" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">Deactivate</button>
+                      ${canHardDelete ? `<button class="btn-secondary att-agency-harddelete" data-id="${escapeHtml(a.AgencyID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;color:#b3261e;">Delete</button>` : ''}
+                    </div>
                   </td>` : ''}
               </tr>
             `).join('') : `<tr><td colspan="${editable ? 3 : 2}" class="muted">No agencies yet.</td></tr>`}
           </tbody>
         </table>
+        </div>
       </div>
     `;
     if (editable) {
@@ -376,12 +379,13 @@
       <div class="card">
         <p class="muted" style="margin:0 0 10px;">
           Staff enrolled per agency, with photo, Aadhaar and a 4-digit attendance code for gate entry.
-          Use "QR" to view/print a staff member's scan badge.
+          Use "ID Card" to view/print a staff member's printable badge.
         </p>
         ${editable ? `
           <button id="att-staff-add" class="btn-primary" style="margin-bottom:12px;" ${agenciesCache.length ? '' : 'disabled'}>+ Add Staff</button>
           ${agenciesCache.length ? '' : '<p class="muted" style="margin:0 0 12px;">Add an agency first (Agencies tab) before enrolling staff.</p>'}
         ` : ''}
+        <div style="overflow-x:auto;">
         <table class="mvoa-table">
           <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Code</th><th></th></tr></thead>
           <tbody>
@@ -391,23 +395,26 @@
                 <td>${escapeHtml(agencyName(s.AgencyID))}</td>
                 <td>${escapeHtml(s.Role)}</td>
                 <td style="font-family:ui-monospace,Menlo,monospace;letter-spacing:2px;">${escapeHtml(s.Code)}</td>
-                <td style="white-space:normal;">
-                  <button class="btn-secondary att-staff-qr" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;">QR</button>
-                  ${editable ? `
-                    <button class="btn-secondary att-staff-edit" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;">Edit</button>
-                    <button class="btn-secondary att-staff-delete" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;">Deactivate</button>
-                    ${canHardDelete ? `<button class="btn-secondary att-staff-harddelete" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;color:#b3261e;">Delete</button>` : ''}
-                  ` : ''}
+                <td>
+                  <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;">
+                    <button class="btn-secondary att-staff-qr" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">ID Card</button>
+                    ${editable ? `
+                      <button class="btn-secondary att-staff-edit" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">Edit</button>
+                      <button class="btn-secondary att-staff-delete" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">Deactivate</button>
+                      ${canHardDelete ? `<button class="btn-secondary att-staff-harddelete" data-id="${escapeHtml(s.StaffID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;color:#b3261e;">Delete</button>` : ''}
+                    ` : ''}
+                  </div>
                 </td>
               </tr>
             `).join('') : `<tr><td colspan="5" class="muted">No staff enrolled yet.</td></tr>`}
           </tbody>
         </table>
+        </div>
       </div>
     `;
     host.querySelectorAll('.att-staff-qr').forEach(btn => btn.addEventListener('click', () => {
       const s = staffCache.find(x => x.StaffID === btn.dataset.id);
-      if (s) showStaffQrBadge(s);
+      if (s) showStaffIdCard(s);
     }));
     if (editable) {
       const addBtn = host.querySelector('#att-staff-add');
@@ -604,28 +611,76 @@
     }
   }
 
-  // Read-only QR badge viewer/printer — generates the same 'MVOA-ATT:'
-  // payload the scanner expects via a public QR-image API (no new QR-
-  // generation library needed client-side, mirroring how this app already
-  // depends on external services for Sheets/Drive). Staff ID only, no
-  // personal data, is encoded in the image.
-  function showStaffQrBadge(staff) {
+  // ID CARD — printable staff badge: MVOA logo, name, agency, QR code
+  // (the same 'MVOA-ATT:' payload the scanner expects, via the same
+  // public QR-image API used elsewhere — no new QR-generation library
+  // needed client-side), and the 4-digit fallback code. Card background
+  // is the deeper brand green (#2e5e1e) the user specified. The logo is
+  // the SAME assets/logo.png this app already uses elsewhere (see
+  // MVOA.logoSvg() in shared.js) — resolved to an absolute URL via
+  // window.location.href so it still loads correctly inside the
+  // separate about:blank print window below, which has no base URL of
+  // its own to resolve a relative path against.
+  const ID_CARD_GREEN = '#2e5e1e';
+  function idCardInnerHtml(staff, logoUrl, qrUrl) {
+    return `
+      <div style="width:280px;background:${ID_CARD_GREEN};border-radius:18px;padding:22px 20px;text-align:center;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;">
+        <div style="background:#fff;border-radius:10px;padding:8px 14px;display:inline-block;margin-bottom:14px;">
+          <img src="${logoUrl}" alt="MVOA" style="height:38px;display:block;">
+        </div>
+        <div style="font-size:0.68rem;letter-spacing:2px;opacity:0.85;margin-bottom:8px;">STAFF ID</div>
+        <div style="font-size:1.1rem;font-weight:700;margin-bottom:2px;line-height:1.3;">${escapeHtml(staff.Name)}</div>
+        <div style="font-size:0.82rem;opacity:0.92;margin-bottom:2px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
+        <div style="font-size:0.75rem;opacity:0.8;margin-bottom:14px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
+        <div style="background:#fff;border-radius:10px;padding:10px;display:inline-block;">
+          <img src="${qrUrl}" alt="QR" style="width:140px;height:140px;display:block;">
+        </div>
+        <div style="margin-top:12px;font-size:0.7rem;opacity:0.85;">Code</div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:1.25rem;font-weight:700;letter-spacing:6px;">${escapeHtml(staff.Code)}</div>
+        <div style="margin-top:10px;font-size:0.62rem;opacity:0.7;">${escapeHtml(staff.StaffID)}</div>
+      </div>
+    `;
+  }
+
+  function showStaffIdCard(staff) {
+    const logoUrl = new URL('assets/logo.png', window.location.href).href;
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent('MVOA-ATT:' + staff.StaffID)}`;
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent('MVOA-ATT:' + staff.StaffID)}`;
     modal.innerHTML = `
       <div class="ops-qr-box">
-        <h3 style="margin-top:0;">${escapeHtml(staff.Name)}</h3>
-        <p class="muted" style="margin:0 0 10px;">${escapeHtml(agencyName(staff.AgencyID))}${staff.Role ? ' · ' + escapeHtml(staff.Role) : ''}</p>
-        <img src="${qrUrl}" alt="QR badge" style="width:200px;height:200px;">
-        <p class="muted" style="margin:10px 0;">Scan to check in/out · Code: <strong>${escapeHtml(staff.Code)}</strong></p>
-        <div class="mvoa-row">
+        ${idCardInnerHtml(staff, logoUrl, qrUrl)}
+        <div class="mvoa-row" style="margin-top:16px;justify-content:center;gap:10px;">
+          <button id="att-badge-print" class="btn-primary">🖨 Print ID Card</button>
           <button id="att-badge-close" class="btn-secondary">Close</button>
         </div>
       </div>
     `;
     document.body.appendChild(modal);
     modal.querySelector('#att-badge-close').addEventListener('click', () => modal.remove());
+    modal.querySelector('#att-badge-print').addEventListener('click', () => printStaffIdCard(staff, logoUrl, qrUrl));
+  }
+
+  function printStaffIdCard(staff, logoUrl, qrUrl) {
+    const win = window.open('', '_blank');
+    win.document.write(`
+      <html>
+      <head>
+        <title>ID Card — ${escapeHtml(staff.Name)}</title>
+        <style>
+          body { margin:0; padding:24px; display:flex; align-items:center; justify-content:center; min-height:100vh; font-family:-apple-system, Arial, sans-serif; background:#f2f2f2; box-sizing:border-box; }
+          @media print { body { background:#fff; padding:0; } }
+        </style>
+      </head>
+      <body>
+        ${idCardInnerHtml(staff, logoUrl, qrUrl)}
+        <script>
+          window.onload = () => { window.print(); };
+        </script>
+      </body>
+      </html>
+    `);
+    win.document.close();
   }
 
   // ─────────────────────────────────────────────
@@ -689,12 +744,13 @@
           </label>
           <span class="muted" style="font-size:0.85rem;">On-site (since this date): <strong>${onsite}</strong> · Checked out: <strong>${checkedOut}</strong> · Not scanned: <strong>${notScanned}</strong> · Total active: <strong>${rows.length}</strong></span>
         </div>
-        ${editable ? `
-          <div class="mvoa-row" style="margin-bottom:14px;gap:10px;">
+        <div class="mvoa-row" style="margin-bottom:14px;gap:10px;flex-wrap:wrap;">
+          ${editable ? `
             <button id="att-log-scan" class="btn-primary">📷 Scan QR</button>
             <button id="att-log-code" class="btn-secondary">🔢 Enter Code</button>
-          </div>
-        ` : ''}
+          ` : ''}
+          <button id="att-log-report" class="btn-secondary">📊 Monthly Report</button>
+        </div>
         <div style="max-height:60vh;overflow:auto;">
           <table class="mvoa-table">
             <thead><tr><th>Name</th><th>Agency</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
@@ -722,6 +778,148 @@
       host.querySelector('#att-log-scan').addEventListener('click', () => openAttendanceScanner(host, user));
       host.querySelector('#att-log-code').addEventListener('click', () => openCodeEntry(host, user));
     }
+    host.querySelector('#att-log-report').addEventListener('click', () => renderMonthlyReport(host, user));
+  }
+
+  // Monthly Attendance Report — read-only, so available to anyone who can
+  // view the Logs section at all (not gated to `editable`). Lets the user
+  // pick a month and optionally narrow to one agency, then shows per-staff
+  // Days Present / Sessions / Total Hours for that month, with a
+  // "Print to PDF" button using the browser's native print-to-PDF (same
+  // pattern as module-hs.js's printTablePdf).
+  function renderMonthlyReport(host, user, monthStr, agencyFilter) {
+    const month = monthStr || isoDateLocal(new Date()).slice(0, 7); // YYYY-MM
+    const agencyId = agencyFilter || 'ALL';
+
+    // Staff pool for the dropdown/report: active staff, optionally narrowed
+    // to one agency. Agencies list includes inactive ones too (allAgenciesCache)
+    // so a report can still be pulled for an agency that's since been
+    // deactivated, as long as its staff still have log rows.
+    const staffPool = staffCache.filter(s => agencyId === 'ALL' || s.AgencyID === agencyId)
+      .slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
+
+    const monthLogs = allLogsCache.filter(l => l.Date && l.Date.slice(0, 7) === month);
+
+    const summary = staffPool.map(s => {
+      const sessions = monthLogs.filter(l => l.StaffID === s.StaffID);
+      const daysPresent = new Set(sessions.map(l => l.Date)).size;
+      let totalMs = 0;
+      sessions.forEach(l => {
+        if (l.CheckInTime && l.CheckOutTime) {
+          const ms = new Date(l.CheckOutTime) - new Date(l.CheckInTime);
+          if (ms > 0) totalMs += ms;
+        }
+      });
+      const totalHours = (totalMs / 3600000);
+      return {
+        Name: s.Name,
+        Agency: agencyName(s.AgencyID),
+        'Days Present': daysPresent,
+        Sessions: sessions.length,
+        'Total Hours': totalHours ? totalHours.toFixed(1) : '0.0'
+      };
+    });
+
+    const monthLabel = (() => {
+      const [y, m] = month.split('-').map(Number);
+      return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+    })();
+
+    host.innerHTML = `
+      <div class="card">
+        <button id="att-report-back" class="btn-secondary" style="margin-bottom:14px;">← Back to Attendance Log</button>
+        <h3 style="margin-top:0;">📊 Monthly Attendance Report</h3>
+        <div class="mvoa-row" style="margin-bottom:14px;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+          <label style="margin:0;">Month
+            <input type="month" id="att-report-month" value="${escapeHtml(month)}">
+          </label>
+          <label style="margin:0;">Agency
+            <select id="att-report-agency">
+              <option value="ALL" ${agencyId === 'ALL' ? 'selected' : ''}>All Agencies</option>
+              ${allAgenciesCache.map(a => `<option value="${escapeHtml(a.AgencyID)}" ${a.AgencyID === agencyId ? 'selected' : ''}>${escapeHtml(a.Name)}</option>`).join('')}
+            </select>
+          </label>
+          <button id="att-report-print" class="btn-primary">🖨 Print to PDF</button>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="mvoa-table">
+            <thead><tr><th>Name</th><th>Agency</th><th>Days Present</th><th>Sessions</th><th>Total Hours</th></tr></thead>
+            <tbody>
+              ${summary.length ? summary.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.Name)}</td>
+                  <td>${escapeHtml(r.Agency)}</td>
+                  <td>${r['Days Present']}</td>
+                  <td>${r.Sessions}</td>
+                  <td>${r['Total Hours']}</td>
+                </tr>
+              `).join('') : `<tr><td colspan="5" class="muted">No staff${agencyId === 'ALL' ? '' : ' for this agency'}.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    host.querySelector('#att-report-back').addEventListener('click', () => renderAttendanceLogs(host, user));
+    host.querySelector('#att-report-month').addEventListener('change', (e) => renderMonthlyReport(host, user, e.target.value, agencyId));
+    host.querySelector('#att-report-agency').addEventListener('change', (e) => renderMonthlyReport(host, user, month, e.target.value));
+    host.querySelector('#att-report-print').addEventListener('click', () => {
+      const agencyLabel = agencyId === 'ALL' ? 'All Agencies' : agencyName(agencyId);
+      printAttendanceReportPdf(
+        `Monthly Attendance — ${monthLabel} — ${agencyLabel}`,
+        ['Name', 'Agency', 'Days Present', 'Sessions', 'Total Hours'],
+        summary
+      );
+    });
+  }
+
+  // Browser print-to-PDF for the monthly report — same pattern as
+  // module-hs.js's printTablePdf: opens a blank tab, writes a standalone
+  // styled HTML page, and triggers window.print() on load (user picks
+  // "Save as PDF" in the print dialog). Module-local since only this
+  // module needs it.
+  function printAttendanceReportPdf(title, columns, rows) {
+    const win = window.open('', '_blank');
+    const tableRows = rows.map(r => `<tr>${columns.map(c => `<td>${escapeHtml(String(r[c] !== undefined && r[c] !== '' && r[c] !== null ? r[c] : '—'))}</td>`).join('')}</tr>`).join('');
+    win.document.write(`
+      <html>
+      <head>
+        <title>${escapeHtml(title)}</title>
+        <style>
+          body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
+          h1 { color: #2e5e1e; font-size: 1.3rem; margin-bottom: 4px; }
+          .muted { color: #6b7280; font-size: 0.85rem; margin-top: 0; }
+          table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+          th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.8rem; white-space: nowrap; }
+          th { background: #f5f6f8; }
+          .back-btn {
+            display: inline-block; margin-bottom: 16px; padding: 10px 18px;
+            border-radius: 8px; border: none; background: #2e5e1e; color: white;
+            font-size: 0.95rem; font-weight: 600; cursor: pointer;
+          }
+          @media print { .back-btn { display: none; } }
+        </style>
+      </head>
+      <body>
+        <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
+        <h1>MVOA Staff Attendance — ${escapeHtml(title)}</h1>
+        <p class="muted">Generated ${new Date().toLocaleString()}</p>
+        <table>
+          <thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+          <tbody>${tableRows || `<tr><td colspan="${columns.length}">No data.</td></tr>`}</tbody>
+        </table>
+        <script>
+          window.onload = () => { window.print(); };
+          document.getElementById('back-to-app-btn').addEventListener('click', () => {
+            window.close();
+            setTimeout(() => {
+              document.body.innerHTML = '<p style="padding:20px;">You can close this tab/window now and return to the MVOA app in your other tab.</p>';
+            }, 300);
+          });
+        </script>
+      </body>
+      </html>
+    `);
+    win.document.close();
   }
 
   // Applies the check-in/check-out rule for one staff member, right now —
@@ -939,7 +1137,7 @@
           Check-in/check-out photo LINKS on attendance records older than this many days are cleared automatically (the record itself — who, when, status — is always kept). Leave blank or 0 to keep photo links forever.
         </p>
         <p class="muted" style="margin:0 0 12px;font-size:0.82rem;">
-          Note: this only clears the link stored here — it does not delete the photo file itself from Google Drive. Reclaiming that storage would need to be done separately in Drive, or by extending the photo-upload script.
+          This also deletes the photo file itself from Google Drive to reclaim storage — that part requires the "delete" action to be added to your photo-upload Apps Script (see deployment notes). If that hasn't been added yet, the link here is still cleared on schedule, but the file stays in Drive until the script is updated.
         </p>
         <label>Retention (days)
           <input type="number" id="att-settings-retention" min="0" step="1" value="${escapeHtml(days)}" placeholder="e.g. 90" ${editable ? '' : 'disabled'} style="max-width:150px;">
@@ -976,11 +1174,17 @@
   }
 
   // Passive, best-effort cleanup — fired once per session from mount(),
-  // never awaited/blocking. Clears CheckInPhotoURL/CheckOutPhotoURL on
-  // AttLog rows whose check-out (or check-in, if still open somehow past
-  // retention) is older than RetentionDays. Capped at 40 rows per run so
-  // a large first-time backlog doesn't fire dozens of writes at once —
-  // it just catches up gradually over the next several app opens instead.
+  // never awaited/blocking. For AttLog rows whose check-out (or check-in,
+  // if still open somehow past retention) is older than RetentionDays:
+  // deletes the actual photo file(s) from Drive via MVOA.deletePhotoFromDrive
+  // (reclaims storage — requires the 'delete' action to have been added to
+  // the photoUploadUrl Apps Script; see deployment notes), THEN clears the
+  // link from the Sheet regardless of whether the Drive delete succeeded —
+  // a stale link pointing at nothing is still worth clearing even if the
+  // file couldn't be removed (e.g. the script hasn't been updated yet).
+  // Capped at 40 rows per run so a large first-time backlog doesn't fire
+  // dozens of writes/deletes at once — it catches up gradually over the
+  // next several app opens instead.
   async function runPhotoRetentionCleanup() {
     try {
       const days = parseInt(attSettingsCache.RetentionDays, 10);
@@ -996,6 +1200,8 @@
         const refDate = l.CheckOutTime || l.CheckInTime;
         if (!refDate || new Date(refDate) >= cutoff) continue;
         try {
+          if (l.CheckInPhotoURL) { try { await MVOA.deletePhotoFromDrive(l.CheckInPhotoURL); } catch (e) { /* Drive file may already be gone, or script not updated yet — still clear the link below */ } }
+          if (l.CheckOutPhotoURL) { try { await MVOA.deletePhotoFromDrive(l.CheckOutPhotoURL); } catch (e) { /* same as above */ } }
           await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, l.rowNumber,
             [l.LogID, l.StaffID, l.Date, l.CheckInTime, '', l.CheckOutTime, '', l.Status, l.LoggedBy]);
           cleaned++;
