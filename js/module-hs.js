@@ -1718,6 +1718,7 @@ const HSModule = (function () {
     return t.ShowZoneOfDay === 'TRUE' || t.ShowZoneOfDay === 'true' || t.ShowZoneOfDay === true || t.ShowZoneOfDay === '1';
   }
   function zoneLabelForScheduleDay(day) {
+    if (day === 'Sun') return null; // no activity shown on Sunday in this report
     return LANDSCAPE_ZONE_BY_DOW[HK_SCHEDULE_DOW_INDEX[day]] || 'Catch-up';
   }
 
@@ -1727,18 +1728,25 @@ const HSModule = (function () {
 
   function itemDayFlags(item, templateFrequency) {
     const raw = (item.DayApplicability || '').trim();
+    let flags;
     if (!raw) {
       // No explicit day list: a Daily template's item runs every day;
       // anything else (Weekly/Monthly/BiMonthly with no override) has
       // no fixed weekday of its own — leave the row blank rather than
       // guess one.
-      return { flags: HK_SCHEDULE_DAYS.map(() => templateFrequency === 'Daily'), note: '' };
-    }
-    if (raw === 'WeeklyOnce') {
+      flags = HK_SCHEDULE_DAYS.map(() => templateFrequency === 'Daily');
+    } else if (raw === 'WeeklyOnce') {
       return { flags: HK_SCHEDULE_DAYS.map(() => false), note: 'Weekly (any day)' };
+    } else {
+      const days = raw.split(',').map(s => s.trim());
+      flags = HK_SCHEDULE_DAYS.map(d => days.includes(d));
     }
-    const days = raw.split(',').map(s => s.trim());
-    return { flags: HK_SCHEDULE_DAYS.map(d => days.includes(d)), note: '' };
+    // Housekeeping Schedule report: no activities are shown on Sunday
+    // (staff off day), regardless of the underlying DayApplicability
+    // data — this only affects this report's display, not actual
+    // checklist-filling/due logic elsewhere.
+    flags[HK_SCHEDULE_DAYS.indexOf('Sun')] = false;
+    return { flags, note: '' };
   }
 
   function renderHousekeepingSchedule(container) {
@@ -1792,14 +1800,14 @@ const HSModule = (function () {
           </tr></thead>
           <tbody>
             ${groups.map(g => `
-              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;white-space:normal;word-wrap:break-word;">${escapeHtml(g.template.Name)}${isZoneRotationTemplate(g.template) ? ' <span class="muted" style="font-weight:400;font-size:0.75rem;">— same tasks, different zone each weekday; Sat/Sun = catch-up</span>' : ''}</td></tr>
+              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;white-space:normal;word-wrap:break-word;">${escapeHtml(g.template.Name)}${isZoneRotationTemplate(g.template) ? ' <span class="muted" style="font-weight:400;font-size:0.75rem;">— same tasks, different zone each weekday; Sat = catch-up; no activity Sun</span>' : ''}</td></tr>
               ${g.items.map(row => `
                 <tr>
                   <td style="position:sticky;left:0;z-index:1;background:#fff;padding:6px 8px;white-space:normal;word-wrap:break-word;overflow-wrap:break-word;">${escapeHtml(row.item.CheckItem)}</td>
                   ${row.note
                     ? `<td colspan="${HK_SCHEDULE_DAYS.length}" style="text-align:center;" class="muted">${escapeHtml(row.note)}</td>`
                     : isZoneRotationTemplate(g.template)
-                      ? HK_SCHEDULE_DAYS.map(d => `<td style="text-align:center;font-size:0.78rem;padding:6px 4px;">${escapeHtml(zoneLabelForScheduleDay(d))}</td>`).join('')
+                      ? HK_SCHEDULE_DAYS.map(d => { const zl = zoneLabelForScheduleDay(d); return `<td style="text-align:center;font-size:0.78rem;padding:6px 4px;">${zl ? escapeHtml(zl) : '<span class="muted">—</span>'}</td>`; }).join('')
                       : row.flags.map(f => `<td style="text-align:center;padding:6px 4px;">${f ? '<span style="color:green;font-weight:700;">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}
                 </tr>
               `).join('')}
@@ -1821,7 +1829,7 @@ const HSModule = (function () {
           if (row.note) {
             HK_SCHEDULE_DAYS.forEach((d, i) => rowObj[d] = i === 0 ? row.note : '');
           } else if (zoneRotation) {
-            HK_SCHEDULE_DAYS.forEach(d => rowObj[d] = zoneLabelForScheduleDay(d));
+            HK_SCHEDULE_DAYS.forEach(d => rowObj[d] = zoneLabelForScheduleDay(d) || '—');
           } else {
             HK_SCHEDULE_DAYS.forEach((d, i) => rowObj[d] = row.flags[i] ? '✓' : '—');
           }
