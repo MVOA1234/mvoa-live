@@ -1781,22 +1781,26 @@ const HSModule = (function () {
 
     bodyEl.innerHTML = `
       <div style="max-height:72vh;overflow:auto;">
-        <table class="mvoa-table" style="table-layout:fixed;width:100%;border-collapse:separate;border-spacing:0;">
+        <table class="mvoa-table" style="table-layout:fixed;width:100%;min-width:900px;border-collapse:separate;border-spacing:0;">
+          <colgroup>
+            <col style="width:260px;">
+            ${HK_SCHEDULE_DAYS.map(() => '<col style="width:calc((100% - 260px) / 7);">').join('')}
+          </colgroup>
           <thead><tr>
-            <th style="width:220px;text-align:left;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Zone / Task</th>
-            ${HK_SCHEDULE_DAYS.map(d => `<th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">${d}</th>`).join('')}
+            <th style="text-align:left;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;padding:6px 8px;">Zone / Task</th>
+            ${HK_SCHEDULE_DAYS.map(d => `<th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;padding:6px 4px;">${d}</th>`).join('')}
           </tr></thead>
           <tbody>
             ${groups.map(g => `
-              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;">${escapeHtml(g.template.Name)}${isZoneRotationTemplate(g.template) ? ' <span class="muted" style="font-weight:400;font-size:0.75rem;">— same tasks, different zone each weekday; Sat/Sun = catch-up</span>' : ''}</td></tr>
+              <tr><td colspan="${HK_SCHEDULE_DAYS.length + 1}" style="background:#f5f7fa;font-weight:700;padding:6px 8px;white-space:normal;word-wrap:break-word;">${escapeHtml(g.template.Name)}${isZoneRotationTemplate(g.template) ? ' <span class="muted" style="font-weight:400;font-size:0.75rem;">— same tasks, different zone each weekday; Sat/Sun = catch-up</span>' : ''}</td></tr>
               ${g.items.map(row => `
                 <tr>
-                  <td style="position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(row.item.CheckItem)}</td>
+                  <td style="position:sticky;left:0;z-index:1;background:#fff;padding:6px 8px;white-space:normal;word-wrap:break-word;overflow-wrap:break-word;">${escapeHtml(row.item.CheckItem)}</td>
                   ${row.note
                     ? `<td colspan="${HK_SCHEDULE_DAYS.length}" style="text-align:center;" class="muted">${escapeHtml(row.note)}</td>`
                     : isZoneRotationTemplate(g.template)
-                      ? HK_SCHEDULE_DAYS.map(d => `<td style="text-align:center;font-size:0.78rem;">${escapeHtml(zoneLabelForScheduleDay(d))}</td>`).join('')
-                      : row.flags.map(f => `<td style="text-align:center;">${f ? '<span style="color:green;font-weight:700;">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}
+                      ? HK_SCHEDULE_DAYS.map(d => `<td style="text-align:center;font-size:0.78rem;padding:6px 4px;">${escapeHtml(zoneLabelForScheduleDay(d))}</td>`).join('')
+                      : row.flags.map(f => `<td style="text-align:center;padding:6px 4px;">${f ? '<span style="color:green;font-weight:700;">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}
                 </tr>
               `).join('')}
             `).join('')}
