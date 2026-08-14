@@ -60,7 +60,12 @@ const MVOA = (function () {
     expenseVotes: 'Expense_Votes',
     approvalMatrix: 'ApprovalMatrix',
     permissionsMatrixDailyOps: 'PermissionsMatrix_DailyOps',
-    permissionsMatrixPlantRounds: 'PermissionsMatrix_PlantRounds'
+    permissionsMatrixPlantRounds: 'PermissionsMatrix_PlantRounds',
+    permissionsMatrixAttendance: 'PermissionsMatrix_Attendance',
+    attAgencies: 'AttAgencies',
+    attStaff: 'AttStaff',
+    attLog: 'AttLog',
+    attSettings: 'AttSettings'
   };
 
   // ───────────────────────────────────────────────────────────
@@ -594,6 +599,53 @@ const MVOA = (function () {
     return !!sectionMatrix[displayTitle(user)];
   }
 
+  // ───────────────────────────────────────────────────────────
+  // STAFF ATTENDANCE — same Section|Title|AccessLevel matrix shape as
+  // Plant Rounds, distinct sheet tab. This is the ONLY access gate for
+  // Staff Attendance — there is no separate app PIN like the old
+  // standalone version; a user's existing MVOA login + their Title's
+  // row here (Edit/ReadOnly/no row = no access) controls everything,
+  // including the old app's "Admin" area (Section: 'Admin').
+  // ───────────────────────────────────────────────────────────
+  let attendancePermMatrixCache = null;
+  let attendancePermMatrixRowsCache = null;
+  async function loadAttendancePermissionsMatrix(force) {
+    if (attendancePermMatrixCache && !force) return attendancePermMatrixCache;
+    const rows = await sheetsRead(TABS.permissionsMatrixAttendance);
+    const map = {};
+    const rawRows = [];
+    rows.slice(1).forEach((r, i) => {
+      const section = (r[0] || '').trim();
+      const title = (r[1] || '').trim();
+      const level = (r[2] || '').trim();
+      if (!section || !title) return;
+      rawRows.push({ rowNumber: i + 2, Section: section, Title: title, AccessLevel: level });
+      if (!level) return;
+      if (!map[section]) map[section] = {};
+      map[section][title] = level;
+    });
+    attendancePermMatrixCache = map;
+    attendancePermMatrixRowsCache = rawRows;
+    return attendancePermMatrixCache;
+  }
+  function getAttendancePermissionsMatrixRows() {
+    return attendancePermMatrixRowsCache || [];
+  }
+  function canEditAttendanceSection(sectionName, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = attendancePermMatrixCache && attendancePermMatrixCache[sectionName];
+    if (!sectionMatrix) return true; // no rows for this section yet — stays open until populated
+    return sectionMatrix[displayTitle(user)] === 'Edit';
+  }
+  function canViewAttendanceSection(sectionName, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = attendancePermMatrixCache && attendancePermMatrixCache[sectionName];
+    if (!sectionMatrix) return true;
+    return !!sectionMatrix[displayTitle(user)];
+  }
+
   // Checks whether a given AssignedTo value ("user:Name" or "tech:ID") —
   // not necessarily the currently logged-in user — would have Edit
   // rights on a category. Used to warn at assignment time (New Task /
@@ -1017,6 +1069,7 @@ const MVOA = (function () {
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
     loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection, getPlantRoundsPermissionsMatrixRows,
+    loadAttendancePermissionsMatrix, canEditAttendanceSection, canViewAttendanceSection, getAttendancePermissionsMatrixRows,
     loadNotesForTask, appendNote,
     logAudit, nextId, createOpsTask,
     capturePhoto, pickAttachment, uploadPhotoToDrive,
