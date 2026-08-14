@@ -162,6 +162,42 @@ const MVOA = (function () {
     return r.json();
   }
 
+  // Permanently removes specific rows (1-based, including the header as row
+  // 1) via the Sheets API's batchUpdate/deleteDimension request — a real row
+  // delete, unlike sheetsUpdateRow (which only overwrites content in place)
+  // or sheetsWrite (which doesn't shrink a sheet, just rewrites the top of
+  // it). Used for cascade-deleting attendance history when an agency or
+  // staff record is permanently removed, not just deactivated. rowNumbers
+  // need not be pre-sorted — sorted descending internally so deleting from
+  // the bottom up never shifts the position of rows still queued for
+  // deletion within the same call.
+  async function sheetsDeleteRows(sheetName, rowNumbers) {
+    if (!rowNumbers || !rowNumbers.length) return;
+    const token = await getServiceAccountToken();
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}?fields=sheets.properties(sheetId,title)`;
+    const metaRes = await fetchWithTimeout(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!metaRes.ok) throw new Error(`Could not look up sheet ID for ${sheetName}: ${metaRes.status}`);
+    const meta = await metaRes.json();
+    const sheetMeta = (meta.sheets || []).find(s => s.properties && s.properties.title === sheetName);
+    if (!sheetMeta) throw new Error(`sheetsDeleteRows: no tab named "${sheetName}"`);
+    const sheetId = sheetMeta.properties.sheetId;
+    const sorted = [...new Set(rowNumbers)].sort((a, b) => b - a);
+    const requests = sorted.map(rowNumber => ({
+      deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: rowNumber - 1, endIndex: rowNumber } }
+    }));
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}:batchUpdate`;
+    const r = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ requests })
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`Sheets delete rows error (${sheetName}): ${r.status} ${body}`);
+    }
+    return r.json();
+  }
+
   // Creates a new tab with the given header row if it doesn't already exist —
   // used for month-per-tab sheets (e.g. ExpenseSheet_Aug26) that get created
   // the first time an entry lands in a given month, rather than pre-seeded.
@@ -1064,7 +1100,7 @@ const MVOA = (function () {
   return {
     CFG, TABS,
     loadConfig, saveConfig,
-    sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow, sheetsEnsureTab,
+    sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow, sheetsEnsureTab, sheetsDeleteRows,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
