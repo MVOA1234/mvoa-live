@@ -2337,6 +2337,16 @@ const HSModule = (function () {
     }
     function cellHtml(item, resultObj) {
       if (!resultObj) return '<span class="muted">—</span>';
+      // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
+      // mismatch is diagnosed. A result object WAS found for this cell
+      // (we're past the !resultObj check) but the cell is rendering
+      // blank — dump the raw object so we can see exactly what's in
+      // Result/Remarks/InputType instead of guessing.
+      if (/diesel level (before|after) top up/i.test(item.CheckItem || '')) {
+        console.log('[DG DEBUG] cellHtml for', item.CheckItem, 'InputType=' + JSON.stringify(item.InputType),
+          'Result=' + JSON.stringify(resultObj.Result), 'Remarks=' + JSON.stringify(resultObj.Remarks),
+          'fullObj=' + JSON.stringify(resultObj));
+      }
       if (item.InputType === 'Numeric') {
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
         const displayVal = numericDisplayValue(item, resultObj);
