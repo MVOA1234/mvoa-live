@@ -2282,6 +2282,21 @@ const HSModule = (function () {
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       if (!log) return null;
       const result = results.find(r => r.LogID === log.LogID && r.ItemID === itemId) || null;
+      // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
+      // mismatch is diagnosed. Only fires when a log WAS found (so this
+      // cell should plausibly have data) but the specific item wasn't
+      // matched — prints exactly what's in `results` for that LogID so
+      // we can see character-for-character why itemId isn't matching,
+      // instead of guessing.
+      if (!result && (itemId === 'ITM-9702' || itemId === 'ITM-9703')) {
+        console.log('[DG DEBUG]', {
+          lookingFor: itemId, lookingForLen: itemId.length, lookingForCodes: Array.from(itemId).map(c => c.charCodeAt(0)),
+          day, shift, dateStr, logId: log.LogID,
+          resultsForThisLog: results.filter(r => r.LogID === log.LogID).map(r => ({
+            ItemID: r.ItemID, len: r.ItemID.length, codes: Array.from(r.ItemID).map(c => c.charCodeAt(0)), Result: r.Result
+          }))
+        });
+      }
       if (!result) return null;
       // Carry the log's Overall Notes along with the result — used by
       // AssetList cells so an empty "nothing to report" entry (e.g. all
