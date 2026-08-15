@@ -1110,6 +1110,16 @@
   // (a full month, all agencies) print in landscape and may still span
   // multiple pages — narrowing via the Agency/Staff filters before
   // printing keeps it to a single page.
+  //
+  // A full month's Check-in/Check-out Times table can run to 60+ columns
+  // (2 per day). Left at its normal on-screen sizing ("width: max-content"),
+  // the print layout didn't shrink to the page width at all — anything
+  // past ~10-11 days silently printed off the edge of the page instead of
+  // wrapping, which is exactly what showed up as a truncated PDF. The
+  // @media print block below forces table-layout:fixed + width:100% so
+  // the table fits the printable page width, wrapping cell content
+  // instead of overflowing it — same fix as the Plant Rounds Monthly
+  // Report's printTablePdf.
   function printReportHtmlPdf(title, tableHtml) {
     const win = window.open('', '_blank');
     win.document.write(`
@@ -1128,7 +1138,13 @@
             border-radius: 8px; border: none; background: #2e5e1e; color: white;
             font-size: 0.95rem; font-weight: 600; cursor: pointer;
           }
-          @media print { .back-btn { display: none; } @page { size: landscape; } }
+          @media print {
+            .back-btn { display: none; }
+            table { table-layout: fixed; width: 100%; }
+            th, td { white-space: normal; word-break: break-word; font-size: 0.6rem; padding: 3px 4px; }
+            th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { width: 70px; }
+            @page { size: landscape; margin: 8mm; }
+          }
         </style>
       </head>
       <body>
