@@ -2274,6 +2274,15 @@ const HSModule = (function () {
     // one-line fix, not a deeper change.
     const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? activeRoundKeys() : [null];
     const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
+    // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
+    // mismatch is diagnosed. If ITM-9702/9703 aren't in `items`, no row
+    // is ever rendered for them and cellFor() is never even called with
+    // those itemIds — which would explain zero "item not matched" lines
+    // while the report still shows nothing for those rows.
+    console.log('[DG DEBUG] items for template', template.TemplateID, '(' + items.length + ' total):',
+      items.map(i => i.ItemID).join(', '));
+    console.log('[DG DEBUG] has ITM-9702?', items.some(i => i.ItemID === 'ITM-9702'),
+      'has ITM-9703?', items.some(i => i.ItemID === 'ITM-9703'));
 
     // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
     // mismatch is diagnosed. Logs each log for this template on its own
