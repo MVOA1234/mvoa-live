@@ -1959,8 +1959,16 @@ const HSModule = (function () {
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
     const round2 = (n) => Math.round(n * 100) / 100;
+    // The tank level carried into the START of a shift is whatever the
+    // PRECEDING shift's reading ended on — its After Top-Up level if it
+    // had one, otherwise its own single Before/legacy level. Needed to
+    // compute the "before the top-up" consumption leg below.
+    function endingLevel(row) {
+      if (!row) return null;
+      return row.dieselAfter != null ? row.dieselAfter : row.dieselBefore;
+    }
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i], next = rows[i + 1];
+      const r = rows[i], next = rows[i + 1], prev = rows[i - 1];
       r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
       // Sanity guard: a running-hours meter can never advance MORE than
@@ -1978,13 +1986,26 @@ const HSModule = (function () {
       if (typeof r.kwhGenerated === 'number' && r.kwhGenerated < 0) r.kwhGenerated = null; // a kWh meter can't run backwards either
       r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
       if (r.dieselAfter != null) {
-        // Top-up this shift — readings are all taken at shift start, so
-        // "before top-up" IS the start-of-shift level (no separate gap
-        // to measure before the top-up itself). The real consumption
-        // interval runs from right after the top-up through to the
-        // next shift's reading — same "this vs next" pattern as
-        // everything else, just anchored to "after" for this one shift.
-        r.dieselConsumedLitres = (next && next.dieselBefore != null) ? round2(pctToLitres(r.dieselAfter - next.dieselBefore)) : null;
+        // Top-up happened this shift — per the documented formula
+        // (DG_Set.docx) this is TWO consumption legs added together:
+        //   (a) from the PRECEDING shift's ending level down to this
+        //       shift's own Before Top-Up reading — consumption before
+        //       the top-up actually happened (which can be well into
+        //       the shift, not necessarily right at its start);
+        //   (b) from this shift's After Top-Up reading down to the
+        //       NEXT shift's own starting reading — consumption after
+        //       the top-up.
+        // Previously only leg (b) was computed, silently treating leg
+        // (a) as zero — which is why a shift with real DG runtime
+        // before its top-up was showing 0 consumed instead of a real
+        // number. If either leg is unknown, the total is genuinely
+        // unknown too (not just whichever leg happens to be available).
+        const beforeLevel = endingLevel(prev);
+        let legA = (beforeLevel != null && r.dieselBefore != null) ? pctToLitres(beforeLevel - r.dieselBefore) : null;
+        let legB = (next && next.dieselBefore != null) ? pctToLitres(r.dieselAfter - next.dieselBefore) : null;
+        if (typeof legA === 'number' && legA < 0) legA = null; // level can't have risen without a logged top-up — treat as unknown, not negative
+        if (typeof legB === 'number' && legB < 0) legB = null;
+        r.dieselConsumedLitres = (legA != null && legB != null) ? round2(legA + legB) : null;
       } else if (next && r.dieselBefore != null && next.dieselBefore != null) {
         r.dieselConsumedLitres = round2(pctToLitres(r.dieselBefore - next.dieselBefore));
       } else {
@@ -3220,10 +3241,11 @@ const HSModule = (function () {
         (isShiftBased && /diesel level before top up/i.test(i.CheckItem)))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
-    // Preload the last recorded reading for any running-hours meter
-    // item on this template, so the live guard below has it ready
-    // the moment the technician starts typing.
-    await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
+    // Preload the last recorded reading for any running-hours meter or
+    // Diesel Level Before Top Up item on this template, so the live
+    // guards below have it ready the moment the technician starts
+    // typing.
+    await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem) || /diesel level before top up/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
 
     const showZone = currentTemplate.ShowZoneOfDay === 'TRUE' || currentTemplate.ShowZoneOfDay === 'true';
     container.innerHTML = `
@@ -3517,6 +3539,25 @@ const HSModule = (function () {
               pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, belowLastReading: true };
               if (statusEl) {
                 statusEl.innerHTML = `⚠️ This is LOWER than the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — a running-hours meter can't go backwards. Please double-check this value.`;
+                statusEl.style.color = '#b3261e';
+              }
+              return;
+            }
+          }
+          // Diesel Level Before Top Up drives the Diesel Consumed math
+          // downstream — an unchanged reading from last time usually
+          // means the gauge wasn't actually rechecked (just re-typed
+          // from memory), which silently zeroes out that shift's
+          // consumption figure. Flagged through the same outlier-
+          // confirm mechanism as everything else: not blocked, but
+          // needs an explicit "yes, I checked" before it's accepted.
+          if (/diesel level before top up/i.test(item.CheckItem)) {
+            const last = lastReadingCache[itemId];
+            if (last && val === last.value) {
+              pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, outlierFlag: true, outlierConfirmed: false };
+              if (confirmWrap) { confirmWrap.classList.remove('hidden'); if (confirmCb) confirmCb.checked = false; }
+              if (statusEl) {
+                statusEl.innerHTML = `⚠️ This is the SAME as the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — please recheck the gauge rather than re-entering the same number from memory.`;
                 statusEl.style.color = '#b3261e';
               }
               return;
