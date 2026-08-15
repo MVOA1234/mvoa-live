@@ -2106,7 +2106,13 @@ const HSModule = (function () {
       // raw timestamp's calendar date — matches the Monthly Matrix
       // report and the Dashboard, so a 3rd-shift reading logged after
       // midnight shows under the same day everywhere in the app.
-      const r = rows.find(rr => shiftDayBucket(rr.timestamp, rr.shift) === d.toDateString() && rr.shift === shiftKey);
+      // If two submissions land on the same day+shift bucket (a
+      // duplicate/retry submission), prefer the most recent one instead
+      // of just whichever row happens to come first — otherwise an
+      // earlier, less complete submission can silently shadow a later,
+      // correct one.
+      const matches = rows.filter(rr => shiftDayBucket(rr.timestamp, rr.shift) === d.toDateString() && rr.shift === shiftKey);
+      const r = matches.length <= 1 ? matches[0] : matches.reduce((latest, rr) => new Date(rr.timestamp) > new Date(latest.timestamp) ? rr : latest);
       return r ? r[field] : null;
     }
     function metricRow(label, unit, field, totalFn) {
@@ -2274,72 +2280,27 @@ const HSModule = (function () {
     // one-line fix, not a deeper change.
     const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? activeRoundKeys() : [null];
     const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
-    // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
-    // mismatch is diagnosed. If ITM-9702/9703 aren't in `items`, no row
-    // is ever rendered for them and cellFor() is never even called with
-    // those itemIds — which would explain zero "item not matched" lines
-    // while the report still shows nothing for those rows.
-    console.log('[DG DEBUG] items for template', template.TemplateID, '(' + items.length + ' total):',
-      items.map(i => i.ItemID).join(', '));
-    console.log('[DG DEBUG] has ITM-9702?', items.some(i => i.ItemID === 'ITM-9702'),
-      'has ITM-9703?', items.some(i => i.ItemID === 'ITM-9703'));
-
-    // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
-    // mismatch is diagnosed. Logs each log for this template on its own
-    // line (not one line with a collapsed array — the console's text
-    // filter can't see inside a collapsed array preview) with its
-    // computed shiftDayBucket, so we can see directly which calendar day
-    // cellFor() will search for it under. Filter the console by the
-    // LogID (e.g. "HSLOG-0244") to find its line and read "bucket=".
-    logsCache.filter(l => l.TemplateID === template.TemplateID).forEach(l => {
-      console.log('[DG DEBUG]', l.LogID, 'Shift=' + l.Shift, 'Timestamp=' + l.Timestamp, 'bucket=' + shiftDayBucket(l.Timestamp, l.Shift));
-    });
-    // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
-    // mismatch is diagnosed. cellFor() uses .find() which returns only
-    // the FIRST log matching a given day+shift bucket — if two logs
-    // land on the same bucket, whichever comes first in logsCache wins
-    // and the other's data (e.g. HSLOG-0244's) is silently invisible in
-    // the report, no matter how correct its own data is. Flag any such
-    // collision directly instead of guessing.
-    {
-      const byBucket = {};
-      logsCache.filter(l => l.TemplateID === template.TemplateID).forEach(l => {
-        const key = l.Shift + '|' + shiftDayBucket(l.Timestamp, l.Shift);
-        byBucket[key] = byBucket[key] || [];
-        byBucket[key].push(l.LogID);
-      });
-      Object.keys(byBucket).forEach(key => {
-        if (byBucket[key].length > 1) {
-          console.log('[DG DEBUG] DUPLICATE BUCKET COLLISION', key, '->', byBucket[key].join(', '),
-            '(only the FIRST one, "' + byBucket[key][0] + '", will ever show in the report for this day+shift)');
-        }
-      });
+    // Two logs can land on the same day+shift bucket when a technician's
+    // checklist got submitted twice for the same shift (e.g. a retry
+    // after a network hiccup, or a genuine resubmission). Picking
+    // whichever happens to come first in logsCache is arbitrary and can
+    // silently hide a later, more complete submission's data — instead,
+    // always prefer the MOST RECENT log for a given day+shift, since a
+    // later submission is the one meant to stand for that shift.
+    function logForDayShift(day, shift) {
+      const dateStr = new Date(year, month - 1, day).toDateString();
+      const matches = logsCache.filter(l => l.TemplateID === template.TemplateID &&
+        shiftDayBucket(l.Timestamp, shift) === dateStr &&
+        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      if (!matches.length) return null;
+      if (matches.length === 1) return matches[0];
+      return matches.reduce((latest, l) => new Date(l.Timestamp) > new Date(latest.Timestamp) ? l : latest);
     }
 
     function cellFor(itemId, day, shift) {
-      const dateStr = new Date(year, month - 1, day).toDateString();
-      const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
-        shiftDayBucket(l.Timestamp, shift) === dateStr &&
-        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      const log = logForDayShift(day, shift);
       if (!log) return null;
       const result = results.find(r => r.LogID === log.LogID && r.ItemID === itemId) || null;
-      // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
-      // mismatch is diagnosed. Only fires when a log WAS found (so this
-      // cell should plausibly have data) but the specific item wasn't
-      // matched — prints exactly what's in `results` for that LogID so
-      // we can see character-for-character why itemId isn't matching,
-      // instead of guessing.
-      if (!result && (itemId === 'ITM-9702' || itemId === 'ITM-9703')) {
-        console.log('[DG DEBUG] item not matched', log.LogID, 'lookingFor=' + itemId,
-          'lookingForCodes=' + Array.from(itemId).map(c => c.charCodeAt(0)).join(','));
-        results.filter(r => r.LogID === log.LogID).forEach(r => {
-          console.log('[DG DEBUG]', log.LogID, 'hasItem=' + r.ItemID,
-            'codes=' + Array.from(r.ItemID).map(c => c.charCodeAt(0)).join(','), 'Result=' + r.Result);
-        });
-        if (!results.some(r => r.LogID === log.LogID)) {
-          console.log('[DG DEBUG]', log.LogID, 'NO RESULTS AT ALL FOUND FOR THIS LOGID IN results ARRAY');
-        }
-      }
       if (!result) return null;
       // Carry the log's Overall Notes along with the result — used by
       // AssetList cells so an empty "nothing to report" entry (e.g. all
@@ -2358,16 +2319,6 @@ const HSModule = (function () {
     }
     function cellHtml(item, resultObj) {
       if (!resultObj) return '<span class="muted">—</span>';
-      // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
-      // mismatch is diagnosed. A result object WAS found for this cell
-      // (we're past the !resultObj check) but the cell is rendering
-      // blank — dump the raw object so we can see exactly what's in
-      // Result/Remarks/InputType instead of guessing.
-      if (/diesel level (before|after) top up/i.test(item.CheckItem || '')) {
-        console.log('[DG DEBUG] cellHtml for', item.CheckItem, 'InputType=' + JSON.stringify(item.InputType),
-          'Result=' + JSON.stringify(resultObj.Result), 'Remarks=' + JSON.stringify(resultObj.Remarks),
-          'fullObj=' + JSON.stringify(resultObj));
-      }
       if (item.InputType === 'Numeric') {
         const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
         const displayVal = numericDisplayValue(item, resultObj);
@@ -2422,17 +2373,11 @@ const HSModule = (function () {
       return resultObj.Result || '';
     }
     function performedByFor(day, shift) {
-      const dateStr = new Date(year, month - 1, day).toDateString();
-      const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
-        shiftDayBucket(l.Timestamp, shift) === dateStr &&
-        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      const log = logForDayShift(day, shift);
       return log ? log.PerformedBy : '';
     }
     function notesFor(day, shift) {
-      const dateStr = new Date(year, month - 1, day).toDateString();
-      const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
-        shiftDayBucket(l.Timestamp, shift) === dateStr &&
-        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+      const log = logForDayShift(day, shift);
       return log ? (log.Notes || '') : '';
     }
 
@@ -3301,6 +3246,32 @@ const HSModule = (function () {
         </div>
       `;
       container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
+      return;
+    }
+
+    // Re-verify right as the actual checklist form loads for the chosen
+    // shift/round — closes the gap between "shift-selection screen was
+    // rendered" (which only checked hasSubmittedToday at THAT moment)
+    // and "technician actually opens the form", during which another
+    // submission for the same shift could land (a second device, a
+    // stale/cached screen left open, etc.). Full-screen block here
+    // instead of letting them fill out the whole form only to hit the
+    // plain-text error at final submit — this is the duplicate-log
+    // scenario that caused HSLOG-0240/HSLOG-0244 (and the Jul 30 1st/2nd
+    // shift pairs) to collide on the same day+shift in the reports.
+    if (isDaily && (isShiftBased || isRoundBased) && currentShift && hasSubmittedToday(currentTemplate.TemplateID, currentShift)) {
+      const existingLog = todaysLogFor(currentTemplate.TemplateID, currentShift);
+      container.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="hs-back-scan" class="btn-secondary">← Back</button>
+          <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        </div>
+        <div class="card" style="max-width:420px;margin:0;">
+          <p style="margin:0;font-weight:700;color:#b3261e;">⚠️ ${shiftLabel(currentShift)} has already been submitted today${existingLog && existingLog.PerformedBy ? ' by ' + escapeHtml(existingLog.PerformedBy) : ''}${existingLog && existingLog.Timestamp ? ' at ' + new Date(existingLog.Timestamp).toLocaleTimeString() : ''}.</p>
+          <p class="muted" style="margin:8px 0 0;">Submitting again would create a duplicate entry for this shift. Go back and pick a different shift, or contact your facility manager if this looks wrong.</p>
+        </div>
+      `;
+      container.querySelector('#hs-back-scan').addEventListener('click', () => { currentShift = ''; renderChecklistForm(container); });
       return;
     }
 
