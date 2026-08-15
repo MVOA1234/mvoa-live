@@ -708,7 +708,9 @@
         <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.05rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
         <div style="grid-area:photo;display:flex;flex-direction:column;align-items:center;">
           ${photoBox}
-          <div style="font-size:0.62rem;opacity:0.85;margin-top:4px;text-align:center;overflow-wrap:break-word;max-width:84px;">${staff.Phone ? escapeHtml(staff.Phone) : ''}</div>
+          <div style="font-size:0.62rem;opacity:0.85;margin-top:4px;text-align:center;overflow-wrap:break-word;max-width:84px;">
+            ${staff.Phone ? `<svg width="9" height="9" viewBox="0 0 24 24" fill="#fff" style="vertical-align:-1px;margin-right:3px;"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>${escapeHtml(staff.Phone)}` : ''}
+          </div>
         </div>
         <div style="grid-area:info;min-width:0;align-self:start;padding-top:2px;">
           <div style="font-size:1.05rem;font-weight:700;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
