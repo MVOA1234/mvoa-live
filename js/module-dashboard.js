@@ -266,9 +266,15 @@ const DashboardModule = (function () {
       if (!relevantIds.includes(r.ItemID)) return;
       const log = logs.find(l => l.LogID === r.LogID);
       if (!log || !log.Shift) return;
-      // Bucket by the day the SHIFT started, not the day the reading's
-      // raw timestamp happens to fall on — see shiftDayBucket().
-      const dateKey = shiftDayBucket(log.Timestamp, log.Shift);
+      // NOTE: kept on the reading's raw calendar date, NOT
+      // shiftDayBucket() — this key only exists to merge same-shift
+      // submissions under one LogID; the actual period scoping
+      // (inPeriodRows below) already keys off each row's real
+      // timestamp directly, so bucketing this key wouldn't change
+      // which period a row counts toward, but COULD risk merging two
+      // genuinely distinct logs into one row if they land on the same
+      // bucketed day+shift, silently corrupting both. Not worth it.
+      const dateKey = new Date(log.Timestamp).toDateString();
       const key = dateKey + '|' + log.Shift;
       if (!byDateShift[key]) byDateShift[key] = { shift: log.Shift, timestamp: log.Timestamp };
       const entry = byDateShift[key];
