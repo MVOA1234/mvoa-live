@@ -2092,7 +2092,11 @@ const HSModule = (function () {
 
     function cellFor(d, shiftIdx, field) {
       const shiftKey = shifts[shiftIdx];
-      const r = rows.find(rr => new Date(rr.timestamp).toDateString() === d.toDateString() && rr.shift === shiftKey);
+      // Bucket by the day the shift STARTED (shiftDayBucket), not the
+      // raw timestamp's calendar date — matches the Monthly Matrix
+      // report and the Dashboard, so a 3rd-shift reading logged after
+      // midnight shows under the same day everywhere in the app.
+      const r = rows.find(rr => shiftDayBucket(rr.timestamp, rr.shift) === d.toDateString() && rr.shift === shiftKey);
       return r ? r[field] : null;
     }
     function metricRow(label, unit, field, totalFn) {
