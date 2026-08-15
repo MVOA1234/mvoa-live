@@ -2294,6 +2294,27 @@ const HSModule = (function () {
     logsCache.filter(l => l.TemplateID === template.TemplateID).forEach(l => {
       console.log('[DG DEBUG]', l.LogID, 'Shift=' + l.Shift, 'Timestamp=' + l.Timestamp, 'bucket=' + shiftDayBucket(l.Timestamp, l.Shift));
     });
+    // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
+    // mismatch is diagnosed. cellFor() uses .find() which returns only
+    // the FIRST log matching a given day+shift bucket — if two logs
+    // land on the same bucket, whichever comes first in logsCache wins
+    // and the other's data (e.g. HSLOG-0244's) is silently invisible in
+    // the report, no matter how correct its own data is. Flag any such
+    // collision directly instead of guessing.
+    {
+      const byBucket = {};
+      logsCache.filter(l => l.TemplateID === template.TemplateID).forEach(l => {
+        const key = l.Shift + '|' + shiftDayBucket(l.Timestamp, l.Shift);
+        byBucket[key] = byBucket[key] || [];
+        byBucket[key].push(l.LogID);
+      });
+      Object.keys(byBucket).forEach(key => {
+        if (byBucket[key].length > 1) {
+          console.log('[DG DEBUG] DUPLICATE BUCKET COLLISION', key, '->', byBucket[key].join(', '),
+            '(only the FIRST one, "' + byBucket[key][0] + '", will ever show in the report for this day+shift)');
+        }
+      });
+    }
 
     function cellFor(itemId, day, shift) {
       const dateStr = new Date(year, month - 1, day).toDateString();
