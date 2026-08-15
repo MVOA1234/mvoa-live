@@ -300,8 +300,16 @@ const DashboardModule = (function () {
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
     const round2 = (n) => Math.round(n * 100) / 100;
+    // The tank level carried into the START of a shift is whatever the
+    // PRECEDING shift's reading ended on — its After Top-Up level if it
+    // had one, otherwise its own single Before/legacy level. Needed to
+    // compute the "before the top-up" consumption leg below.
+    function endingLevel(row) {
+      if (!row) return null;
+      return row.dieselAfter != null ? row.dieselAfter : row.dieselBefore;
+    }
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i], next = rows[i + 1];
+      const r = rows[i], next = rows[i + 1], prev = rows[i - 1];
       r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
       // Sanity guard: an hours meter can never advance more than the
@@ -318,7 +326,26 @@ const DashboardModule = (function () {
       if (typeof r.kwhGenerated === 'number' && r.kwhGenerated < 0) r.kwhGenerated = null;
       r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
       if (r.dieselAfter != null) {
-        r.dieselConsumedLitres = (next && next.dieselBefore != null) ? round2(pctToLitres(r.dieselAfter - next.dieselBefore)) : null;
+        // Top-up happened this shift — per the documented formula this
+        // is TWO consumption legs added together, not just one:
+        //   (a) from the PRECEDING shift's ending level down to this
+        //       shift's own Before Top-Up reading — consumption before
+        //       the top-up actually happened (can be well into the
+        //       shift, not necessarily right at its start);
+        //   (b) from this shift's After Top-Up reading down to the
+        //       NEXT shift's own starting reading — consumption after
+        //       the top-up.
+        // Previously only leg (b) was computed, silently treating leg
+        // (a) as zero — which is why a shift with real DG runtime
+        // before its top-up was showing 0 consumed instead of a real
+        // number. If either leg is unknown, the total is genuinely
+        // unknown too (not just whichever leg happens to be available).
+        const beforeLevel = endingLevel(prev);
+        let legA = (beforeLevel != null && r.dieselBefore != null) ? pctToLitres(beforeLevel - r.dieselBefore) : null;
+        let legB = (next && next.dieselBefore != null) ? pctToLitres(r.dieselAfter - next.dieselBefore) : null;
+        if (typeof legA === 'number' && legA < 0) legA = null; // level can't have risen without a logged top-up — treat as unknown, not negative
+        if (typeof legB === 'number' && legB < 0) legB = null;
+        r.dieselConsumedLitres = (legA != null && legB != null) ? round2(legA + legB) : null;
       } else if (next && r.dieselBefore != null && next.dieselBefore != null) {
         r.dieselConsumedLitres = round2(pctToLitres(r.dieselBefore - next.dieselBefore));
       } else {
