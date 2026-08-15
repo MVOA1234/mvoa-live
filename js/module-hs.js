@@ -2275,6 +2275,17 @@ const HSModule = (function () {
     const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? activeRoundKeys() : [null];
     const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
+    // TEMP DEBUG — remove once the Diesel Level Before/After Top Up
+    // mismatch is diagnosed. Logs each log for this template on its own
+    // line (not one line with a collapsed array — the console's text
+    // filter can't see inside a collapsed array preview) with its
+    // computed shiftDayBucket, so we can see directly which calendar day
+    // cellFor() will search for it under. Filter the console by the
+    // LogID (e.g. "HSLOG-0244") to find its line and read "bucket=".
+    logsCache.filter(l => l.TemplateID === template.TemplateID).forEach(l => {
+      console.log('[DG DEBUG]', l.LogID, 'Shift=' + l.Shift, 'Timestamp=' + l.Timestamp, 'bucket=' + shiftDayBucket(l.Timestamp, l.Shift));
+    });
+
     function cellFor(itemId, day, shift) {
       const dateStr = new Date(year, month - 1, day).toDateString();
       const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
@@ -2289,7 +2300,7 @@ const HSModule = (function () {
       // we can see character-for-character why itemId isn't matching,
       // instead of guessing.
       if (!result && (itemId === 'ITM-9702' || itemId === 'ITM-9703')) {
-        console.log('[DG DEBUG]', {
+        console.log('[DG DEBUG] item not matched', {
           lookingFor: itemId, lookingForLen: itemId.length, lookingForCodes: Array.from(itemId).map(c => c.charCodeAt(0)),
           day, shift, dateStr, logId: log.LogID,
           resultsForThisLog: results.filter(r => r.LogID === log.LogID).map(r => ({
