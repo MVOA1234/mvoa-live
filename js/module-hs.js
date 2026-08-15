@@ -1922,9 +1922,17 @@ const HSModule = (function () {
       if (!relevantIds.includes(r.ItemID)) return;
       const log = logsCache.find(l => l.LogID === r.LogID);
       if (!log || !log.Shift) return;
-      // Bucket by the day the SHIFT started, not the day the reading's
-      // raw timestamp happens to fall on — see shiftDayBucket().
-      const dateKey = shiftDayBucket(log.Timestamp, log.Shift);
+      // NOTE: this stays keyed by the reading's raw calendar date, NOT
+      // shiftDayBucket() — this key only exists to merge same-shift
+      // submissions that land under one LogID, and the actual period
+      // scoping downstream (inPeriodRows) already keys off each row's
+      // real timestamp directly. Switching this to the shift-start
+      // bucket wouldn't change which period a row counts toward (that
+      // logic doesn't look at this key), but it WOULD risk merging two
+      // genuinely distinct logs into one row if they land on the same
+      // bucketed day+shift, silently corrupting both. Not worth the
+      // risk for no actual benefit.
+      const dateKey = new Date(log.Timestamp).toDateString();
       const key = dateKey + '|' + log.Shift;
       if (!byDateShift[key]) byDateShift[key] = { dateKey, shift: log.Shift, timestamp: log.Timestamp };
       const entry = byDateShift[key];
