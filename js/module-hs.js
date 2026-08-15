@@ -1929,19 +1929,24 @@ const HSModule = (function () {
       if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp; // earliest of the merged rounds anchors sort order
       const val = extractNumericResult(r);
       if (isNaN(val)) return;
-      if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
-      if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
-      if (beforeItem && r.ItemID === beforeItem.ItemID) entry.dieselBefore = val;
-      if (afterItem && r.ItemID === afterItem.ItemID) entry.dieselAfter = val;
+      if (hoursItem && r.ItemID === hoursItem.ItemID) { entry.hours = val; entry.hasModernRound = true; }
+      if (kwhItem && r.ItemID === kwhItem.ItemID) { entry.kwh = val; entry.hasModernRound = true; }
+      if (beforeItem && r.ItemID === beforeItem.ItemID) { entry.dieselBefore = val; entry.hasModernRound = true; }
+      if (afterItem && r.ItemID === afterItem.ItemID) { entry.dieselAfter = val; entry.hasModernRound = true; }
       if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) entry.legacyLevel = val;
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     // Fall back to the legacy Fuel Level reading wherever a date+shift
-    // has no Before value of its own — covers every shift logged
-    // before the Before/After split shipped, without touching shifts
-    // that already have a real Before value.
+    // has no Before value of its own AND no modern DG Set Operations
+    // round data at all — covers every shift logged before the
+    // Before/After split shipped, without touching shifts that already
+    // have a real Before value OR that are otherwise using the modern
+    // round (Hours/kWh/After) but simply left Before blank — for those,
+    // silently borrowing an unrelated legacy reading would turn a
+    // genuinely missing value into a misleading computed one instead of
+    // correctly showing as unavailable.
     rows.forEach(r => {
-      if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel;
+      if (r.dieselBefore == null && r.legacyLevel != null && !r.hasModernRound) r.dieselBefore = r.legacyLevel;
     });
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
@@ -3158,7 +3163,20 @@ const HSModule = (function () {
     const items = itemsCache
       .filter(i => i.TemplateID === currentTemplate.TemplateID)
       .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
-        (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')))
+        (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')) ||
+        // "Diesel Level Before Top Up" is normally excluded from this
+        // form and left to the separate Diesel Top-Up Quick Entry
+        // screen (see the comment above renderDieselTopUpEntry) since
+        // top-ups themselves can happen any time during a shift. But
+        // the READING of what's currently in the tank — the "before"
+        // level, taken before any top-up — reflects the tank's state
+        // at shift start same as Running Hours / Cumulated kWh, and
+        // without it the Diesel Consumed math for this shift can never
+        // be computed. So it's force-included and required right here,
+        // every shift, regardless of ShiftApplicability. "After Top
+        // Up" stays quick-entry-only — it only applies once an actual
+        // top-up happens, which may not be known yet at shift start.
+        (isShiftBased && /diesel level before top up/i.test(i.CheckItem)))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
     // Preload the last recorded reading for any running-hours meter
@@ -3532,10 +3550,14 @@ const HSModule = (function () {
     // Items marked Required=FALSE (e.g. Vacuum Cleaning / Back Wash —
     // shown every day but only actually done every other day) don't
     // block submission when left blank, and a blank answer never
-    // counts as a Fail for them.
+    // counts as a Fail for them. "Diesel Level Before Top Up" is the
+    // one exception: it's ALWAYS required on a shift-start submission
+    // (see the force-include above), regardless of whatever its own
+    // Required column says, since a blank reading here is exactly what
+    // breaks the Diesel Consumed math down the line.
     const missing = items.filter(i =>
       (i.InputType === 'PassFail' || i.InputType === 'Numeric') &&
-      !(i.Required === 'FALSE' || i.Required === 'false') &&
+      (/diesel level before top up/i.test(i.CheckItem) || !(i.Required === 'FALSE' || i.Required === 'false')) &&
       isItemDueToday(i) &&
       !pendingResults[i.ItemID]?.result
     );
