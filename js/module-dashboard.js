@@ -357,8 +357,18 @@ const DashboardModule = (function () {
 
     // A transition "belongs" to the period its STARTING shift falls
     // in — the "next" reading can land just after the period boundary
-    // and that's still correctly this period's interval.
-    const inPeriodRows = rows.filter(r => inRange(r.timestamp, range));
+    // and that's still correctly this period's interval. For a 3rd
+    // shift that started before midnight, "the day its shift started"
+    // is NOT the same as the raw timestamp's calendar date (see
+    // shiftDayBucket) — bucket by the logical shift day here too, so
+    // this matches the Monthly Report's day attribution instead of
+    // showing the same reading under two different days in two
+    // different places.
+    const inPeriodRows = rows.filter(r => {
+      const logicalDay = new Date(shiftDayBucket(r.timestamp, r.shift));
+      logicalDay.setHours(12, 0, 0, 0); // midday — safely inside whatever day/week/month range it belongs to
+      return logicalDay.getTime() >= range.start.getTime() && logicalDay.getTime() < range.end.getTime();
+    });
     const sum = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) * 100) / 100 : null;
     const totalHours = sum(inPeriodRows.map(r => r.hoursRun).filter(v => typeof v === 'number'));
     const totalKwh = sum(inPeriodRows.map(r => r.kwhGenerated).filter(v => typeof v === 'number'));
