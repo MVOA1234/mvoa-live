@@ -4063,7 +4063,25 @@ const HSModule = (function () {
             border-radius: 8px; border: none; background: #1d4e6b; color: white;
             font-size: 0.95rem; font-weight: 600; cursor: pointer;
           }
-          @media print { .back-btn { display: none; } }
+          /* A wide table (e.g. a full month of day columns) defaults to
+             its natural content width under nowrap — on screen that's
+             fine, it just scrolls. But the browser's print engine only
+             renders whatever fits within one page's width and silently
+             drops everything past that edge instead of wrapping it onto
+             more pages. table-layout:fixed + width:100% forces the
+             WHOLE table (all columns) to always fit the printable page
+             width, no matter how many columns there are — content wraps
+             inside each cell instead of anything being cut off. Suggest
+             landscape + slim margins by default so there's more width
+             to work with, though the fixed layout keeps everything
+             printed in portrait too, just more cramped per column. */
+          @media print {
+            .back-btn { display: none; }
+            table { table-layout: fixed; width: 100%; }
+            th, td { white-space: normal; word-break: break-word; font-size: 0.62rem; padding: 3px 4px; }
+            th:first-child, td:first-child { width: 110px; }
+          }
+          @page { size: landscape; margin: 10mm; }
         </style>
       </head>
       <body>
