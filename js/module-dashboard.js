@@ -261,14 +261,23 @@ const DashboardModule = (function () {
       if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp;
       const val = extractNumericResult(r);
       if (isNaN(val)) return;
-      if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
-      if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
-      if (beforeItem && r.ItemID === beforeItem.ItemID) entry.dieselBefore = val;
-      if (afterItem && r.ItemID === afterItem.ItemID) entry.dieselAfter = val;
+      if (hoursItem && r.ItemID === hoursItem.ItemID) { entry.hours = val; entry.hasModernRound = true; }
+      if (kwhItem && r.ItemID === kwhItem.ItemID) { entry.kwh = val; entry.hasModernRound = true; }
+      if (beforeItem && r.ItemID === beforeItem.ItemID) { entry.dieselBefore = val; entry.hasModernRound = true; }
+      if (afterItem && r.ItemID === afterItem.ItemID) { entry.dieselAfter = val; entry.hasModernRound = true; }
       if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) entry.legacyLevel = val;
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    rows.forEach(r => { if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel; });
+    // Legacy "Fuel Level" fallback is for genuinely OLD shifts that
+    // predate the Before/After Top-Up split — i.e. a date+shift with NO
+    // modern DG Set Operations round data at all. Once a shift has any
+    // modern-round reading on it (Running Hours / Cumulated kWh /
+    // Before / After), its diesel-before value must come from the real
+    // Before Top Up item or stay unknown — never get silently borrowed
+    // from an unrelated legacy item, which could otherwise turn a
+    // genuinely-missing reading into a misleading (and sometimes
+    // coincidentally zero) computed value instead of showing "—".
+    rows.forEach(r => { if (r.dieselBefore == null && r.legacyLevel != null && !r.hasModernRound) r.dieselBefore = r.legacyLevel; });
 
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
