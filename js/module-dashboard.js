@@ -151,6 +151,18 @@ const DashboardModule = (function () {
     return !isNaN(t) && t >= range.start.getTime() && t < range.end.getTime();
   }
 
+  // 3rd shift (9pm–7am) straddles midnight, so grouping DG Set readings
+  // by the raw calendar date of their timestamp can put a shift's entry
+  // on either side of midnight depending on exactly when it was
+  // submitted. Bucket by the day the shift STARTED instead — mirrors
+  // module-hs.js's own shiftDayBucket(), kept in sync manually since
+  // this module doesn't share scope with it.
+  function shiftDayBucket(timestampOrDate, shift) {
+    const d = new Date(timestampOrDate);
+    if (shift === '3rd' && d.getHours() < 12) d.setDate(d.getDate() - 1);
+    return d.toDateString();
+  }
+
   function daysOpen(createdDate) {
     const t = new Date(createdDate).getTime();
     if (isNaN(t)) return 0;
@@ -254,30 +266,30 @@ const DashboardModule = (function () {
       if (!relevantIds.includes(r.ItemID)) return;
       const log = logs.find(l => l.LogID === r.LogID);
       if (!log || !log.Shift) return;
-      const dateKey = new Date(log.Timestamp).toDateString();
+      // Bucket by the day the SHIFT started, not the day the reading's
+      // raw timestamp happens to fall on — see shiftDayBucket().
+      const dateKey = shiftDayBucket(log.Timestamp, log.Shift);
       const key = dateKey + '|' + log.Shift;
       if (!byDateShift[key]) byDateShift[key] = { shift: log.Shift, timestamp: log.Timestamp };
       const entry = byDateShift[key];
       if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp;
       const val = extractNumericResult(r);
       if (isNaN(val)) return;
-      if (hoursItem && r.ItemID === hoursItem.ItemID) { entry.hours = val; entry.hasModernRound = true; }
-      if (kwhItem && r.ItemID === kwhItem.ItemID) { entry.kwh = val; entry.hasModernRound = true; }
-      if (beforeItem && r.ItemID === beforeItem.ItemID) { entry.dieselBefore = val; entry.hasModernRound = true; }
-      if (afterItem && r.ItemID === afterItem.ItemID) { entry.dieselAfter = val; entry.hasModernRound = true; }
+      if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
+      if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
+      if (beforeItem && r.ItemID === beforeItem.ItemID) entry.dieselBefore = val;
+      if (afterItem && r.ItemID === afterItem.ItemID) entry.dieselAfter = val;
       if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) entry.legacyLevel = val;
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    // Legacy "Fuel Level" fallback is for genuinely OLD shifts that
-    // predate the Before/After Top-Up split — i.e. a date+shift with NO
-    // modern DG Set Operations round data at all. Once a shift has any
-    // modern-round reading on it (Running Hours / Cumulated kWh /
-    // Before / After), its diesel-before value must come from the real
-    // Before Top Up item or stay unknown — never get silently borrowed
-    // from an unrelated legacy item, which could otherwise turn a
-    // genuinely-missing reading into a misleading (and sometimes
-    // coincidentally zero) computed value instead of showing "—".
-    rows.forEach(r => { if (r.dieselBefore == null && r.legacyLevel != null && !r.hasModernRound) r.dieselBefore = r.legacyLevel; });
+    // Fall back to the legacy Fuel Level reading wherever a date+shift
+    // has no Before value of its own. Confirmed against real data: Fuel
+    // Level is still the field technicians actually fill in every
+    // shift (Before/After Top Up are rarely used), so this fallback is
+    // the NORMAL path going forward, not just a historic one — it must
+    // stay unconditional, not gated on whether Hours/kWh were also
+    // logged that shift.
+    rows.forEach(r => { if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel; });
 
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
@@ -286,6 +298,18 @@ const DashboardModule = (function () {
       const r = rows[i], next = rows[i + 1];
       r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
+      // Sanity guard: an hours meter can never advance more than the
+      // actual wall-clock time that elapsed between the two readings —
+      // a hard physical ceiling. A typo on either reading can otherwise
+      // produce a wildly inflated "hours run" that dominates the whole
+      // period's total. Negative deltas (meter going backwards) are
+      // equally impossible and cleared the same way. Mirrors the same
+      // guard in module-hs.js's loadDgOperationsData.
+      if (typeof r.hoursRun === 'number' && next) {
+        const elapsedHrs = (new Date(next.timestamp).getTime() - new Date(r.timestamp).getTime()) / 3600000;
+        if (r.hoursRun < 0 || (elapsedHrs > 0 && r.hoursRun > elapsedHrs + 0.25)) r.hoursRun = null;
+      }
+      if (typeof r.kwhGenerated === 'number' && r.kwhGenerated < 0) r.kwhGenerated = null;
       r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
       if (r.dieselAfter != null) {
         r.dieselConsumedLitres = (next && next.dieselBefore != null) ? round2(pctToLitres(r.dieselAfter - next.dieselBefore)) : null;
