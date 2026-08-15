@@ -972,49 +972,74 @@
     `;
   }
 
-  // "Check-in/Check-out Times" — Agency / Staff Name, then a Check-in and
-  // Check-out sub-column per day. If a staff member has more than one
-  // session on the same day (an overnight shift plus a same-day shift),
-  // every session's times are stacked on separate lines within that day's
-  // two cells rather than only showing one.
+  // "Check-in/Check-out Times" — Agency / Staff Name, then an In and Out
+  // sub-column per day. If a staff member has more than one session on the
+  // same day (an overnight shift plus a same-day shift), every session's
+  // times are stacked on separate lines within that day's two cells rather
+  // than only showing one.
+  //
+  // A full month is 2 label columns + up to 31 days × 2 time columns — 64
+  // columns total. No amount of font-shrinking or column-narrowing makes an
+  // "HH:MM" value stay on one line across that many columns on a single
+  // printed page; forcing it to fit either clips content off the page edge
+  // or squeezes every value into unreadable character-by-character
+  // wrapping. Instead this builds several narrower tables, each covering a
+  // chunk of days (CHUNK_DAYS at a time) with the Agency/Staff Name columns
+  // repeated on every chunk, stacked one below the other — a full month
+  // spans a few printed pages instead of one illegible one, but every cell
+  // stays readable and nothing is silently cut off.
+  const CHECKIN_OUT_CHUNK_DAYS = 10;
   function buildCheckInOutGridHtml(month, monthLabel, staffPool, monthLogs) {
     const daysInMonth = daysInMonthFor(month);
     const capDay = capDayFor(month);
     const [y, m] = month.split('-').map(Number);
-    const dayHeaders = [];
-    for (let d = 1; d <= daysInMonth; d++) dayHeaders.push(ordinalDay(d));
 
     let lastAgency = null;
-    const bodyRows = staffPool.map(s => {
-      const ag = agencyName(s.AgencyID);
-      const showAgency = ag !== lastAgency;
-      lastAgency = ag;
-      const sessions = monthLogs.filter(l => l.StaffID === s.StaffID).sort((a, b) => a.CheckInTime.localeCompare(b.CheckInTime));
-      const cells = [];
-      for (let d = 1; d <= daysInMonth; d++) {
-        if (d > capDay) { cells.push('<td></td><td></td>'); continue; }
-        const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-        const daySessions = sessions.filter(l => l.Date === iso);
-        if (!daySessions.length) { cells.push('<td>—</td><td>—</td>'); continue; }
-        const ins = daySessions.map(l => l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) : '—').join('<br>');
-        const outs = daySessions.map(l => l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) : '—').join('<br>');
-        cells.push(`<td style="text-align:center;">${ins}</td><td style="text-align:center;">${outs}</td>`);
-      }
-      return `<tr><td>${showAgency ? escapeHtml(ag) : ''}</td><td>${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
+    const sessionsByStaff = new Map(staffPool.map(s => [s.StaffID,
+      monthLogs.filter(l => l.StaffID === s.StaffID).sort((a, b) => a.CheckInTime.localeCompare(b.CheckInTime))]));
+
+    const chunks = [];
+    for (let start = 1; start <= daysInMonth; start += CHECKIN_OUT_CHUNK_DAYS) {
+      chunks.push({ start, end: Math.min(start + CHECKIN_OUT_CHUNK_DAYS - 1, daysInMonth) });
+    }
+
+    const tables = chunks.map(({ start, end }) => {
+      const dayHeaders = [];
+      for (let d = start; d <= end; d++) dayHeaders.push(ordinalDay(d));
+      lastAgency = null; // re-shown at the top of every chunk, not just the first
+      const bodyRows = staffPool.map(s => {
+        const ag = agencyName(s.AgencyID);
+        const showAgency = ag !== lastAgency;
+        lastAgency = ag;
+        const sessions = sessionsByStaff.get(s.StaffID) || [];
+        const cells = [];
+        for (let d = start; d <= end; d++) {
+          if (d > capDay) { cells.push('<td></td><td></td>'); continue; }
+          const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const daySessions = sessions.filter(l => l.Date === iso);
+          if (!daySessions.length) { cells.push('<td>—</td><td>—</td>'); continue; }
+          const ins = daySessions.map(l => l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) : '—').join('<br>');
+          const outs = daySessions.map(l => l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) : '—').join('<br>');
+          cells.push(`<td style="text-align:center;white-space:nowrap;">${ins}</td><td style="text-align:center;white-space:nowrap;">${outs}</td>`);
+        }
+        return `<tr><td>${showAgency ? escapeHtml(ag) : ''}</td><td>${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
+      });
+
+      return `
+        <table class="mvoa-table att-times-grid">
+          <thead>
+            <tr><th colspan="${2 + dayHeaders.length * 2}" style="text-align:center;">Daily Check In/Out Time Report for ${escapeHtml(monthLabel)} — Days ${start}–${end}</th></tr>
+            <tr><th rowspan="2">Agency</th><th rowspan="2">Staff Name</th>${dayHeaders.map(h => `<th colspan="2" style="text-align:center;">${h}</th>`).join('')}</tr>
+            <tr>${dayHeaders.map(() => `<th style="text-align:center;">In</th><th style="text-align:center;">Out</th>`).join('')}</tr>
+          </thead>
+          <tbody>
+            ${bodyRows.length ? bodyRows.join('') : `<tr><td colspan="${2 + dayHeaders.length * 2}" class="muted">No staff.</td></tr>`}
+          </tbody>
+        </table>
+      `;
     });
 
-    return `
-      <table class="mvoa-table">
-        <thead>
-          <tr><th colspan="${2 + daysInMonth * 2}" style="text-align:center;">Daily Check in/out time Report for the Month of ${escapeHtml(monthLabel)}</th></tr>
-          <tr><th rowspan="2">Agency</th><th rowspan="2">Staff Name</th>${dayHeaders.map(h => `<th colspan="2" style="text-align:center;">${h}</th>`).join('')}</tr>
-          <tr>${dayHeaders.map(() => `<th style="text-align:center;">Check in</th><th style="text-align:center;">Check out</th>`).join('')}</tr>
-        </thead>
-        <tbody>
-          ${bodyRows.length ? bodyRows.join('') : `<tr><td colspan="${2 + daysInMonth * 2}" class="muted">No staff.</td></tr>`}
-        </tbody>
-      </table>
-    `;
+    return tables.map(t => `<div class="att-times-chunk">${t}</div>`).join('');
   }
 
   function renderMonthlyReport(host, user, monthStr, agencyFilter, reportType, staffFilterIds) {
@@ -1143,6 +1168,17 @@
             table { table-layout: fixed; width: 100%; }
             th, td { white-space: normal; word-break: break-word; font-size: 0.6rem; padding: 3px 4px; }
             th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { width: 70px; }
+            /* Check-in/Check-out Times is built as several narrower
+               per-day-chunk tables (see buildCheckInOutGridHtml) instead
+               of one huge table — each chunk gets its own page and its
+               own tighter label-column width, and every time cell stays
+               on one line (white-space:nowrap is already set inline on
+               those cells, which wins over the word-break rule above). */
+            .att-times-chunk { page-break-inside: avoid; }
+            .att-times-chunk:not(:first-child) { page-break-before: always; }
+            .att-times-grid th:first-child, .att-times-grid td:first-child,
+            .att-times-grid th:nth-child(2), .att-times-grid td:nth-child(2) { width: 48px; }
+            .att-times-grid th, .att-times-grid td { font-size: 0.68rem; }
             @page { size: landscape; margin: 8mm; }
           }
         </style>
