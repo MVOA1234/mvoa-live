@@ -79,7 +79,7 @@
 // ═══════════════════════════════════════════════════════════════
 (function () {
   const AGENCY_COLS = ['AgencyID', 'Name', 'Type', 'Active', 'CreatedDate', 'CreatedBy'];
-  const STAFF_COLS = ['StaffID', 'AgencyID', 'Name', 'Role', 'Phone', 'AadhaarNumber', 'AadhaarPhotoURL', 'Code', 'PhotoURL', 'Active', 'CreatedDate', 'CreatedBy'];
+  const STAFF_COLS = ['StaffID', 'AgencyID', 'Name', 'Role', 'Phone', 'AadhaarNumber', 'AadhaarPhotoURL', 'Code', 'PhotoURL', 'Active', 'CreatedDate', 'CreatedBy', 'BloodGroup'];
   const LOG_COLS = ['LogID', 'StaffID', 'Date', 'CheckInTime', 'CheckInPhotoURL', 'CheckOutTime', 'CheckOutPhotoURL', 'Status', 'LoggedBy'];
   const SETTINGS_COLS = ['Key', 'Value'];
   const SECTION_AGENCIES = 'Agencies';
@@ -138,6 +138,10 @@
   function formatTime(iso) {
     if (!iso) return '';
     return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  function formatJoinDate(iso) {
+    if (!iso) return '';
+    return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   }
 
   function canEditSection(section, user) { return MVOA.canEditAttendanceSection(section, user); }
@@ -476,11 +480,17 @@
         <label>Phone (optional)
           <input type="tel" id="att-staff-phone" value="${isEdit ? escapeHtml(staff.Phone) : ''}" placeholder="e.g. 98400 12345">
         </label>
-        <label>Aadhaar card number (optional)
+        <label>Blood Group (optional)
+          <select id="att-staff-bloodgroup">
+            <option value="">— Select —</option>
+            ${['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(bg => `<option value="${bg}" ${isEdit && staff.BloodGroup === bg ? 'selected' : ''}>${bg}</option>`).join('')}
+          </select>
+        </label>
+        <label>Aadhaar card number
           <input type="text" id="att-staff-aadhaar-num" value="${isEdit ? escapeHtml(staff.AadhaarNumber) : ''}" placeholder="e.g. 1234 5678 9012" inputmode="numeric" maxlength="14">
         </label>
 
-        <label>Aadhaar card photo (optional)</label>
+        <label>Aadhaar card photo</label>
         <div class="mvoa-row" style="margin:4px 0 12px;gap:10px;">
           <button type="button" id="att-aadhaar-pick" class="btn-secondary">📷 ${existingAadhaarUrl ? 'Replace' : 'Add'} Aadhaar Photo</button>
           <span id="att-aadhaar-status" class="muted" style="font-size:0.85rem;">
@@ -535,11 +545,14 @@
       const agencyId = host.querySelector('#att-staff-agency').value;
       const role = host.querySelector('#att-staff-role').value.trim();
       const phone = host.querySelector('#att-staff-phone').value.trim();
+      const bloodGroup = host.querySelector('#att-staff-bloodgroup').value;
       const aadhaarNum = host.querySelector('#att-staff-aadhaar-num').value.trim();
       const errEl = host.querySelector('#att-staff-form-error');
       errEl.textContent = '';
       if (!name) { errEl.textContent = 'Full name is required.'; return; }
       if (!agencyId) { errEl.textContent = 'Please select an agency.'; return; }
+      if (!aadhaarNum) { errEl.textContent = 'Aadhaar card number is required.'; return; }
+      if (!pendingAadhaarPhoto && !existingAadhaarUrl) { errEl.textContent = 'Aadhaar card photo is required.'; return; }
       if (!pendingPhoto && !existingPhotoUrl) { errEl.textContent = 'Staff photo is required.'; return; }
 
       const btn = host.querySelector('#att-staff-save');
@@ -575,11 +588,11 @@
 
         if (isEdit) {
           await MVOA.sheetsUpdateRow(MVOA.TABS.attStaff, staff.rowNumber,
-            [staffId, agencyId, name, role, phone, aadhaarNum, aadhaarUrl, code, photoUrl, staff.Active, staff.CreatedDate, staff.CreatedBy]);
+            [staffId, agencyId, name, role, phone, aadhaarNum, aadhaarUrl, code, photoUrl, staff.Active, staff.CreatedDate, staff.CreatedBy, bloodGroup]);
         } else {
           const now = new Date().toISOString();
           await MVOA.sheetsAppend(MVOA.TABS.attStaff,
-            [staffId, agencyId, name, role, phone, aadhaarNum, aadhaarUrl, code, photoUrl, 'TRUE', now, (user && user.name) || '']);
+            [staffId, agencyId, name, role, phone, aadhaarNum, aadhaarUrl, code, photoUrl, 'TRUE', now, (user && user.name) || '', bloodGroup]);
         }
         await loadAll(true);
         renderStaffList(host, user);
@@ -596,7 +609,7 @@
     if (!confirm(`Deactivate "${staff.Name}"? They will be hidden from Staff Attendance and unable to check in/out. Their record and any attendance history stays in the sheet.`)) return;
     try {
       await MVOA.sheetsUpdateRow(MVOA.TABS.attStaff, staff.rowNumber,
-        [staff.StaffID, staff.AgencyID, staff.Name, staff.Role, staff.Phone, staff.AadhaarNumber, staff.AadhaarPhotoURL, staff.Code, staff.PhotoURL, 'FALSE', staff.CreatedDate, staff.CreatedBy]);
+        [staff.StaffID, staff.AgencyID, staff.Name, staff.Role, staff.Phone, staff.AadhaarNumber, staff.AadhaarPhotoURL, staff.Code, staff.PhotoURL, 'FALSE', staff.CreatedDate, staff.CreatedBy, staff.BloodGroup]);
       await loadAll(true);
       renderStaffList(host, user);
     } catch (e) {
@@ -693,16 +706,23 @@
           </div>
         </div>
         <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.05rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
-        <div style="grid-area:photo;display:flex;justify-content:center;">${photoBox}</div>
+        <div style="grid-area:photo;display:flex;flex-direction:column;align-items:center;">
+          ${photoBox}
+          <div style="font-size:0.62rem;opacity:0.85;margin-top:4px;text-align:center;overflow-wrap:break-word;max-width:84px;">${staff.Phone ? escapeHtml(staff.Phone) : ''}</div>
+        </div>
         <div style="grid-area:info;min-width:0;align-self:start;padding-top:2px;">
           <div style="font-size:1.05rem;font-weight:700;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
           <div style="font-size:0.78rem;opacity:0.92;overflow-wrap:break-word;margin-top:1px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
           <div style="font-family:ui-monospace,Menlo,monospace;font-size:0.95rem;font-weight:700;letter-spacing:3px;margin-top:3px;">${escapeHtml(staff.Code)}</div>
           <div style="font-size:0.72rem;opacity:0.82;margin-top:3px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
+          <div style="font-size:0.62rem;opacity:0.8;margin-top:3px;">${staff.CreatedDate ? `Date of Joining: ${escapeHtml(formatJoinDate(staff.CreatedDate))}` : ''}</div>
           <div style="font-size:0.6rem;opacity:0.7;margin-top:3px;">${escapeHtml(staff.StaffID)}</div>
         </div>
-        <div style="grid-area:qr;align-self:center;justify-self:center;background:#fff;border-radius:10px;padding:8px;">
-          <img src="${qrUrl}" alt="QR" style="width:96px;height:96px;display:block;">
+        <div style="grid-area:qr;align-self:center;justify-self:center;display:flex;flex-direction:column;align-items:center;">
+          <div style="background:#fff;border-radius:10px;padding:8px;">
+            <img src="${qrUrl}" alt="QR" style="width:96px;height:96px;display:block;">
+          </div>
+          <div style="font-size:0.68rem;opacity:0.85;margin-top:4px;text-align:center;">${staff.BloodGroup ? `Blood Group: ${escapeHtml(staff.BloodGroup)}` : ''}</div>
         </div>
       </div>
     `;
@@ -1237,14 +1257,30 @@
       });
     }
 
+    // Decoding the full native camera frame (often 1080p+) on every single
+    // animation-frame tick — up to 60x/sec — is what made recognition feel
+    // slow on mid-range phones: jsQR's cost scales with pixel count, and a
+    // QR code doesn't need anywhere near that resolution or frame rate to
+    // read reliably. Two changes fix this: (1) downscale the decode canvas
+    // to a fixed, much smaller size (matching the crop captureFrameAsFile
+    // already uses for the photo, so this isn't a new quality bar), and
+    // (2) throttle actual decode attempts to a few times a second instead
+    // of every rAF tick — still fast enough to feel instant, far lighter
+    // on the CPU.
+    const DECODE_SIZE = 320;
+    const DECODE_INTERVAL_MS = 150;
+    let lastDecodeAt = 0;
+    canvas.width = DECODE_SIZE;
+    canvas.height = DECODE_SIZE;
     function tick() {
-      if (!processing && video.readyState === video.HAVE_ENOUGH_DATA) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+      const now = performance.now();
+      if (!processing && video.readyState === video.HAVE_ENOUGH_DATA && (now - lastDecodeAt) >= DECODE_INTERVAL_MS) {
+        lastDecodeAt = now;
+        const side = Math.min(video.videoWidth, video.videoHeight);
         const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = typeof jsQR === 'function' ? jsQR(img.data, img.width, img.height) : null;
+        ctx.drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, DECODE_SIZE, DECODE_SIZE);
+        const img = ctx.getImageData(0, 0, DECODE_SIZE, DECODE_SIZE);
+        const code = typeof jsQR === 'function' ? jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' }) : null;
         if (code) {
           const m = (code.data || '').match(/^MVOA-ATT:(.+)$/);
           if (m) {
@@ -1440,7 +1476,7 @@
           if (!fresh) throw new Error('Staff record no longer exists.');
           const newCode = genStaffCode(freshStaff.map(x => x.Code));
           await MVOA.sheetsUpdateRow(MVOA.TABS.attStaff, fresh.rowNumber,
-            [fresh.StaffID, fresh.AgencyID, fresh.Name, fresh.Role, fresh.Phone, fresh.AadhaarNumber, fresh.AadhaarPhotoURL, newCode, fresh.PhotoURL, fresh.Active, fresh.CreatedDate, fresh.CreatedBy]);
+            [fresh.StaffID, fresh.AgencyID, fresh.Name, fresh.Role, fresh.Phone, fresh.AadhaarNumber, fresh.AadhaarPhotoURL, newCode, fresh.PhotoURL, fresh.Active, fresh.CreatedDate, fresh.CreatedBy, fresh.BloodGroup]);
           await loadAll(true);
           row.querySelector('.att-code-display').textContent = newCode;
           msgEl.textContent = `✓ New code: ${newCode}. Tell ${s.Name} the new code and reprint their ID card.`;
