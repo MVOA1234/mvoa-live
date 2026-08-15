@@ -125,7 +125,17 @@ const HSModule = (function () {
   function rowsToObjs(rows, cols) {
     return rows.slice(1).map((r, i) => {
       const o = { rowNumber: i + 2 };
-      cols.forEach((c, ci) => o[c] = r[ci] !== undefined ? r[ci] : '');
+      // .trim() every string cell — sheet rows pasted in from elsewhere
+      // (Word, Docs, another sheet) can carry invisible characters
+      // (trailing spaces, non-breaking spaces) that make an ID LOOK
+      // identical on screen but fail a strict === match against the
+      // same ID typed cleanly elsewhere — e.g. an ItemID column that
+      // silently never matches its own item's results. Doesn't touch
+      // non-string values (numbers stay numbers).
+      cols.forEach((c, ci) => {
+        const v = r[ci];
+        o[c] = typeof v === 'string' ? v.trim() : (v !== undefined ? v : '');
+      });
       return o;
     }).filter(o => o[cols[0]]);
   }
