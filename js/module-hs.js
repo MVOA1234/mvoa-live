@@ -1922,31 +1922,31 @@ const HSModule = (function () {
       if (!relevantIds.includes(r.ItemID)) return;
       const log = logsCache.find(l => l.LogID === r.LogID);
       if (!log || !log.Shift) return;
-      const dateKey = new Date(log.Timestamp).toDateString();
+      // Bucket by the day the SHIFT started, not the day the reading's
+      // raw timestamp happens to fall on — see shiftDayBucket().
+      const dateKey = shiftDayBucket(log.Timestamp, log.Shift);
       const key = dateKey + '|' + log.Shift;
       if (!byDateShift[key]) byDateShift[key] = { dateKey, shift: log.Shift, timestamp: log.Timestamp };
       const entry = byDateShift[key];
       if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp; // earliest of the merged rounds anchors sort order
       const val = extractNumericResult(r);
       if (isNaN(val)) return;
-      if (hoursItem && r.ItemID === hoursItem.ItemID) { entry.hours = val; entry.hasModernRound = true; }
-      if (kwhItem && r.ItemID === kwhItem.ItemID) { entry.kwh = val; entry.hasModernRound = true; }
-      if (beforeItem && r.ItemID === beforeItem.ItemID) { entry.dieselBefore = val; entry.hasModernRound = true; }
-      if (afterItem && r.ItemID === afterItem.ItemID) { entry.dieselAfter = val; entry.hasModernRound = true; }
+      if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
+      if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
+      if (beforeItem && r.ItemID === beforeItem.ItemID) entry.dieselBefore = val;
+      if (afterItem && r.ItemID === afterItem.ItemID) entry.dieselAfter = val;
       if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) entry.legacyLevel = val;
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     // Fall back to the legacy Fuel Level reading wherever a date+shift
-    // has no Before value of its own AND no modern DG Set Operations
-    // round data at all — covers every shift logged before the
-    // Before/After split shipped, without touching shifts that already
-    // have a real Before value OR that are otherwise using the modern
-    // round (Hours/kWh/After) but simply left Before blank — for those,
-    // silently borrowing an unrelated legacy reading would turn a
-    // genuinely missing value into a misleading computed one instead of
-    // correctly showing as unavailable.
+    // has no Before value of its own. Confirmed against real data: Fuel
+    // Level is still the field technicians actually fill in every
+    // shift (Before/After Top Up are rarely used), so this fallback is
+    // the NORMAL path going forward, not just a historic one — it must
+    // stay unconditional, not gated on whether Hours/kWh were also
+    // logged that shift.
     rows.forEach(r => {
-      if (r.dieselBefore == null && r.legacyLevel != null && !r.hasModernRound) r.dieselBefore = r.legacyLevel;
+      if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel;
     });
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
@@ -1955,6 +1955,19 @@ const HSModule = (function () {
       const r = rows[i], next = rows[i + 1];
       r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
+      // Sanity guard: a running-hours meter can never advance MORE than
+      // the actual wall-clock time that elapsed between the two
+      // readings — that's a hard physical ceiling, not a heuristic. A
+      // typo (extra digit, misplaced decimal) on either reading can
+      // otherwise produce a wildly inflated "hours run" that then
+      // dominates the whole period's total. Negative deltas (meter
+      // appearing to go backwards) are equally impossible and cleared
+      // the same way.
+      if (typeof r.hoursRun === 'number' && next) {
+        const elapsedHrs = (new Date(next.timestamp).getTime() - new Date(r.timestamp).getTime()) / 3600000;
+        if (r.hoursRun < 0 || (elapsedHrs > 0 && r.hoursRun > elapsedHrs + 0.25)) r.hoursRun = null; // +0.25hr slack for clock/rounding drift
+      }
+      if (typeof r.kwhGenerated === 'number' && r.kwhGenerated < 0) r.kwhGenerated = null; // a kWh meter can't run backwards either
       r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
       if (r.dieselAfter != null) {
         // Top-up this shift — readings are all taken at shift start, so
@@ -2222,7 +2235,7 @@ const HSModule = (function () {
     function cellFor(itemId, day, shift) {
       const dateStr = new Date(year, month - 1, day).toDateString();
       const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
-        new Date(l.Timestamp).toDateString() === dateStr &&
+        shiftDayBucket(l.Timestamp, shift) === dateStr &&
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       if (!log) return null;
       const result = results.find(r => r.LogID === log.LogID && r.ItemID === itemId) || null;
@@ -2300,14 +2313,14 @@ const HSModule = (function () {
     function performedByFor(day, shift) {
       const dateStr = new Date(year, month - 1, day).toDateString();
       const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
-        new Date(l.Timestamp).toDateString() === dateStr &&
+        shiftDayBucket(l.Timestamp, shift) === dateStr &&
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       return log ? log.PerformedBy : '';
     }
     function notesFor(day, shift) {
       const dateStr = new Date(year, month - 1, day).toDateString();
       const log = logsCache.find(l => l.TemplateID === template.TemplateID &&
-        new Date(l.Timestamp).toDateString() === dateStr &&
+        shiftDayBucket(l.Timestamp, shift) === dateStr &&
         (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
       return log ? (log.Notes || '') : '';
     }
@@ -2965,21 +2978,41 @@ const HSModule = (function () {
   // ───────────────────────────────────────────────────────────
   // CHECKLIST FILL FORM
   // ───────────────────────────────────────────────────────────
+  // 3rd shift (9pm–7am) straddles midnight, so which calendar date its
+  // entries land on depends on exactly when during the night the
+  // technician submits — anywhere from "still today" (just after 9pm)
+  // to "already tomorrow" (up to 7am). Grouped by raw clock-date, that
+  // splits the SAME shift's entries across two different date buckets
+  // depending on submission time, and can even make TONIGHT's 3rd
+  // shift look already-submitted (falsely blocking a legitimate new
+  // entry) purely because last night's post-midnight entry happens to
+  // land on today's date. Bucket 3rd-shift entries by the date the
+  // shift STARTED instead — any 3rd-shift reading logged in the early
+  // morning (before noon) belongs to the PREVIOUS calendar day's shift.
+  // Also used to bucket "now" itself (same function, same rule) so a
+  // technician checking at 2 AM is correctly matched against last
+  // night's shift, not treated as "today, brand new 3rd shift".
+  function shiftDayBucket(timestampOrDate, shift) {
+    const d = new Date(timestampOrDate);
+    if (shift === '3rd' && d.getHours() < 12) d.setDate(d.getDate() - 1);
+    return d.toDateString();
+  }
   function hasSubmittedToday(templateId, shift) {
-    const today = new Date().toDateString();
+    const todayBucket = shift ? shiftDayBucket(new Date(), shift) : new Date().toDateString();
     return logsCache.some(l => {
       if (l.TemplateID !== templateId) return false;
-      if (new Date(l.Timestamp).toDateString() !== today) return false;
-      if (!shift) return true; // non-Daily: no shift concept, just "any log today"
-      return l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'));
+      if (!shift) return new Date(l.Timestamp).toDateString() === todayBucket; // non-Daily: no shift concept, just "any log today"
+      const matchesShift = l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'));
+      if (!matchesShift) return false;
+      return shiftDayBucket(l.Timestamp, shift) === todayBucket;
     });
   }
   function todaysLogFor(templateId, shift) {
-    const today = new Date().toDateString();
+    const todayBucket = shiftDayBucket(new Date(), shift);
     return logsCache.find(l =>
       l.TemplateID === templateId &&
-      new Date(l.Timestamp).toDateString() === today &&
-      (l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd')))
+      (l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))) &&
+      shiftDayBucket(l.Timestamp, shift) === todayBucket
     ) || null;
   }
   // Shift time windows: 1st 7am-2pm, 2nd 2pm-9pm, 3rd 9pm-7am (wraps
@@ -3937,7 +3970,8 @@ const HSModule = (function () {
     }
     function loggedShifts(templateId, day) {
       const set = new Set();
-      logsCache.filter(l => l.TemplateID === templateId && new Date(l.Timestamp).toDateString() === day.toDateString())
+      const dayStr = day.toDateString();
+      logsCache.filter(l => l.TemplateID === templateId && shiftDayBucket(l.Timestamp, l.Shift) === dayStr)
         .forEach(l => {
           if (l.Shift === '2nd3rd') { set.add('2nd'); set.add('3rd'); }
           else if (l.Shift) set.add(l.Shift);
