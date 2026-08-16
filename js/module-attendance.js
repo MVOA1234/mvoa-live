@@ -704,7 +704,7 @@
             <img src="${logoUrl}" alt="MVOA" style="height:48px;display:block;">
           </div>
         </div>
-        <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.2rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:7px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
+        <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.2rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:7px;border-bottom:1px solid rgba(255,255,255,0.35);">MVOA STAFF ID</div>
         <div style="grid-area:photo;display:flex;flex-direction:column;align-items:center;">
           ${photoBox}
           <div style="font-size:0.7rem;opacity:0.9;margin-top:6px;text-align:center;overflow-wrap:break-word;max-width:100px;">
@@ -714,10 +714,10 @@
         </div>
         <div style="grid-area:info;min-width:0;align-self:start;padding-top:2px;">
           <div style="font-size:1.3rem;font-weight:700;line-height:1.28;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
-          <div style="font-size:0.95rem;opacity:0.92;overflow-wrap:break-word;margin-top:2px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
+          <div style="font-size:1.1rem;font-weight:700;opacity:0.95;overflow-wrap:break-word;margin-top:2px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
           <div style="font-family:ui-monospace,Menlo,monospace;font-size:1.15rem;font-weight:700;letter-spacing:3px;margin-top:5px;">${escapeHtml(staff.Code)}</div>
-          <div style="font-size:0.85rem;opacity:0.85;margin-top:5px;min-height:1.1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
-          <div style="font-size:0.75rem;opacity:0.82;margin-top:5px;">${staff.CreatedDate ? `Date of Joining: ${escapeHtml(formatJoinDate(staff.CreatedDate))}` : ''}</div>
+          <div style="font-size:1.05rem;font-weight:700;opacity:0.95;margin-top:5px;min-height:1.1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
+          <div style="font-size:0.75rem;opacity:0.82;margin-top:5px;">${staff.CreatedDate ? `Date of Issue: ${escapeHtml(formatJoinDate(staff.CreatedDate))}` : ''}</div>
           <div style="font-size:0.7rem;opacity:0.72;margin-top:5px;">${escapeHtml(staff.StaffID)}</div>
         </div>
       </div>
