@@ -78,6 +78,17 @@ const FinanceModule = (function () {
   const TAB_NOTES = 'FinanceRequestNotes';
   const TAB_ROLES = 'Roles';
   const TAB_BUDGETS = 'FinanceBudgets';
+  // Budget Revision approvals get their OWN sheet, separate from
+  // FinanceApprovals — bug found in testing: "My Approvals" and its
+  // unread-count badge scan FinanceApprovals globally by ApproverName and
+  // expect every RequestID in there to resolve to a real FinanceRequests
+  // row (see renderMyApprovals / computeMyApprovalsNewNoteCounts). A
+  // Budget Revision's RequestID (e.g. "BREV-0001") never appears in
+  // FinanceRequests, so writing its approvals into the shared sheet made
+  // it show up there as a permanently-stuck "1 new" phantom card reading
+  // "Request no longer available." Same column shape (APPROVAL_COLS),
+  // just a different tab so the two chains can never cross-contaminate.
+  const TAB_BUDGET_APPROVALS = 'FinanceBudgetApprovals';
   // One-time-agreement registry (Schedule B contracts, Schedule C
   // utility/insurance accounts) — lets a future "Payment Request" flow
   // look up the vendor and check the agreement is still within its valid
@@ -757,9 +768,9 @@ const FinanceModule = (function () {
     el.innerHTML = `<h3 style="margin:0 0 10px;color:var(--mvoa-blue);">🔄 Pending Budget Revisions</h3><p class="muted">Loading…</p>`;
     let allApprovals = [];
     try {
-      const rows = await MVOA.sheetsRead(TAB_APPROVALS);
+      const rows = await MVOA.sheetsRead(TAB_BUDGET_APPROVALS);
       allApprovals = rows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
-    } catch (e) { /* render with what we have — approve buttons just won't reflect prior votes until next load */ }
+    } catch (e) { /* FinanceBudgetApprovals tab not created yet, or a transient read error — render with no votes recorded rather than breaking the whole screen */ }
     // Element may have been replaced by a subsequent render() while this
     // async load was in flight (e.g. user switched tabs) — bail rather
     // than write into a detached node.
@@ -810,14 +821,14 @@ const FinanceModule = (function () {
     const errEl = document.querySelector(`.fin-budrev-error[data-revision-id="${revisionId}"]`);
     try {
       const user = MVOA.getUser();
-      const approvalRows = await MVOA.sheetsRead(TAB_APPROVALS, true);
+      const approvalRows = await MVOA.sheetsRead(TAB_BUDGET_APPROVALS, true);
       const existingIds = approvalRows.slice(1).map(r => r[0]);
       const approvalId = MVOA.nextId('BAPR', existingIds);
       const row = {
         ApprovalID: approvalId, RequestID: revisionId, ApproverName: user.name, ApproverRole: user.role || '',
         Stage: stage, Decision: decision, Comment: '', Timestamp: new Date().toISOString()
       };
-      await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, row));
+      await MVOA.sheetsAppend(TAB_BUDGET_APPROVALS, objToRow(APPROVAL_COLS, row));
       await loadAll(true);
       render(container);
     } catch (e) {
