@@ -1275,10 +1275,11 @@
     modal.innerHTML = `
       <div class="ops-qr-box">
         <h3 style="margin-top:0;">Check In / Out</h3>
+        <video id="att-code-video" autoplay playsinline muted style="display:none;width:100%;max-width:280px;border-radius:8px;margin:6px auto 10px;background:#000;"></video>
+        <canvas id="att-code-canvas" style="display:none;"></canvas>
+        <p class="muted" id="att-code-camstatus" style="font-size:0.8rem;">Starting camera…</p>
         <input type="text" id="att-code-input" inputmode="numeric" maxlength="4" placeholder="0000" style="width:100%;max-width:200px;font-size:28px;letter-spacing:10px;text-align:center;font-family:ui-monospace,Menlo,monospace;padding:10px;margin:10px 0;">
         <p class="muted" id="att-code-status">Staff types their code, then Submit.</p>
-        <video id="att-code-video" autoplay playsinline muted style="display:none;width:100%;max-width:280px;border-radius:8px;margin:10px 0;"></video>
-        <canvas id="att-code-canvas" style="display:none;"></canvas>
         <div class="mvoa-row">
           <button id="att-code-submit" class="btn-primary">Submit</button>
           <button id="att-code-cancel" class="btn-secondary">Close</button>
@@ -1288,10 +1289,27 @@
     document.body.appendChild(modal);
     const input = modal.querySelector('#att-code-input');
     const statusEl = modal.querySelector('#att-code-status');
+    const camStatusEl = modal.querySelector('#att-code-camstatus');
     const video = modal.querySelector('#att-code-video');
     const canvas = modal.querySelector('#att-code-canvas');
     let stream = null;
     input.focus();
+
+    // Start the camera as soon as the modal opens (while the staff member
+    // is still typing their code) so it's warmed up and visibly live —
+    // capture just grabs a frame from the already-running feed instead of
+    // requesting access on submit, which is both faster and makes it clear
+    // a photo option is actually there, not just the code box.
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+      .then(s => {
+        stream = s;
+        video.srcObject = s;
+        video.style.display = 'block';
+        camStatusEl.textContent = 'Camera ready — a photo is captured automatically on Submit.';
+      })
+      .catch(() => {
+        camStatusEl.textContent = 'Camera unavailable — check-in/out will proceed without a photo.';
+      });
 
     async function stop() {
       if (stream) stream.getTracks().forEach(t => t.stop());
@@ -1304,29 +1322,17 @@
     modal.querySelector('#att-code-cancel').addEventListener('click', stop);
 
     // One low-res frame, same square-crop + JPEG compression the old QR
-    // flow used — just captured once on demand instead of decoded on
-    // every animation frame.
+    // flow used — grabbed from the already-live stream, so this is
+    // near-instant instead of waiting on a fresh getUserMedia() call.
     function captureOnePhoto() {
       return new Promise((resolve) => {
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
-          .then(s => {
-            stream = s;
-            video.srcObject = s;
-            video.style.display = 'block';
-            const onReady = () => {
-              video.removeEventListener('loadeddata', onReady);
-              const side = Math.min(video.videoWidth, video.videoHeight);
-              canvas.width = 320; canvas.height = 320;
-              canvas.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
-              canvas.toBlob(blob => {
-                if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-                video.style.display = 'none';
-                resolve(blob ? new File([blob], 'checkin.jpg', { type: 'image/jpeg' }) : null);
-              }, 'image/jpeg', 0.6);
-            };
-            video.addEventListener('loadeddata', onReady);
-          })
-          .catch(() => resolve(null)); // camera unavailable/denied — proceed without a photo
+        if (!stream || !video.videoWidth) { resolve(null); return; }
+        const side = Math.min(video.videoWidth, video.videoHeight);
+        canvas.width = 320; canvas.height = 320;
+        canvas.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
+        canvas.toBlob(blob => {
+          resolve(blob ? new File([blob], 'checkin.jpg', { type: 'image/jpeg' }) : null);
+        }, 'image/jpeg', 0.6);
       });
     }
 
