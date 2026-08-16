@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// MODULE: Approvals & Payments
+// MODULE: Finance Application
 // Sheet tabs used: FinanceApprovalRules | FinanceRequests |
 //   FinanceApprovals | FinanceRequestNotes | Roles | ExpenseSheet_<MonYY>
 //   (one tab per month, created on demand — see sheetsEnsureTab)
@@ -63,7 +63,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('finance', {
-  label: 'Approvals & Payments',
+  label: 'Finance Application',
   icon: '💳',
   roles: ['ALL'], // TESTING: opened to all roles temporarily — revert to real roles once finalized
   init: function (container) {
@@ -430,7 +430,7 @@ const FinanceModule = (function () {
     try {
       await loadAll(true);
     } catch (e) {
-      container.innerHTML = `<p class="error-text">Could not load Approvals &amp; Payments: ${escapeHtml(e.message)}</p>`;
+      container.innerHTML = `<p class="error-text">Could not load Finance Application: ${escapeHtml(e.message)}</p>`;
       return;
     }
     render(container);
@@ -530,7 +530,7 @@ const FinanceModule = (function () {
       <p style="margin:0 0 8px;font-weight:600;color:var(--mvoa-blue);">${groupLabel}</p>
       <div class="ops-tabs">
         ${subTabs.map(t => `<button data-view="${t.view}" class="ops-tab-btn ${currentView===t.view?'active':''}">${tabLabelHtml(t)}</button>`).join('')}
-        <button id="fin-back-btn" class="ops-tab-btn">← Back to Approvals &amp; Payments</button>
+        <button id="fin-back-btn" class="ops-tab-btn">← Back to Finance Application</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
