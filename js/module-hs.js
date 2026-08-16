@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// MODULE: Plant Rounds & Compliance
+// MODULE: Villa Complex Rounds
 // Columns:
 //   HSCategories: CategoryKey | Label | QRMatchKeyword | FailTaskCategory | Icon | Active
 //     CategoryKey is the internal key used as HSChecklistTemplates.QRTarget
@@ -35,7 +35,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('hs', {
-  label: 'Plant Rounds & Compliance',
+  label: 'Villa Complex Rounds',
   icon: '🛟',
   roles: ['ALL'], // TESTING: opened to all roles temporarily — revert once roles are finalized
   init: function (container) {
@@ -282,7 +282,7 @@ const HSModule = (function () {
     if (!beforeItem || !afterItem) {
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
-          <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+          <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
           <strong>⛽ Log Diesel Top-Up</strong>
         </div>
         <p class="muted">Diesel Level Before/After Top Up items aren't configured yet.</p>
@@ -294,7 +294,7 @@ const HSModule = (function () {
     const user = MVOA.getUser();
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>⛽ Log Diesel Top-Up</strong>
       </div>
       <p class="muted" style="margin:0 0 12px;">No QR scan needed. Log this any time during a shift that's already been logged today — before/after readings save independently and don't lock with the rest of that shift's checklist.</p>
@@ -424,7 +424,7 @@ const HSModule = (function () {
     const dailyTemplates = templatesCache.filter(t => t.Frequency === 'Daily' && (t.ShiftBased === 'TRUE' || t.ShiftBased === 'true') && MVOA.canEditPlantRoundsSection(t.QRTarget, user));
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>📝 End of Shift Report</strong>
       </div>
       <p class="muted" style="margin:0 0 12px;">Only the shift currently in progress is shown here — end-of-shift notes can't be added for a shift once its window has ended.</p>
@@ -502,7 +502,7 @@ const HSModule = (function () {
   async function renderShiftDuty(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>🗓️ Shift Duty — This Week</strong>
       </div>
       <div id="hs-shiftduty-body"><p class="muted">Loading…</p></div>
@@ -642,7 +642,7 @@ const HSModule = (function () {
   async function renderAmcCompliance(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>📋 AMC &amp; Compliance</strong>
       </div>
       <div id="hs-amc-body"><p class="muted">Loading…</p></div>
@@ -1304,7 +1304,7 @@ const HSModule = (function () {
   function renderReportsMenu(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>📈 Reports</strong>
       </div>
       <div class="card" style="max-width:420px;margin:0;">
@@ -2446,7 +2446,7 @@ const HSModule = (function () {
   function renderDueDashboard(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>📊 Due Status</strong>
       </div>
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -2830,7 +2830,7 @@ const HSModule = (function () {
   // category a user happened to scan (evaluateMissedRounds) or open
   // (evaluateWeeklyItemCompliance), to run across EVERY Plant Rounds
   // category instead. Both pieces below are triggered from renderHome()
-  // — i.e. every time anyone opens the Plant Rounds & Compliance home
+  // — i.e. every time anyone opens the Villa Complex Rounds home
   // screen — so a missed DG Set/Housekeeping/etc. round now gets
   // auto-flagged the same way Security's rounds already were, not just
   // whichever category someone happens to visit. Both are best-effort
@@ -2942,7 +2942,7 @@ const HSModule = (function () {
     if (!canView) {
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
-          <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+          <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
           <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
         </div>
         <p class="muted">You don't have access to ${escapeHtml(categoryLabel(currentScan.qrTarget))}.</p>
@@ -2971,7 +2971,7 @@ const HSModule = (function () {
 
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>${escapeHtml(categoryLabel(currentScan.qrTarget))}${currentScan.assetName ? ' — ' + escapeHtml(currentScan.assetName) : ''}</strong>
       </div>
       ${layoutImageHtml}
@@ -4130,7 +4130,7 @@ const HSModule = (function () {
   function renderHistory(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
-        <button id="hs-back-home" class="btn-secondary">← Back to Plant Rounds &amp; Compliance</button>
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>📅 Checklist History</strong>
         <button id="hs-history-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
