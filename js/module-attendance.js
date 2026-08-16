@@ -679,52 +679,46 @@
   // Horizontal (landscape) layout: logo + staff photo on the left, name/
   // agency/role/code in the middle, QR on the right — standard ID-badge
   // proportions rather than the earlier portrait design.
-  function idCardInnerHtml(staff, logoUrl, qrUrl) {
+  function idCardInnerHtml(staff, logoUrl) {
     const photoThumb = staff.PhotoURL ? drivePhotoThumbUrl(staff.PhotoURL, 200) : '';
     const photoBox = `
-      <div style="width:84px;height:84px;border-radius:10px;background:#fff;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+      <div style="width:100px;height:100px;border-radius:10px;background:#fff;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
         ${photoThumb ? `
           <img src="${photoThumb}" alt="${escapeHtml(staff.Name)}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
-          <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;color:#9ca3af;font-size:0.6rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>
+          <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;color:#9ca3af;font-size:0.65rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>
         ` : `
-          <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:0.6rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>
+          <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:0.65rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>
         `}
       </div>
     `;
-    // Grid layout matching the requested arrangement: logo (top-left) and
-    // photo (below it) share a narrow left column across both rows;
-    // "STAFF ID" heads the middle column on row 1 with the name/agency/
-    // code/role/StaffID stack below it on row 2; the QR code sits in its
-    // own column on the right, spanning the full height of both rows (the
-    // same named grid-area 'qr' repeated in both template rows merges into
-    // one tall cell — that's what makes it span, not a manual row-span).
+    // Grid layout: logo (top-left) and photo (below it) share a narrow left
+    // column across both rows; "STAFF ID" heads the right column on row 1
+    // with the name/agency/code/role/StaffID stack below it on row 2. No QR
+    // column any more — the info column takes the freed width and text is
+    // sized up accordingly. Phone number sits under the photo, with Blood
+    // Group directly beneath it.
     return `
-      <div style="width:min(440px,94vw);background:${ID_CARD_GREEN};border-radius:18px;padding:18px 20px;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;box-sizing:border-box;display:grid;grid-template-columns:92px 1fr auto;grid-template-areas:'logo staffid qr' 'photo info qr';gap:8px 16px;align-items:center;">
+      <div style="width:min(440px,94vw);background:${ID_CARD_GREEN};border-radius:18px;padding:20px 24px;color:#fff;font-family:-apple-system,Arial,sans-serif;margin:0 auto;box-sizing:border-box;display:grid;grid-template-columns:108px 1fr;grid-template-areas:'logo staffid' 'photo info';gap:10px 20px;align-items:center;">
         <div style="grid-area:logo;display:flex;justify-content:center;">
           <div style="background:#fff;border-radius:8px;padding:6px 10px;">
-            <img src="${logoUrl}" alt="MVOA" style="height:44px;display:block;">
+            <img src="${logoUrl}" alt="MVOA" style="height:48px;display:block;">
           </div>
         </div>
-        <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.05rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
+        <div style="grid-area:staffid;align-self:center;text-align:center;font-size:1.2rem;font-weight:700;letter-spacing:2px;opacity:0.95;padding-bottom:7px;border-bottom:1px solid rgba(255,255,255,0.35);">STAFF ID</div>
         <div style="grid-area:photo;display:flex;flex-direction:column;align-items:center;">
           ${photoBox}
-          <div style="font-size:0.62rem;opacity:0.85;margin-top:4px;text-align:center;overflow-wrap:break-word;max-width:84px;">
-            ${staff.Phone ? `<svg width="9" height="9" viewBox="0 0 24 24" fill="#fff" style="vertical-align:-1px;margin-right:3px;"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>${escapeHtml(staff.Phone)}` : ''}
+          <div style="font-size:0.7rem;opacity:0.9;margin-top:6px;text-align:center;overflow-wrap:break-word;max-width:100px;">
+            ${staff.Phone ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="#fff" style="vertical-align:-1px;margin-right:3px;"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>${escapeHtml(staff.Phone)}` : ''}
           </div>
+          ${staff.BloodGroup ? `<div style="font-size:0.7rem;opacity:0.9;margin-top:3px;text-align:center;">Blood Group: ${escapeHtml(staff.BloodGroup)}</div>` : ''}
         </div>
         <div style="grid-area:info;min-width:0;align-self:start;padding-top:2px;">
-          <div style="font-size:1.05rem;font-weight:700;line-height:1.25;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
-          <div style="font-size:0.78rem;opacity:0.92;overflow-wrap:break-word;margin-top:1px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
-          <div style="font-family:ui-monospace,Menlo,monospace;font-size:0.95rem;font-weight:700;letter-spacing:3px;margin-top:3px;">${escapeHtml(staff.Code)}</div>
-          <div style="font-size:0.72rem;opacity:0.82;margin-top:3px;min-height:1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
-          <div style="font-size:0.62rem;opacity:0.8;margin-top:3px;">${staff.CreatedDate ? `Date of Joining: ${escapeHtml(formatJoinDate(staff.CreatedDate))}` : ''}</div>
-          <div style="font-size:0.6rem;opacity:0.7;margin-top:3px;">${escapeHtml(staff.StaffID)}</div>
-        </div>
-        <div style="grid-area:qr;align-self:center;justify-self:center;display:flex;flex-direction:column;align-items:center;">
-          <div style="background:#fff;border-radius:10px;padding:8px;">
-            <img src="${qrUrl}" alt="QR" style="width:96px;height:96px;display:block;">
-          </div>
-          <div style="font-size:0.68rem;opacity:0.85;margin-top:4px;text-align:center;">${staff.BloodGroup ? `Blood Group: ${escapeHtml(staff.BloodGroup)}` : ''}</div>
+          <div style="font-size:1.3rem;font-weight:700;line-height:1.28;overflow-wrap:break-word;">${escapeHtml(staff.Name)}</div>
+          <div style="font-size:0.95rem;opacity:0.92;overflow-wrap:break-word;margin-top:2px;">${escapeHtml(agencyName(staff.AgencyID))}</div>
+          <div style="font-family:ui-monospace,Menlo,monospace;font-size:1.15rem;font-weight:700;letter-spacing:3px;margin-top:5px;">${escapeHtml(staff.Code)}</div>
+          <div style="font-size:0.85rem;opacity:0.85;margin-top:5px;min-height:1.1em;">${staff.Role ? escapeHtml(staff.Role) : ''}</div>
+          <div style="font-size:0.75rem;opacity:0.82;margin-top:5px;">${staff.CreatedDate ? `Date of Joining: ${escapeHtml(formatJoinDate(staff.CreatedDate))}` : ''}</div>
+          <div style="font-size:0.7rem;opacity:0.72;margin-top:5px;">${escapeHtml(staff.StaffID)}</div>
         </div>
       </div>
     `;
@@ -732,12 +726,11 @@
 
   function showStaffIdCard(staff) {
     const logoUrl = new URL('assets/logo.png', window.location.href).href;
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent('MVOA-ATT:' + staff.StaffID)}`;
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
       <div class="ops-qr-box" style="width:min(480px,96vw);max-width:none;">
-        ${idCardInnerHtml(staff, logoUrl, qrUrl)}
+        ${idCardInnerHtml(staff, logoUrl)}
         <div class="mvoa-row" style="margin-top:16px;justify-content:center;gap:10px;">
           <button id="att-badge-print" class="btn-primary">🖨 Print ID Card</button>
           <button id="att-badge-close" class="btn-secondary">Close</button>
@@ -746,22 +739,26 @@
     `;
     document.body.appendChild(modal);
     modal.querySelector('#att-badge-close').addEventListener('click', () => modal.remove());
-    modal.querySelector('#att-badge-print').addEventListener('click', () => printStaffIdCard(staff, logoUrl, qrUrl));
+    modal.querySelector('#att-badge-print').addEventListener('click', () => printStaffIdCard(staff, logoUrl));
   }
 
-  function printStaffIdCard(staff, logoUrl, qrUrl) {
+  function printStaffIdCard(staff, logoUrl) {
     const win = window.open('', '_blank');
     win.document.write(`
       <html>
       <head>
         <title>ID Card — ${escapeHtml(staff.Name)}</title>
         <style>
+          html, body { height:auto; }
           body { margin:0; padding:24px; display:flex; align-items:center; justify-content:center; min-height:100vh; font-family:-apple-system, Arial, sans-serif; background:#f2f2f2; box-sizing:border-box; }
-          @media print { body { background:#fff; padding:0; } @page { size: landscape; } }
+          @media print {
+            body { background:#fff; padding:0; min-height:0; height:auto; display:block; }
+            @page { size: landscape; margin: 10mm; }
+          }
         </style>
       </head>
       <body>
-        ${idCardInnerHtml(staff, logoUrl, qrUrl)}
+        ${idCardInnerHtml(staff, logoUrl)}
         <script>
           window.onload = () => { window.print(); };
         </script>
@@ -834,8 +831,7 @@
         </div>
         <div class="mvoa-row" style="margin-bottom:14px;gap:10px;flex-wrap:wrap;">
           ${editable ? `
-            <button id="att-log-scan" class="btn-primary">📷 Scan QR</button>
-            <button id="att-log-code" class="btn-secondary">🔢 Enter Code</button>
+            <button id="att-log-checkinout" class="btn-primary">🔢 Check In / Out</button>
           ` : ''}
           <button id="att-log-report" class="btn-secondary">📊 Monthly Report</button>
         </div>
@@ -863,8 +859,7 @@
     `;
     host.querySelector('#att-log-date').addEventListener('change', (e) => renderAttendanceLogs(host, user, e.target.value));
     if (editable) {
-      host.querySelector('#att-log-scan').addEventListener('click', () => openAttendanceScanner(host, user));
-      host.querySelector('#att-log-code').addEventListener('click', () => openCodeEntry(host, user));
+      host.querySelector('#att-log-checkinout').addEventListener('click', () => openCheckInOut(host, user));
     }
     host.querySelector('#att-log-report').addEventListener('click', () => renderMonthlyReport(host, user));
   }
@@ -1261,119 +1256,29 @@
     }
   }
 
-  // QR scan station — a persistent camera modal (stays open across
-  // multiple scans, like a real gate station) reusing the same
-  // video/canvas/jsQR pattern as Plant Rounds' equipment QR scanner.
-  // Per-staff cooldown avoids one held-up badge re-triggering on every
-  // animation frame; `processing` pauses decoding while a scan's already
-  // being written, so overlapping scans can't race each other client-side.
-  function openAttendanceScanner(host, user) {
+  // Check-in/out via 4-digit code + a single low-resolution photo snapshot
+  // — replaces the old QR-scan station. QR recognition required decoding
+  // every camera frame (even throttled, still tens of times a second)
+  // through jsQR, which stayed noticeably slow on mid-range phones because
+  // jsQR's cost scales with how many frames it has to examine before
+  // finding a code. A 4-digit code needs no image processing to identify
+  // staff at all — it's instant — and the camera is still used, but only
+  // to grab ONE frame right after the code is confirmed, purely for the
+  // same photo-evidence purpose the old flow's captureFrameAsFile served.
+  // If camera access fails or is denied, check-in/out still proceeds
+  // without a photo rather than blocking attendance over it (same
+  // fail-open reasoning processAttendanceScan already uses for a failed
+  // photo upload).
+  function openCheckInOut(host, user) {
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
       <div class="ops-qr-box">
-        <video id="att-qr-video" autoplay playsinline muted></video>
-        <canvas id="att-qr-canvas" style="display:none;"></canvas>
-        <p class="muted" id="att-qr-status">Point camera at the staff member's QR badge…</p>
-        <button id="att-qr-cancel" class="btn-secondary">Close</button>
-      </div>
-    `;
-    document.body.appendChild(modal);
-    const video = modal.querySelector('#att-qr-video');
-    const canvas = modal.querySelector('#att-qr-canvas');
-    const statusEl = modal.querySelector('#att-qr-status');
-    let stream, raf, processing = false;
-    const cooldown = {};
-
-    async function stop() {
-      if (raf) cancelAnimationFrame(raf);
-      if (stream) stream.getTracks().forEach(t => t.stop());
-      modal.remove();
-      // Scans write straight to the Sheet without touching allLogsCache —
-      // reload it now so the register reflects what was just scanned,
-      // instead of re-rendering from the stale pre-scan cache.
-      try { await loadAll(true); } catch (e) { /* register just won't refresh this time */ }
-      renderAttendanceLogs(host, user);
-    }
-    modal.querySelector('#att-qr-cancel').addEventListener('click', stop);
-
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      .then(s => { stream = s; video.srcObject = s; tick(); })
-      .catch(e => { statusEl.textContent = 'Camera access failed: ' + e.message; });
-
-    function captureFrameAsFile(filename) {
-      return new Promise((resolve) => {
-        const side = Math.min(video.videoWidth, video.videoHeight);
-        const c = document.createElement('canvas');
-        c.width = 320; c.height = 320;
-        c.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
-        c.toBlob(blob => resolve(blob ? new File([blob], filename, { type: 'image/jpeg' }) : null), 'image/jpeg', 0.7);
-      });
-    }
-
-    // Decoding the full native camera frame (often 1080p+) on every single
-    // animation-frame tick — up to 60x/sec — is what made recognition feel
-    // slow on mid-range phones: jsQR's cost scales with pixel count, and a
-    // QR code doesn't need anywhere near that resolution or frame rate to
-    // read reliably. Two changes fix this: (1) downscale the decode canvas
-    // to a fixed, much smaller size (matching the crop captureFrameAsFile
-    // already uses for the photo, so this isn't a new quality bar), and
-    // (2) throttle actual decode attempts to a few times a second instead
-    // of every rAF tick — still fast enough to feel instant, far lighter
-    // on the CPU.
-    const DECODE_SIZE = 320;
-    const DECODE_INTERVAL_MS = 150;
-    let lastDecodeAt = 0;
-    canvas.width = DECODE_SIZE;
-    canvas.height = DECODE_SIZE;
-    function tick() {
-      const now = performance.now();
-      if (!processing && video.readyState === video.HAVE_ENOUGH_DATA && (now - lastDecodeAt) >= DECODE_INTERVAL_MS) {
-        lastDecodeAt = now;
-        const side = Math.min(video.videoWidth, video.videoHeight);
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, DECODE_SIZE, DECODE_SIZE);
-        const img = ctx.getImageData(0, 0, DECODE_SIZE, DECODE_SIZE);
-        const code = typeof jsQR === 'function' ? jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' }) : null;
-        if (code) {
-          const m = (code.data || '').match(/^MVOA-ATT:(.+)$/);
-          if (m) {
-            const staffId = m[1];
-            const nowMs = Date.now();
-            if (!cooldown[staffId] || nowMs - cooldown[staffId] > 8000) {
-              cooldown[staffId] = nowMs;
-              processing = true;
-              statusEl.textContent = 'Processing…';
-              captureFrameAsFile(`${staffId}_scan.jpg`)
-                .then(file => processAttendanceScan(staffId, file, user))
-                .then(result => {
-                  statusEl.innerHTML = result.type === 'error'
-                    ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
-                  processing = false;
-                  setTimeout(() => { if (statusEl) statusEl.textContent = "Point camera at the staff member's QR badge…"; }, 2500);
-                })
-                .catch(e => {
-                  statusEl.textContent = 'Scan failed: ' + e.message;
-                  processing = false;
-                });
-            }
-          }
-        }
-      }
-      raf = requestAnimationFrame(tick);
-    }
-  }
-
-  // 4-digit code fallback — same check-in/out/3rd-scan logic, no camera
-  // or photo involved, for staff without a badge or a working camera.
-  function openCodeEntry(host, user) {
-    const modal = document.createElement('div');
-    modal.className = 'ops-qr-modal';
-    modal.innerHTML = `
-      <div class="ops-qr-box">
-        <h3 style="margin-top:0;">Enter 4-digit code</h3>
+        <h3 style="margin-top:0;">Check In / Out</h3>
         <input type="text" id="att-code-input" inputmode="numeric" maxlength="4" placeholder="0000" style="width:100%;max-width:200px;font-size:28px;letter-spacing:10px;text-align:center;font-family:ui-monospace,Menlo,monospace;padding:10px;margin:10px 0;">
         <p class="muted" id="att-code-status">Staff types their code, then Submit.</p>
+        <video id="att-code-video" autoplay playsinline muted style="display:none;width:100%;max-width:280px;border-radius:8px;margin:10px 0;"></video>
+        <canvas id="att-code-canvas" style="display:none;"></canvas>
         <div class="mvoa-row">
           <button id="att-code-submit" class="btn-primary">Submit</button>
           <button id="att-code-cancel" class="btn-secondary">Close</button>
@@ -1383,25 +1288,58 @@
     document.body.appendChild(modal);
     const input = modal.querySelector('#att-code-input');
     const statusEl = modal.querySelector('#att-code-status');
+    const video = modal.querySelector('#att-code-video');
+    const canvas = modal.querySelector('#att-code-canvas');
+    let stream = null;
     input.focus();
 
     async function stop() {
+      if (stream) stream.getTracks().forEach(t => t.stop());
       modal.remove();
-      // Same reload as the QR scanner's stop() — the code-entry scan wrote
-      // straight to the Sheet, so the register needs a fresh read too.
+      // Writes go straight to the Sheet without touching allLogsCache —
+      // reload it now so the register reflects what was just logged.
       try { await loadAll(true); } catch (e) { /* register just won't refresh this time */ }
       renderAttendanceLogs(host, user);
     }
     modal.querySelector('#att-code-cancel').addEventListener('click', stop);
+
+    // One low-res frame, same square-crop + JPEG compression the old QR
+    // flow used — just captured once on demand instead of decoded on
+    // every animation frame.
+    function captureOnePhoto() {
+      return new Promise((resolve) => {
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+          .then(s => {
+            stream = s;
+            video.srcObject = s;
+            video.style.display = 'block';
+            const onReady = () => {
+              video.removeEventListener('loadeddata', onReady);
+              const side = Math.min(video.videoWidth, video.videoHeight);
+              canvas.width = 320; canvas.height = 320;
+              canvas.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
+              canvas.toBlob(blob => {
+                if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+                video.style.display = 'none';
+                resolve(blob ? new File([blob], 'checkin.jpg', { type: 'image/jpeg' }) : null);
+              }, 'image/jpeg', 0.6);
+            };
+            video.addEventListener('loadeddata', onReady);
+          })
+          .catch(() => resolve(null)); // camera unavailable/denied — proceed without a photo
+      });
+    }
 
     async function submit() {
       const code = input.value.trim();
       if (!/^\d{4}$/.test(code)) { statusEl.textContent = 'Enter exactly 4 digits.'; return; }
       const staff = allStaffCache.find(s => s.Code === code && isActive(s.Active));
       if (!staff) { statusEl.textContent = 'No active staff member has that code.'; input.value = ''; return; }
+      statusEl.textContent = 'Capturing photo…';
+      const photoFile = await captureOnePhoto();
       statusEl.textContent = 'Processing…';
       try {
-        const result = await processAttendanceScan(staff.StaffID, null, user);
+        const result = await processAttendanceScan(staff.StaffID, photoFile, user);
         statusEl.innerHTML = result.type === 'error'
           ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
         input.value = '';
