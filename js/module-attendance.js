@@ -1300,7 +1300,7 @@
     // capture just grabs a frame from the already-running feed instead of
     // requesting access on submit, which is both faster and makes it clear
     // a photo option is actually there, not just the code box.
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
       .then(s => {
         stream = s;
         video.srcObject = s;
