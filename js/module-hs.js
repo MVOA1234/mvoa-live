@@ -2459,8 +2459,13 @@ const HSModule = (function () {
 
     const groupsEl = container.querySelector('#hs-due-groups');
     const user = MVOA.getUser();
-    const groups = categoriesCache.map(c => c.CategoryKey)
-      .filter(target => MVOA.canViewPlantRoundsSection(target, user))
+    const accessibleTargets = categoriesCache.map(c => c.CategoryKey)
+      .filter(target => MVOA.canViewPlantRoundsSection(target, user));
+    if (!accessibleTargets.length) {
+      groupsEl.innerHTML = '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
+      return;
+    }
+    const groups = accessibleTargets
       .map(target => {
         const rows = templatesCache
           .filter(t => t.QRTarget === target)
@@ -2489,14 +2494,16 @@ const HSModule = (function () {
               return { template: t, due: dueInfo(t, aid), assetLabel: label };
             });
           })
-          .sort((a, b) => {
-            if (a.due.overdue !== b.due.overdue) return a.due.overdue ? -1 : 1;
-            return FREQUENCY_ORDER.indexOf(a.template.Frequency) - FREQUENCY_ORDER.indexOf(b.template.Frequency);
-          });
+          // Only overdue items are shown on this screen now — "Up to date"
+          // rows are filtered out entirely rather than just sorted after
+          // them, so a category with nothing overdue doesn't show at all.
+          .filter(r => r.due.overdue)
+          .sort((a, b) => FREQUENCY_ORDER.indexOf(a.template.Frequency) - FREQUENCY_ORDER.indexOf(b.template.Frequency));
         return { target, rows };
-      });
+      })
+      .filter(g => g.rows.length);
     if (!groups.length) {
-      groupsEl.innerHTML = '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
+      groupsEl.innerHTML = '<p class="muted">Nothing overdue right now — everything is up to date.</p>';
       return;
     }
     container.querySelector('#hs-due-pdf').addEventListener('click', () => {
