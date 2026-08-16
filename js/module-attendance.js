@@ -951,7 +951,7 @@
     });
 
     return `
-      <table class="mvoa-table">
+      <table class="mvoa-table att-pa-grid">
         <thead>
           <tr><th colspan="${2 + daysInMonth}" style="text-align:center;">Attendance Record for the Month of ${escapeHtml(monthLabel)}</th></tr>
           <tr><th>Agency</th><th>Staff Name</th>${dayHeaders.map(h => `<th style="text-align:center;">${h}</th>`).join('')}</tr>
@@ -1176,6 +1176,16 @@
             .att-times-grid th:first-child, .att-times-grid td:first-child,
             .att-times-grid th:nth-child(2), .att-times-grid td:nth-child(2) { width: 48px; }
             .att-times-grid th, .att-times-grid td { font-size: 0.68rem; }
+            /* Attendance Record (P/A grid): the generic first-two-column
+               rule above (70px each) split evenly between Agency and Staff
+               Name, so a name like "Srikanth Nagalingam" had nowhere to
+               break except mid-word. Give Agency less and Staff Name more
+               so the first name fits on one line and only a second word
+               wraps to a second line; the day columns (P/A, one character
+               each) shrink automatically since table-layout:fixed divides
+               the remaining width across them. */
+            .att-pa-grid th:first-child, .att-pa-grid td:first-child { width: 34px; }
+            .att-pa-grid th:nth-child(2), .att-pa-grid td:nth-child(2) { width: 92px; }
             @page { size: landscape; margin: 8mm; }
           }
         </style>
