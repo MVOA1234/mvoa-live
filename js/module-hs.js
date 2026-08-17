@@ -2797,8 +2797,30 @@ const HSModule = (function () {
     // gets a new key, so it can flag again once genuinely overdue in
     // that new window.
     if (template.Frequency === 'Daily') {
+      // Bug found in testing: this used to mark a Daily item overdue the
+      // INSTANT a new day began and it hadn't been logged yet — e.g. a
+      // ticket fired at 00:25 for a check whose day had barely started,
+      // with 23+ hours still left to log it. Weekly/Monthly below both
+      // give their current window's FULL duration before flagging
+      // overdue (Weekly isn't overdue on Monday itself; Monthly isn't
+      // overdue until its window closes) — Daily needs the same "full
+      // current cycle" grace, just sized to one day instead of a week
+      // or a window.
       const doneToday = last && new Date(last.Timestamp).toDateString() === now.toDateString();
-      return { text: lastText, overdue: !doneToday, cycleKey: isoDate(now) };
+      if (doneToday) return { text: lastText, overdue: false, cycleKey: isoDate(now) };
+      const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+      const doneYesterday = last && new Date(last.Timestamp).toDateString() === yesterday.toDateString();
+      if (doneYesterday) {
+        // Yesterday's occurrence was completed; today's just hasn't
+        // happened YET — today isn't over. Not overdue.
+        return { text: 'Due today', overdue: false, cycleKey: isoDate(now) };
+      }
+      // Neither today nor yesterday was logged — at least one full day
+      // was missed outright. cycleKey is keyed to the missed day
+      // (yesterday), not today, so each newly-missed day gets its own
+      // dedupe key/ticket instead of today's still-in-progress cycle
+      // silently absorbing an older miss.
+      return { text: lastText, overdue: true, cycleKey: isoDate(yesterday) };
     }
 
     if (template.Frequency === 'Weekly') {
