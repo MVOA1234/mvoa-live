@@ -1173,6 +1173,30 @@ const HSModule = (function () {
     isLoggingInOut = false;
   }
 
+  // ───────────────────────────────────────────────────────────
+  // Concurrency guard for the auto-task-creation checks below — bug
+  // found in testing: each of these does an unguarded sheetsRead
+  // (OpsTasks) → check title → sheetsAppend-if-missing, with real
+  // network latency in between. Two overlapping calls for the SAME
+  // check (e.g. Home's evaluateAllMissedRounds() firing in the
+  // background right as the user taps into a category, which
+  // independently calls evaluateMissedRounds() for that same category —
+  // exactly what produced two identical "Round 1 not performed" tasks)
+  // can both read "not created yet" before either has appended, and
+  // both append — an exact duplicate ticket. This tracks which checks
+  // are currently in flight by a string key; an overlapping call for
+  // the same key is a silent no-op instead of a second read-check-append
+  // race. Per-session only (doesn't protect against two different
+  // devices/tabs racing at the exact same instant), but that covers the
+  // actual scenario this app can trigger on its own.
+  // ───────────────────────────────────────────────────────────
+  const inFlightAutoChecks = new Set();
+  async function runOnceAtATime(key, fn) {
+    if (inFlightAutoChecks.has(key)) return;
+    inFlightAutoChecks.add(key);
+    try { await fn(); } finally { inFlightAutoChecks.delete(key); }
+  }
+
   // Runs only when opened on a Sunday — evaluates Mon-Sun visit counts
   // for whichever IN_OUT_TYPES entries define a weeklyMin (Sewage,
   // Garbage; Water Tanker/Garden Waste have none per the spec, so never
@@ -1183,6 +1207,9 @@ const HSModule = (function () {
   // exact week's task should never be created twice regardless of
   // whether it's since been closed.
   async function evaluateWeeklyInOutCompliance(logs, monday, today) {
+    await runOnceAtATime('weeklyInOut', () => evaluateWeeklyInOutComplianceImpl(logs, monday, today));
+  }
+  async function evaluateWeeklyInOutComplianceImpl(logs, monday, today) {
     for (const t of IN_OUT_TYPES) {
       if (!t.weeklyMin) continue;
       const count = logs.filter(l => l.Type === t.key && l.Direction === 'IN' &&
@@ -1220,6 +1247,9 @@ const HSModule = (function () {
   // closed task from an earlier week never blocks detecting a new
   // shortfall this week.
   async function evaluateWeeklyItemCompliance(qrTarget) {
+    await runOnceAtATime('weeklyItem:' + qrTarget, () => evaluateWeeklyItemComplianceImpl(qrTarget));
+  }
+  async function evaluateWeeklyItemComplianceImpl(qrTarget) {
     const now = new Date();
     if (now.getDay() !== 0) return; // Sunday only
     const monday = mondayOfWeek(now);
@@ -1275,6 +1305,9 @@ const HSModule = (function () {
   // title (date + round baked in) so re-opening the screen never
   // creates a second task for the same missed round.
   async function evaluateMissedRounds(qrTarget) {
+    await runOnceAtATime('missedRounds:' + qrTarget, () => evaluateMissedRoundsImpl(qrTarget));
+  }
+  async function evaluateMissedRoundsImpl(qrTarget) {
     const template = templatesCache.find(t => t.QRTarget === qrTarget && (t.RoundBased === 'TRUE' || t.RoundBased === 'true'));
     if (!template) return;
     const rounds = activeRoundKeys();
@@ -2887,6 +2920,9 @@ const HSModule = (function () {
   }
 
   async function evaluateAllOverdueChecklists() {
+    await runOnceAtATime('overdueChecklists', evaluateAllOverdueChecklistsImpl);
+  }
+  async function evaluateAllOverdueChecklistsImpl() {
     // Frequency-based templates (Daily/Weekly/Monthly/BiMonthly, NOT
     // round-window-based — those are handled by evaluateAllMissedRounds
     // above, and CustomScreen templates like the In/Out Log don't have
