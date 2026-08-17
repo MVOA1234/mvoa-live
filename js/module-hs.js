@@ -266,15 +266,27 @@ const HSModule = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
-  // DIESEL TOP-UP QUICK ENTRY — the diesel level readings can happen
-  // at ANY point during a shift (whenever the operator actually goes
-  // to check/top up the tank), not just at shift start like the rest
-  // of that shift's readings. So this is deliberately NOT part of the
-  // QR-scan-and-submit flow, and deliberately doesn't get locked out
-  // once the shift's main checklist is submitted — same reasoning and
-  // same "pick from today's already-submitted shifts" shape as the
-  // End of Shift Report above, just updating two specific items on
-  // that shift's log instead of its Notes field.
+  // DIESEL TOP-UP QUICK ENTRY — a top-up can happen at ANY point
+  // during a shift (whenever it's actually delivered/added), not just
+  // at shift start like the rest of that shift's readings. So this is
+  // deliberately NOT part of the QR-scan-and-submit flow, and
+  // deliberately doesn't lock out the rest of that shift's checklist
+  // — same reasoning and same "pick from today's already-submitted
+  // shifts" shape as the End of Shift Report above, just updating one
+  // specific item on that shift's log instead of its Notes field.
+  //
+  // "Diesel Level Before Top Up" (the routine per-shift tank-level
+  // reading) is shown here read-only for context only — it's entered
+  // on the shift-start checklist, not here (see the force-include/
+  // force-exclude pair in renderChecklistForm's items filter and the
+  // header comment on loadDgOperationsData for the full math). The
+  // ONLY thing actually editable on this screen is the litres topped
+  // up, and it's optional — left blank on any shift with no top-up.
+  //
+  // Once a value is saved for a shift it LOCKS (shown read-only, no
+  // more Save button) for the rest of that shift — editing again only
+  // opens back up once the NEXT shift's checklist has been submitted
+  // and its own window is active, same as every other reading here.
   // ───────────────────────────────────────────────────────────
   function renderDieselTopUpEntry(container) {
     const beforeItem = itemsCache.find(i => /diesel level before top up/i.test(i.CheckItem));
@@ -285,7 +297,7 @@ const HSModule = (function () {
           <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
           <strong>⛽ Log Diesel Top-Up</strong>
         </div>
-        <p class="muted">Diesel Level Before/After Top Up items aren't configured yet.</p>
+        <p class="muted">Diesel Level Before Top Up / Diesel Topped Up items aren't configured yet.</p>
       `;
       container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
       return;
@@ -297,7 +309,7 @@ const HSModule = (function () {
         <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
         <strong>⛽ Log Diesel Top-Up</strong>
       </div>
-      <p class="muted" style="margin:0 0 12px;">No QR scan needed. Log this any time during a shift that's already been logged today — before/after readings save independently and don't lock with the rest of that shift's checklist.</p>
+      <p class="muted" style="margin:0 0 12px;">No QR scan needed. Log this any time during a shift that's already been logged today. Optional — only fill in if a top-up actually happens. Locks once saved, for the rest of that shift.</p>
       <div id="hs-diesel-list"></div>
     `;
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
@@ -310,14 +322,14 @@ const HSModule = (function () {
     const shiftRows = ['1st', '2nd', '3rd'].map(shift => {
       const log = todaysLogFor(template.TemplateID, shift);
       // Only the shift whose clock window is happening RIGHT NOW —
-      // diesel readings can happen any time during an active shift,
-      // but a shift that's already ended shouldn't still be editable
-      // just because it was logged earlier today.
+      // a top-up can happen any time during an active shift, but a
+      // shift that's already ended shouldn't still be editable just
+      // because it was logged earlier today.
       if (!log || !isWithinShiftWindow(shift, new Date())) return null;
       return { shift, log };
     }).filter(Boolean);
     if (!shiftRows.length) {
-      listEl.innerHTML = '<p class="muted">No shift is both currently active and already logged today — diesel readings can only be entered during the shift\'s own clock window, once that shift\'s checklist has been submitted.</p>';
+      listEl.innerHTML = '<p class="muted">No shift is both currently active and already logged today — a top-up can only be logged during the shift\'s own clock window, once that shift\'s checklist has been submitted.</p>';
       return;
     }
 
@@ -332,29 +344,39 @@ const HSModule = (function () {
 
     listEl.innerHTML = '<p class="muted">Loading…</p>';
     loadExisting().then(rows => {
-      listEl.innerHTML = rows.map((r, i) => `
+      listEl.innerHTML = rows.map((r, i) => {
+        // Locked once a value has already been saved for this shift —
+        // no re-editing until the next shift's window opens up its own
+        // fresh (empty) entry.
+        const locked = !!(r.afterResult && r.afterResult.Result !== '');
+        return `
         <div class="mvoa-list-item">
           <strong>${shiftLabel(r.shift)} Shift</strong>
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">Shift logged by ${escapeHtml(r.log.PerformedBy)} · ${formatDate(r.log.Timestamp)}</p>
-          <label>Diesel Level Before Top Up (%)
-            <input type="number" class="hs-diesel-before" data-idx="${i}" value="${r.beforeResult ? escapeHtml(r.beforeResult.Result) : ''}" step="any">
-          </label>
-          <label>Diesel Level After Top Up (%)
-            <input type="number" class="hs-diesel-after" data-idx="${i}" value="${r.afterResult ? escapeHtml(r.afterResult.Result) : ''}" step="any">
-          </label>
-          <button class="btn-primary hs-diesel-save" data-idx="${i}" style="width:100%;margin-top:6px;">Save</button>
-          <p class="error-text hs-diesel-error" data-idx="${i}" style="min-height:1em;margin-top:4px;"></p>
+          <p class="muted" style="margin:4px 0;font-size:0.85rem;">Diesel level at shift start: <strong>${r.beforeResult ? escapeHtml(r.beforeResult.Result) + '%' : '—'}</strong></p>
+          ${locked ? `
+            <p style="margin:4px 0;font-weight:700;">✅ Diesel Topped Up: ${escapeHtml(r.afterResult.Result)} litres</p>
+            <p class="muted" style="margin:0;font-size:0.75rem;">Locked for this shift — opens up again once the next shift's checklist is submitted.</p>
+          ` : `
+            <label>Diesel Topped Up (Litres) — optional, only if a top-up happens
+              <input type="number" class="hs-diesel-after" data-idx="${i}" min="0" step="any" placeholder="Leave blank if no top-up this shift">
+            </label>
+            <button class="btn-primary hs-diesel-save" data-idx="${i}" style="width:100%;margin-top:6px;">Save</button>
+            <p class="error-text hs-diesel-error" data-idx="${i}" style="min-height:1em;margin-top:4px;"></p>
+          `}
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       listEl.querySelectorAll('.hs-diesel-save').forEach(btn => {
         btn.addEventListener('click', async () => {
           const idx = btn.dataset.idx;
           const row = rows[idx];
           const errEl = listEl.querySelector(`.hs-diesel-error[data-idx="${idx}"]`);
-          const beforeVal = listEl.querySelector(`.hs-diesel-before[data-idx="${idx}"]`).value.trim();
           const afterVal = listEl.querySelector(`.hs-diesel-after[data-idx="${idx}"]`).value.trim();
           errEl.textContent = '';
+          if (afterVal === '') { errEl.textContent = 'Enter the litres topped up, or leave this screen if no top-up happened.'; return; }
+          if (Number(afterVal) <= 0) { errEl.textContent = 'Enter a litres value greater than 0.'; return; }
           btn.disabled = true;
           btn.textContent = 'Saving…';
           try {
@@ -365,21 +387,16 @@ const HSModule = (function () {
               const m = String(id).match(/^HSRES-(\d+)$/);
               if (m) nextNum = Math.max(nextNum, parseInt(m[1], 10) + 1);
             });
-            const toWrite = [
-              { existing: row.beforeResult, item: beforeItem, val: beforeVal },
-              { existing: row.afterResult, item: afterItem, val: afterVal }
-            ].filter(w => w.val !== '');
-            for (const w of toWrite) {
-              if (w.existing) {
-                await MVOA.sheetsUpdateRow(MVOA.TABS.hsItemResults, w.existing.rowNumber, RESULT_COLS.map(c => ({ ResultID: w.existing.ResultID, LogID: row.log.LogID, ItemID: w.item.ItemID, Result: w.val, Remarks: '' })[c]));
-              } else {
-                const resultId = 'HSRES-' + String(nextNum).padStart(5, '0');
-                nextNum++;
-                await MVOA.sheetsAppend(MVOA.TABS.hsItemResults, RESULT_COLS.map(c => ({ ResultID: resultId, LogID: row.log.LogID, ItemID: w.item.ItemID, Result: w.val, Remarks: '' })[c]));
-              }
+            if (row.afterResult) {
+              await MVOA.sheetsUpdateRow(MVOA.TABS.hsItemResults, row.afterResult.rowNumber, RESULT_COLS.map(c => ({ ResultID: row.afterResult.ResultID, LogID: row.log.LogID, ItemID: afterItem.ItemID, Result: afterVal, Remarks: '' })[c]));
+            } else {
+              const resultId = 'HSRES-' + String(nextNum).padStart(5, '0');
+              await MVOA.sheetsAppend(MVOA.TABS.hsItemResults, RESULT_COLS.map(c => ({ ResultID: resultId, LogID: row.log.LogID, ItemID: afterItem.ItemID, Result: afterVal, Remarks: '' })[c]));
             }
-            btn.textContent = '✓ Saved';
-            setTimeout(() => { btn.disabled = false; btn.textContent = 'Save'; }, 1500);
+            // Re-render the whole screen from fresh data (sheetsRead
+            // always reads live — no stale-cache risk) so the just-saved
+            // shift flips to its locked, read-only state immediately.
+            renderDieselTopUpEntry(container);
           } catch (e) {
             errEl.textContent = 'Could not save: ' + e.message;
             btn.disabled = false;
@@ -1866,33 +1883,51 @@ const HSModule = (function () {
   // report. Shares one data-loading function between the Weekly and
   // Monthly views (same 5 rows, just a different date range).
   //
-  // Diesel math (per DG_Set.docx, confirmed with user): tank capacity
-  // 200L, so a level reading of X% = X/100 * 200 litres. All readings
-  // (Hours, kWh, diesel level) are taken at shift START.
-  //   - No top-up this shift: consumed = (this shift's "before top
-  //     up" level − next shift's "before top up" level), litres —
-  //     same "this reading vs next reading" pattern used for Run
-  //     Hours and kWh.
-  //   - Top-up THIS shift: "before top-up" already equals the
-  //     start-of-shift level (both taken at shift start, no gap
-  //     between them to measure), so the real interval is from right
-  //     after the top-up through the next shift's reading: consumed =
-  //     (this shift's "after top up" level − next shift's "before top
-  //     up" level), litres.
+  // Diesel math (per DG_Set.docx, confirmed with user; simplified
+  // 17-Aug-2026 — see conversation): tank capacity 200L, so a level
+  // reading of X% = X/100 * 200 litres. "Diesel Level Before Top Up"
+  // is taken every shift at shift START regardless of whether a
+  // top-up happens that shift — despite its name it's really just
+  // "current tank level", used as a running measurement, not
+  // something that only matters when topping up (that's why it stays
+  // a required item on the shift-start checklist every shift — see
+  // the force-include in renderChecklistForm's items filter). "Diesel
+  // Topped Up" is a SEPARATE, directly-entered litres quantity (not a
+  // gauge reading) logged any time during the shift through the
+  // standalone "Log Diesel Top-Up" screen, independent of the
+  // checklist — a top-up can happen well after shift start, and the
+  // exact litres added is usually known directly (a delivery /
+  // dip-stick reading) rather than derivable from a second gauge
+  // reading.
+  //
+  //   consumed (this shift) = (this shift's level − next shift's
+  //     level), litres, PLUS however many litres were topped up this
+  //     shift (0 if none logged).
+  //
+  // Why adding the topped-up litres back in is correct: a top-up
+  // partway through the shift pushes the tank level UP, which would
+  // otherwise make the shift look like it consumed less than it
+  // really did (or even net-negative). Physically:
+  //   level_next = level_this − consumed + toppedUp
+  //   ⇒ consumed = (level_this − level_next) + toppedUp
+  // — exactly the formula above. This replaced an earlier two-leg
+  // Before/After-gauge-reading model (removed) that needed a live
+  // "after top-up" % reading; the litres-topped-up figure is simpler
+  // to log and just as correct.
   //
   // LEGACY "Fuel Level" fallback (ITM-0001, TPL-001) — before the
-  // Before/After Top-Up split existed, a single plain "Fuel Level" (%)
-  // item was filled in every shift instead. It's still Active (old
-  // rounds already reference it), just no longer what technicians fill
-  // in going forward. Its reading is the same "% of tank at shift
-  // start" meaning as the new Before item, so for any shift whose log
-  // has no Before value we fall back to its Fuel Level value as
-  // dieselBefore, letting the SAME this-vs-next math above compute
-  // Diesel Consumed / litres and Fuel Efficiency for those historic
-  // dates too. There's never a matching "after" value on those old
-  // shifts (no top-up event was recorded separately back then), so
-  // Diesel Top Up correctly stays blank for them — that's the one
-  // figure that genuinely can't be reconstructed from old data.
+  // Before Top-Up item existed, a single plain "Fuel Level" (%) item
+  // was filled in every shift instead. It's still Active (old rounds
+  // already reference it), just no longer what technicians fill in
+  // going forward. Its reading is the same "% of tank at shift start"
+  // meaning as the Before item, so for any shift whose log has no
+  // Before value we fall back to its Fuel Level value as dieselBefore,
+  // letting the SAME this-vs-next math above compute Diesel Consumed
+  // / litres and Fuel Efficiency for those historic dates too. There's
+  // never a matching top-up figure on those old shifts (no separate
+  // top-up entry existed back then), so Diesel Top Up correctly stays
+  // blank for them — that's the one figure that genuinely can't be
+  // reconstructed from old data.
   // Numeric items WITH a FailThreshold auto-evaluate to a Pass/Fail
   // verdict — THAT goes in Result, while the technician's actual
   // entered number instead gets stashed in Remarks as "Entered: 87%
@@ -1969,16 +2004,8 @@ const HSModule = (function () {
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
     const round2 = (n) => Math.round(n * 100) / 100;
-    // The tank level carried into the START of a shift is whatever the
-    // PRECEDING shift's reading ended on — its After Top-Up level if it
-    // had one, otherwise its own single Before/legacy level. Needed to
-    // compute the "before the top-up" consumption leg below.
-    function endingLevel(row) {
-      if (!row) return null;
-      return row.dieselAfter != null ? row.dieselAfter : row.dieselBefore;
-    }
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i], next = rows[i + 1], prev = rows[i - 1];
+      const r = rows[i], next = rows[i + 1];
       r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
       // Sanity guard: a running-hours meter can never advance MORE than
@@ -1994,45 +2021,26 @@ const HSModule = (function () {
         if (r.hoursRun < 0 || (elapsedHrs > 0 && r.hoursRun > elapsedHrs + 0.25)) r.hoursRun = null; // +0.25hr slack for clock/rounding drift
       }
       if (typeof r.kwhGenerated === 'number' && r.kwhGenerated < 0) r.kwhGenerated = null; // a kWh meter can't run backwards either
-      r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
-      if (r.dieselAfter != null) {
-        // Top-up happened this shift — per the documented formula
-        // (DG_Set.docx) this is TWO consumption legs added together:
-        //   (a) from the PRECEDING shift's ending level down to this
-        //       shift's own Before Top-Up reading — consumption before
-        //       the top-up actually happened (which can be well into
-        //       the shift, not necessarily right at its start);
-        //   (b) from this shift's After Top-Up reading down to the
-        //       NEXT shift's own starting reading — consumption after
-        //       the top-up.
-        // Previously only leg (b) was computed, silently treating leg
-        // (a) as zero — which is why a shift with real DG runtime
-        // before its top-up was showing 0 consumed instead of a real
-        // number. If either leg is unknown, the total is genuinely
-        // unknown too (not just whichever leg happens to be available).
-        const beforeLevel = endingLevel(prev);
-        let legA = (beforeLevel != null && r.dieselBefore != null) ? pctToLitres(beforeLevel - r.dieselBefore) : null;
-        let legB = (next && next.dieselBefore != null) ? pctToLitres(r.dieselAfter - next.dieselBefore) : null;
-        if (typeof legA === 'number' && legA < 0) legA = null; // level can't have risen without a logged top-up — treat as unknown, not negative
-        if (typeof legB === 'number' && legB < 0) legB = null;
-        r.dieselConsumedLitres = (legA != null && legB != null) ? round2(legA + legB) : null;
-      } else if (next && r.dieselBefore != null && next.dieselBefore != null) {
-        r.dieselConsumedLitres = round2(pctToLitres(r.dieselBefore - next.dieselBefore));
-      } else {
-        r.dieselConsumedLitres = null;
-      }
+      // dieselAfter now holds a directly-entered LITRES-topped-up
+      // figure (see header comment), not a % gauge reading — no
+      // pctToLitres conversion needed, just round it.
+      r.dieselTopUpLitres = (r.dieselAfter != null) ? round2(r.dieselAfter) : null;
+      // Base consumption from the level delta alone — deliberately NOT
+      // clamped to non-negative here, since a real top-up can legitimately
+      // make this go negative (see header comment's derivation); only the
+      // FINAL total below gets the "can't be negative" guard.
+      const baseConsumption = (next && r.dieselBefore != null && next.dieselBefore != null)
+        ? pctToLitres(r.dieselBefore - next.dieselBefore) : null;
+      r.dieselConsumedLitres = (baseConsumption != null) ? round2(baseConsumption + (r.dieselTopUpLitres || 0)) : null;
       // Consumption can never be negative — diesel doesn't get
-      // un-consumed. A negative result here means the level actually
-      // ROSE between readings, i.e. a top-up happened somewhere in
-      // this interval that wasn't bracketed with the Before/After
-      // Top-Up screen (most common on the legacy Fuel-Level-only
-      // shifts, but possible any time someone tops up without logging
-      // it). There's no way to recover true consumption for an
-      // interval like that, so it's reported as unknown rather than a
-      // misleading negative figure — and left out of totals below,
+      // un-consumed. A negative result here (even after adding back any
+      // logged top-up) means the level rose by MORE than the logged
+      // top-up accounts for, i.e. an additional top-up happened that
+      // wasn't logged. There's no way to recover true consumption for
+      // an interval like that, so it's reported as unknown rather than
+      // a misleading negative figure — and left out of totals below,
       // instead of silently dragging the period total negative.
       if (typeof r.dieselConsumedLitres === 'number' && r.dieselConsumedLitres < 0) r.dieselConsumedLitres = null;
-      if (typeof r.dieselTopUpLitres === 'number' && r.dieselTopUpLitres < 0) r.dieselTopUpLitres = null;
       r.fuelEfficiency = (typeof r.dieselConsumedLitres === 'number' && r.kwhGenerated) ? Math.round((r.dieselConsumedLitres / r.kwhGenerated) * 1000) / 1000 : null;
     }
     return rows;
@@ -3286,19 +3294,22 @@ const HSModule = (function () {
       .filter(i => i.TemplateID === currentTemplate.TemplateID)
       .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
         (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')) ||
-        // "Diesel Level Before Top Up" is normally excluded from this
-        // form and left to the separate Diesel Top-Up Quick Entry
-        // screen (see the comment above renderDieselTopUpEntry) since
-        // top-ups themselves can happen any time during a shift. But
-        // the READING of what's currently in the tank — the "before"
-        // level, taken before any top-up — reflects the tank's state
-        // at shift start same as Running Hours / Cumulated kWh, and
-        // without it the Diesel Consumed math for this shift can never
-        // be computed. So it's force-included and required right here,
-        // every shift, regardless of ShiftApplicability. "After Top
-        // Up" stays quick-entry-only — it only applies once an actual
-        // top-up happens, which may not be known yet at shift start.
+        // "Diesel Level Before Top Up" is really just "current tank
+        // level" (see loadDgOperationsData's header comment) — it
+        // reflects the tank's state at shift start same as Running
+        // Hours / Cumulated kWh, and without it the Diesel Consumed
+        // math for this shift can never be computed. So it's
+        // force-included and required right here, every shift,
+        // regardless of ShiftApplicability.
         (isShiftBased && /diesel level before top up/i.test(i.CheckItem)))
+      // "Diesel Topped Up" (stored on the "Diesel Level After Top Up"
+      // item — see loadDgOperationsData's header comment) is force-
+      // EXCLUDED from this form regardless of its own ShiftApplicability
+      // setting in the sheet — it only ever gets entered through the
+      // separate "Log Diesel Top-Up" screen, since a top-up can happen
+      // any time during the shift (well after this form is submitted),
+      // not necessarily at shift start.
+      .filter(i => !(isShiftBased && /diesel level after top up/i.test(i.CheckItem)))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
     // Preload the last recorded reading for any running-hours meter or
