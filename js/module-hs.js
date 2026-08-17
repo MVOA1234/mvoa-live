@@ -207,24 +207,18 @@ const HSModule = (function () {
     evaluateAllOverdueChecklists();
     const recent = logsCache.slice().sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || '')).slice(0, 5);
     const visibleCategories = categoriesCache.filter(c => MVOA.canViewPlantRoundsSection(c.CategoryKey, user));
-    const ungrouped = visibleCategories.filter(c => !c.Group);
-    // Categories can optionally belong to a named Group (e.g. "Monthly
-    // Inspections") — each distinct Group gets its own labeled box below
-    // the main equipment row, so unrelated categories (a DG Set vs. a
-    // Server Room housekeeping check) aren't visually mixed together.
-    // Grouping is purely presentational — a data change (fill in the
-    // Group column), no code change, same as adding a category at all.
-    const groupNames = [...new Set(visibleCategories.filter(c => c.Group).map(c => c.Group))];
+    // All categories — regardless of Daily/Weekly/Monthly frequency or
+    // any optional Group label — are shown together in a single window
+    // here, in the same order as the HSCategories sheet. (Previously,
+    // categories with a Group value like "Monthly Inspections" were
+    // split into their own separate labeled box below the main row;
+    // that visual split was removed per user request so the technician
+    // sees one flat list of all equipment/areas to choose from.)
     container.innerHTML = `
       <div class="card" style="max-width:520px;margin:0 0 16px 0;">
         <p class="muted" style="margin:0 0 10px;">Choose which equipment/area you're logging.</p>
         <div id="hs-category-tabs" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
       </div>
-      ${groupNames.map(g => `
-      <div class="card" style="max-width:520px;margin:0 0 16px 0;">
-        <p class="muted" style="margin:0 0 10px;font-weight:700;">${escapeHtml(g)}</p>
-        <div class="hs-group-tabs" data-group="${escapeHtml(g)}" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
-      </div>`).join('')}
       <div style="margin-bottom:16px;display:flex;flex-wrap:wrap;gap:8px;">
         <button id="hs-due-dashboard-btn" class="btn-secondary">📊 Due Status</button>
         <button id="hs-history-btn" class="btn-secondary">📅 Full History</button>
@@ -238,19 +232,11 @@ const HSModule = (function () {
       <div id="hs-recent"></div>
     `;
     const tabsEl = container.querySelector('#hs-category-tabs');
-    tabsEl.innerHTML = ungrouped.length
-      ? ungrouped.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('')
+    tabsEl.innerHTML = visibleCategories.length
+      ? visibleCategories.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('')
       : '<p class="muted">You don\'t have access to any Plant Rounds categories yet.</p>';
     tabsEl.querySelectorAll('.hs-category-tab').forEach(btn => {
       btn.addEventListener('click', () => handleCategoryTabClick(btn.dataset.category, container));
-    });
-    groupNames.forEach(g => {
-      const groupEl = container.querySelector(`.hs-group-tabs[data-group="${escapeHtml(g)}"]`);
-      const groupCats = visibleCategories.filter(c => c.Group === g);
-      groupEl.innerHTML = groupCats.map(c => `<button class="btn-secondary hs-category-tab" data-category="${c.CategoryKey}" style="flex:1;min-width:120px;">${c.Icon || ''} ${escapeHtml(c.Label)}</button>`).join('');
-      groupEl.querySelectorAll('.hs-category-tab').forEach(btn => {
-        btn.addEventListener('click', () => handleCategoryTabClick(btn.dataset.category, container));
-      });
     });
 
     const recentEl = container.querySelector('#hs-recent');
