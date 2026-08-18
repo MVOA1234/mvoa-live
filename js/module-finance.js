@@ -486,7 +486,8 @@ const FinanceModule = (function () {
       { view: 'mine', label: 'My Requests' },
       { view: 'sentback', label: '🔁 Sent Back' },
       { view: 'myapprovals', label: '✅ My Approvals' },
-      { view: 'queue', label: 'Approval Queue' }
+      { view: 'queue', label: 'Approval Queue' },
+      { view: 'budgetrevisions', label: '🔄 Budget Revisions' }
     ];
     if (topTab === 'payment') return [
       { view: 'payreq', label: '💵 New Payment Request' },
@@ -512,10 +513,12 @@ const FinanceModule = (function () {
     const paymentsCounts = countNewOpen(paymentsVisibleForCurrentUser());
     const expiringContracts = computeExpiringContracts();
     const countSuffix = (c) => (c.open || c.newCount) ? ` (${c.open} open${c.newCount ? ` · ${c.newCount} new` : ''})` : '';
+    const pendingBudgetRevisionsCount = budgetRevisionsCache.filter(r => r.Status !== 'Applied').length;
     const countFor = (view) => {
       if (view === 'mine') return currentTopTab === 'spend' ? mineCountsSpend : mineCountsPayment;
       if (view === 'queue') return currentTopTab === 'spend' ? queueCountsSpend : queueCountsPayment;
       if (view === 'payments') return paymentsCounts;
+      if (view === 'budgetrevisions') return { open: pendingBudgetRevisionsCount, newCount: 0 };
       return { open: 0, newCount: 0 };
     };
 
@@ -600,6 +603,10 @@ const FinanceModule = (function () {
     else if (currentView === 'queue') renderQueue(body, container, currentTopTab === 'spend' ? 'spend' : 'payment');
     else if (currentView === 'payments') renderPayments(body, container);
     else if (currentView === 'budget') renderBudgetStatus(body, container);
+    else if (currentView === 'budgetrevisions') {
+      const person = currentPerson();
+      renderBudgetRevisionsSection(body, container, person, isTreasurerPerson(person) || isAdmin(person));
+    }
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
   }
@@ -614,7 +621,13 @@ const FinanceModule = (function () {
   //      the Treasurer can apply it.
   function renderBudgetStatus(body, container) {
     const person = currentPerson();
+    // Set Budget (first-time, ₹0 → real number, direct write) stays a
+    // Treasurer/Admin action. Revise (already-set budget → approval
+    // chain) is initiated by the Secretary/Admin instead — see
+    // openReviseBudgetModal, which now also auto-records the Secretary's
+    // own approval on submit.
     const canManageBudget = isTreasurerPerson(person) || isAdmin(person);
+    const canInitiateRevision = isSecretaryPerson(person) || isAdmin(person);
     const fys = [...new Set(budgetsCache.map(b => b.FYYear))].sort().reverse();
     const selectedFy = fys.includes(currentFY()) ? currentFY() : (fys[0] || currentFY());
     body.innerHTML = `
@@ -627,46 +640,45 @@ const FinanceModule = (function () {
       </div>
       <div id="fin-budget-table"></div>
       ${!budgetsCache.length ? `<p class="muted" style="margin-top:12px;">No budget lines set up yet — add rows to the <strong>FinanceBudgets</strong> sheet (Category, FYYear, TotalBudget) to see them here.</p>` : ''}
-      <div id="fin-budget-revisions" style="margin-top:24px;"></div>
+      <p class="muted" style="margin-top:14px;font-size:0.85rem;">Pending budget revisions and their approvals are under <strong>📝 Spend Approval → 🔄 Budget Revisions</strong>.</p>
     `;
     function draw() {
       const fy = body.querySelector('#fin-budget-fy').value;
       const rows = budgetsCache.filter(b => b.FYYear === fy);
       const tableEl = body.querySelector('#fin-budget-table');
       if (!rows.length) { tableEl.innerHTML = `<p class="muted">No budget lines for ${escapeHtml(fy)}.</p>`; return; }
+      const showActionCol = canManageBudget || canInitiateRevision;
       tableEl.innerHTML = `
         <table class="mvoa-table">
-          <thead><tr><th>Category</th><th>Total Budget</th><th>Consumed</th><th>Available</th>${canManageBudget ? '<th></th>' : ''}</tr></thead>
+          <thead><tr><th>Category</th><th>Total Budget</th><th>Consumed</th><th>Available</th>${showActionCol ? '<th></th>' : ''}</tr></thead>
           <tbody>
             ${rows.map(b => {
               const info = budgetInfoFor(b.Category, fy);
               const overBudget = info.available < 0;
               const isSet = (Number(b.TotalBudget) || 0) > 0;
+              const canActOnRow = isSet ? canInitiateRevision : canManageBudget;
               return `<tr>
                 <td>${escapeHtml(b.Category)}</td>
                 <td>${formatAmount(info.total)}</td>
                 <td>${formatAmount(info.consumed)}</td>
                 <td style="color:${overBudget ? '#b3261e' : 'green'};font-weight:700;">${formatAmount(info.available)}</td>
-                ${canManageBudget ? `<td><button class="btn-secondary fin-budget-action-btn" data-budget-id="${escapeHtml(b.BudgetID)}" data-fy="${escapeHtml(fy)}" style="font-size:0.75rem;padding:4px 10px;">${isSet ? '✏️ Revise' : '➕ Set Budget'}</button></td>` : ''}
+                ${showActionCol ? `<td>${canActOnRow ? `<button class="btn-secondary fin-budget-action-btn" data-budget-id="${escapeHtml(b.BudgetID)}" data-fy="${escapeHtml(fy)}" style="font-size:0.75rem;padding:4px 10px;">${isSet ? '✏️ Revise' : '➕ Set Budget'}</button>` : ''}</td>` : ''}
               </tr>`;
             }).join('')}
           </tbody>
         </table>`;
-      if (canManageBudget) {
-        tableEl.querySelectorAll('.fin-budget-action-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const b = budgetsCache.find(x => x.BudgetID === btn.dataset.budgetId);
-            if (!b) return;
-            const isSet = (Number(b.TotalBudget) || 0) > 0;
-            if (isSet) openReviseBudgetModal(b, btn.dataset.fy, container);
-            else openSetBudgetModal(b, btn.dataset.fy, container);
-          });
+      tableEl.querySelectorAll('.fin-budget-action-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const b = budgetsCache.find(x => x.BudgetID === btn.dataset.budgetId);
+          if (!b) return;
+          const isSet = (Number(b.TotalBudget) || 0) > 0;
+          if (isSet) openReviseBudgetModal(b, btn.dataset.fy, container);
+          else openSetBudgetModal(b, btn.dataset.fy, container);
         });
-      }
+      });
     }
     body.querySelector('#fin-budget-fy').addEventListener('change', draw);
     draw();
-    renderBudgetRevisionsSection(body.querySelector('#fin-budget-revisions'), container, person, canManageBudget);
   }
 
   // ─── Budget Input (first time) — direct write, no approval needed,
@@ -710,8 +722,11 @@ const FinanceModule = (function () {
   }
 
   // ─── Revise Budget (already set) — creates a proposal. Restricted to
-  // Treasurer/Admin to INITIATE; the three approvals themselves are each
-  // gated by role in renderBudgetRevisionsSection below. ───
+  // Secretary/Admin to INITIATE. The Secretary's act of initiating IS
+  // their approval (recorded automatically below as the 'Secretary'
+  // stage row) — only President and Treasurer approve after that. The
+  // remaining approvals are each gated by role in
+  // renderBudgetRevisionsSection below. ───
   function openReviseBudgetModal(budgetRow, fy, container) {
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
@@ -721,7 +736,7 @@ const FinanceModule = (function () {
         <p class="muted" style="margin-top:0;">Financial Year ${escapeHtml(fy)} · Current: ${formatAmount(budgetRow.TotalBudget)}</p>
         <label>Proposed Total Budget (₹) <input id="fin-revb-amount" type="number" min="0" step="1"></label>
         <label>Reason for revision <input id="fin-revb-notes" type="text" placeholder="e.g. AGM-approved mid-year increase"></label>
-        <p class="muted" style="font-size:0.8rem;">This needs sign-off from the Secretary, President AND Treasurer before it can be applied.</p>
+        <p class="muted" style="font-size:0.8rem;">Submitting this records your Secretary sign-off automatically. It then needs the President AND Treasurer to approve before it can be applied.</p>
         <p class="error-text" id="fin-revb-error" style="display:none;"></p>
         <div class="mvoa-row" style="margin-top:14px;justify-content:flex-end;gap:8px;">
           <button id="fin-revb-cancel" class="btn-secondary">Cancel</button>
@@ -743,13 +758,24 @@ const FinanceModule = (function () {
         const user = MVOA.getUser();
         const existingIds = budgetRevisionsCache.map(r => r.RevisionID);
         const revisionId = MVOA.nextId('BREV', existingIds);
+        const now = new Date().toISOString();
         const row = {
           RevisionID: revisionId, Category: budgetRow.Category, FYYear: fy,
           CurrentBudget: Number(budgetRow.TotalBudget) || 0, ProposedBudget: amount,
-          Notes: notes, RequestedBy: user.name, RequestedDate: new Date().toISOString(),
+          Notes: notes, RequestedBy: user.name, RequestedDate: now,
           Status: 'PendingApproval', AppliedDate: '', AppliedBy: ''
         };
         await MVOA.sheetsAppend(TAB_BUDGET_REVISIONS, objToRow(BUDGET_REVISION_COLS, row));
+        // The Secretary's initiation IS their approval — record it now so
+        // the chain opens straight to President, no separate self-approve
+        // click needed.
+        const approvalRows = await MVOA.sheetsRead(TAB_BUDGET_APPROVALS).catch(() => []);
+        const existingApprovalIds = approvalRows.slice(1).map(r => r[0]);
+        const approvalRow = {
+          ApprovalID: MVOA.nextId('BAPR', existingApprovalIds), RequestID: revisionId, ApproverName: user.name,
+          ApproverRole: user.role || '', Stage: 'Secretary', Decision: 'Approved', Comment: '', Timestamp: now
+        };
+        await MVOA.sheetsAppend(TAB_BUDGET_APPROVALS, objToRow(APPROVAL_COLS, approvalRow));
         await loadAll(true);
         modal.remove();
         render(container);
@@ -760,13 +786,17 @@ const FinanceModule = (function () {
     });
   }
 
-  // ─── Pending Budget Revisions — Secretary/President/Treasurer each
-  // approve their own stage (role matched via roleMatchesToken, same as
-  // the Schedule D payment chain); once all 3 are done, Treasurer/Admin
-  // gets an "Apply" button that writes ProposedBudget into FinanceBudgets.
+  // ─── Pending Budget Revisions — lives under Spend Approval (not
+  // Budget) so the approval chain sits alongside the rest of the
+  // approval work. The Secretary's stage is recorded automatically when
+  // they initiate (see openReviseBudgetModal), so President and
+  // Treasurer each approve their own remaining stage (role matched via
+  // roleMatchesToken, same as the Schedule D payment chain); once both
+  // are done, Treasurer/Admin gets an "Apply" button that writes
+  // ProposedBudget into FinanceBudgets.
   async function renderBudgetRevisionsSection(el, container, person, canManageBudget) {
     const active = budgetRevisionsCache.filter(r => r.Status !== 'Applied');
-    if (!active.length) { el.innerHTML = ''; return; }
+    if (!active.length) { el.innerHTML = `<h3 style="margin:0 0 10px;color:var(--mvoa-blue);">🔄 Pending Budget Revisions</h3><p class="muted">No pending budget revisions.</p>`; return; }
     el.innerHTML = `<h3 style="margin:0 0 10px;color:var(--mvoa-blue);">🔄 Pending Budget Revisions</h3><p class="muted">Loading…</p>`;
     let allApprovals = [];
     try {
@@ -3176,6 +3206,9 @@ const FinanceModule = (function () {
   }
   function isTreasurerPerson(person) {
     return roleMatchesToken(person, 'treasurer');
+  }
+  function isSecretaryPerson(person) {
+    return roleMatchesToken(person, 'secretary');
   }
 
   function currentPerson() {
