@@ -1411,7 +1411,21 @@ const HSModule = (function () {
     let logs, results;
     try {
       const logRows = await MVOA.sheetsRead(MVOA.TABS.hsLog);
-      logs = rowsToObjs(logRows, LOG_COLS).filter(l => l.TemplateID === template.TemplateID && (l.Timestamp || '').startsWith(roundsMonthlyMonth));
+      // Bucket by the LOCAL calendar date the round was actually walked,
+      // not a raw string-prefix match against the stored Timestamp (which
+      // is UTC, via toISOString()). Round1 (2 AM–4 AM local) falls
+      // entirely inside the window where local date and UTC date differ
+      // (UTC is ~5.5h behind IST) — a 2:43 AM local scan on the 18th is
+      // stored as "2026-08-17T21:13...Z", so a raw prefix match wrongly
+      // bucketed EVERY Round1 entry, every day, onto the previous day's
+      // row (and could drop a 1st-of-the-month Round1 entry from the
+      // report entirely, since its UTC date belongs to the prior month).
+      // new Date(...) + isoDate(...) converts back to local before
+      // comparing, matching how hasSubmittedToday/shiftDayBucket already
+      // do this correctly elsewhere. Round2/Round3 look unaffected only
+      // because their local time-of-day happens to still share the same
+      // UTC calendar date.
+      logs = rowsToObjs(logRows, LOG_COLS).filter(l => l.TemplateID === template.TemplateID && l.Timestamp && isoDate(new Date(l.Timestamp)).startsWith(roundsMonthlyMonth));
       const resultRows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
       results = rowsToObjs(resultRows, RESULT_COLS);
     } catch (e) {
@@ -1431,7 +1445,7 @@ const HSModule = (function () {
     const nowForReport = new Date();
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${roundsMonthlyMonth}-${String(day).padStart(2, '0')}`;
-      const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
+      const dayLogs = logs.filter(l => l.Timestamp && isoDate(new Date(l.Timestamp)) === dateStr);
       const cells = rounds.map((round, gi) => {
         const log = dayLogs.find(l => l.Shift === round);
         const divider = gi < rounds.length - 1 ? DIVIDER : '';
@@ -1628,7 +1642,12 @@ const HSModule = (function () {
     let logs;
     try {
       const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
-      logs = rowsToObjs(rows, INOUT_LOG_COLS).filter(l => (l.Timestamp || '').startsWith(inOutMonthlyMonth));
+      // Same local-vs-UTC date bucketing fix as the Rounds Monthly Report
+      // above — any In/Out entry logged between local midnight and ~5:30
+      // AM (IST) has a UTC Timestamp that's already rolled onto the
+      // previous calendar date, so a raw string-prefix match would
+      // misfile it a day early. Convert to local before comparing.
+      logs = rowsToObjs(rows, INOUT_LOG_COLS).filter(l => l.Timestamp && isoDate(new Date(l.Timestamp)).startsWith(inOutMonthlyMonth));
     } catch (e) {
       bodyEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
       return;
@@ -1644,7 +1663,7 @@ const HSModule = (function () {
     const bodyRows = [];
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${inOutMonthlyMonth}-${String(day).padStart(2, '0')}`;
-      const dayLogs = logs.filter(l => (l.Timestamp || '').startsWith(dateStr));
+      const dayLogs = logs.filter(l => l.Timestamp && isoDate(new Date(l.Timestamp)) === dateStr);
       const cells = IN_OUT_TYPES.map((t, gi) => DIRECTIONS.map((dir, di) => {
         const divider = (di === 1 && gi < IN_OUT_TYPES.length - 1) ? DIVIDER : '';
         const entries = dayLogs.filter(l => l.Type === t.key && l.Direction === dir).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp));
