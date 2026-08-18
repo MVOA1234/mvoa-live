@@ -826,6 +826,44 @@ const MVOA = (function () {
     return taskId;
   }
 
+  // Auto-closes OPEN OpsTasks rows whose Title matches one of the given
+  // rules — used by Plant Rounds to resolve its own auto-created tickets
+  // once the activity they were complaining about actually gets logged,
+  // without waiting for a human to notice and hit Close. `rules` is
+  // [{matches: (title) => boolean, note: string}, ...]; the first
+  // matching rule's `note` becomes that task's ComplianceComment (prefixed
+  // "Auto-closed by system:"), so every auto-close is traceable back to
+  // exactly what resolved it — never a silent status flip. Deliberately
+  // does ONE read of OpsTasks no matter how many rules are passed in —
+  // callers with many candidates (e.g. one rule per Distribution Panel)
+  // should batch them into a single call rather than calling this once
+  // per candidate. Returns how many tasks were closed.
+  async function autoCloseOpsTasks(rules) {
+    if (!rules || !rules.length) return 0;
+    const idx = { Title: 1, Status: 9, ComplianceComment: 10, ClosedDate: 12, ClosedBy: 13 };
+    const rows = await sheetsRead(TABS.opsTasks);
+    let closedCount = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if ((rows[i][idx.Status] || '') !== 'Open') continue;
+      const title = rows[i][idx.Title] || '';
+      const rule = rules.find(rl => rl.matches(title));
+      if (!rule) continue;
+      const r = rows[i].slice();
+      r[idx.Status] = 'Closed';
+      r[idx.ComplianceComment] = `Auto-closed by system: ${rule.note}`;
+      r[idx.ClosedDate] = new Date().toISOString();
+      r[idx.ClosedBy] = 'System (Plant Rounds — auto-close)';
+      try {
+        await sheetsUpdateRow(TABS.opsTasks, i + 1, r.map(v => v === undefined ? '' : v));
+        await logAudit({ module: 'DailyOps', requestId: r[0], eventType: 'AutoClosed', comment: rule.note, statusAfter: 'Closed' });
+        closedCount++;
+      } catch (e) {
+        // best-effort — leave it open, this sweep (or the next one) will retry
+      }
+    }
+    return closedCount;
+  }
+
   // ───────────────────────────────────────────────────────────
   // PHOTO CAPTURE (camera on phone via <input capture>, file picker
   // on desktop — same input element handles both automatically)
@@ -1155,7 +1193,7 @@ const MVOA = (function () {
     loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection, getPlantRoundsPermissionsMatrixRows,
     loadAttendancePermissionsMatrix, canEditAttendanceSection, canViewAttendanceSection, getAttendancePermissionsMatrixRows,
     loadNotesForTask, appendNote,
-    logAudit, nextId, createOpsTask,
+    logAudit, nextId, createOpsTask, autoCloseOpsTasks,
     capturePhoto, pickAttachment, uploadPhotoToDrive, deletePhotoFromDrive,
     logoSvg,
     statusBadgeHtml, STATUS_STYLES,
