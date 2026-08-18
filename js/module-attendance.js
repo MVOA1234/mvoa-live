@@ -1225,7 +1225,27 @@
   // rather than overwriting a completed one, which is what "no 3rd scan
   // overwriting the checkout" actually means once shifts aren't confined
   // to a single calendar day.
-  async function processAttendanceScan(staffId, photoFile, user) {
+  // Per-staff-member lock so two near-simultaneous scans for the SAME
+  // person (a fast double-tap on Submit, or two devices scanning the
+  // same code within moments of each other) can never both read "no
+  // open session" before either write lands — which used to create two
+  // duplicate open CheckIn rows instead of the second one correctly
+  // checking the first one out. Each staffId gets its own promise
+  // chain, so calls for that staffId run strictly one-after-another
+  // (each seeing the previous call's write already committed), while
+  // different staff members' scans still run fully in parallel. Same
+  // "serialize the read→check→write" fix as the OpsTasks duplicate-
+  // ticket race in module-hs.js, just keyed by staffId instead of a
+  // check-type key.
+  const staffScanQueues = new Map();
+  function processAttendanceScan(staffId, photoFile, user) {
+    const prev = staffScanQueues.get(staffId) || Promise.resolve();
+    const next = prev.catch(() => {}).then(() => processAttendanceScanImpl(staffId, photoFile, user));
+    staffScanQueues.set(staffId, next.catch(() => {}));
+    return next;
+  }
+
+  async function processAttendanceScanImpl(staffId, photoFile, user) {
     const staff = staffById(staffId);
     if (!staff) return { type: 'error', message: 'Not recognised — this ID is not enrolled.' };
     if (!isActive(staff.Active)) return { type: 'error', message: `${staff.Name} is deactivated.` };
@@ -1346,24 +1366,38 @@
       });
     }
 
+    const submitBtn = modal.querySelector('#att-code-submit');
+    // Guards against a fast double-tap/double-Enter firing two overlapping
+    // submit() calls for the same in-progress scan — the button (and
+    // Enter key, via the same isSubmitting flag) is locked out from the
+    // moment Submit is pressed until this one scan's result comes back,
+    // so a second physical press just does nothing instead of kicking
+    // off a second, fully independent scan attempt.
+    let isSubmitting = false;
     async function submit() {
+      if (isSubmitting) return;
       const code = input.value.trim();
       if (!/^\d{4}$/.test(code)) { statusEl.textContent = 'Enter exactly 4 digits.'; return; }
       const staff = allStaffCache.find(s => s.Code === code && isActive(s.Active));
       if (!staff) { statusEl.textContent = 'No active staff member has that code.'; input.value = ''; return; }
+      isSubmitting = true;
+      submitBtn.disabled = true;
       statusEl.textContent = 'Capturing photo…';
-      const photoFile = await captureOnePhoto();
-      statusEl.textContent = 'Processing…';
       try {
+        const photoFile = await captureOnePhoto();
+        statusEl.textContent = 'Processing…';
         const result = await processAttendanceScan(staff.StaffID, photoFile, user);
         statusEl.innerHTML = result.type === 'error'
           ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
         input.value = '';
       } catch (e) {
         statusEl.textContent = 'Failed: ' + e.message;
+      } finally {
+        isSubmitting = false;
+        submitBtn.disabled = false;
       }
     }
-    modal.querySelector('#att-code-submit').addEventListener('click', submit);
+    submitBtn.addEventListener('click', submit);
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
   }
 
