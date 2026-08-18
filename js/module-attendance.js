@@ -1253,11 +1253,26 @@
   // ticket race in module-hs.js, just keyed by staffId instead of a
   // check-type key.
   const staffScanQueues = new Map();
-  function processAttendanceScan(staffId, photoFile, user) {
+  // Queues arbitrary async work behind whatever's already queued for this
+  // staffId — used both for a full scan (check-in/check-out) AND, below,
+  // for a background photo's read-then-patch step. Sharing one queue
+  // between the two matters: without it, a check-in's photo finishing its
+  // upload and a check-out's photo finishing its upload (same row, both
+  // patching it) could each read the row before the other's write lands,
+  // and whichever writes second would silently erase the first one's
+  // photo URL — the same lost-update shape as the original duplicate-
+  // check-in race, just between two background patches instead of two
+  // scans. The slow part (the actual upload) still runs unqueued/in
+  // parallel — only the fast read-and-write gets serialized, so this
+  // adds no waiting anyone would notice.
+  function enqueueForStaff(staffId, fn) {
     const prev = staffScanQueues.get(staffId) || Promise.resolve();
-    const next = prev.catch(() => {}).then(() => processAttendanceScanImpl(staffId, photoFile, user));
+    const next = prev.catch(() => {}).then(fn);
     staffScanQueues.set(staffId, next.catch(() => {}));
     return next;
+  }
+  function processAttendanceScan(staffId, photoFile, user) {
+    return enqueueForStaff(staffId, () => processAttendanceScanImpl(staffId, photoFile, user));
   }
 
   // Parses the row number a sheetsAppend() call just wrote to out of the
@@ -1287,20 +1302,23 @@
   function attachPhotoInBackground(rowNumber, photoFile, staffId, isCheckIn, now) {
     if (!photoFile || !rowNumber) return;
     MVOA.uploadPhotoToDrive(photoFile, `${staffId}_${isoDateLocal(now)}_${isCheckIn ? 'in' : 'out'}.jpg`)
-      .then(async (photoUrl) => {
+      .then((photoUrl) => {
         if (!photoUrl) return;
-        // Re-read the row fresh right before patching — plenty can have
-        // happened to it in the several seconds the upload took (most
-        // notably: this same session getting checked out), and blindly
-        // writing back the field values captured back when the upload
-        // started would silently undo that.
-        const freshRows = await MVOA.sheetsRead(MVOA.TABS.attLog);
-        const freshRow = rowsToObjs(freshRows, LOG_COLS).find(l => l.rowNumber === rowNumber);
-        if (!freshRow) return; // row's gone (e.g. purged) — nothing to attach to
-        const updated = isCheckIn
-          ? [freshRow.LogID, freshRow.StaffID, freshRow.Date, freshRow.CheckInTime, photoUrl, freshRow.CheckOutTime, freshRow.CheckOutPhotoURL, freshRow.Status, freshRow.LoggedBy]
-          : [freshRow.LogID, freshRow.StaffID, freshRow.Date, freshRow.CheckInTime, freshRow.CheckInPhotoURL, freshRow.CheckOutTime, photoUrl, freshRow.Status, freshRow.LoggedBy];
-        await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, rowNumber, updated);
+        // The read-then-write patch itself goes through the SAME
+        // per-staff queue as a normal scan (see enqueueForStaff above) —
+        // so it can't race a newer scan's write, and a check-in's photo
+        // and a check-out's photo patching the same row can't race each
+        // other either. Only this fast step is queued; the upload above
+        // already finished by the time this runs.
+        return enqueueForStaff(staffId, async () => {
+          const freshRows = await MVOA.sheetsRead(MVOA.TABS.attLog);
+          const freshRow = rowsToObjs(freshRows, LOG_COLS).find(l => l.rowNumber === rowNumber);
+          if (!freshRow) return; // row's gone (e.g. purged) — nothing to attach to
+          const updated = isCheckIn
+            ? [freshRow.LogID, freshRow.StaffID, freshRow.Date, freshRow.CheckInTime, photoUrl, freshRow.CheckOutTime, freshRow.CheckOutPhotoURL, freshRow.Status, freshRow.LoggedBy]
+            : [freshRow.LogID, freshRow.StaffID, freshRow.Date, freshRow.CheckInTime, freshRow.CheckInPhotoURL, freshRow.CheckOutTime, photoUrl, freshRow.Status, freshRow.LoggedBy];
+          await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, rowNumber, updated);
+        });
       })
       .catch(() => { /* best-effort — the person has already walked away; a photo that never attaches just leaves that link blank, same as today's "camera unavailable" case */ });
   }
