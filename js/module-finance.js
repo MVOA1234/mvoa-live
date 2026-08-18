@@ -648,6 +648,11 @@ const FinanceModule = (function () {
       const tableEl = body.querySelector('#fin-budget-table');
       if (!rows.length) { tableEl.innerHTML = `<p class="muted">No budget lines for ${escapeHtml(fy)}.</p>`; return; }
       const showActionCol = canManageBudget || canInitiateRevision;
+      const totals = rows.reduce((acc, b) => {
+        const info = budgetInfoFor(b.Category, fy);
+        acc.total += info.total; acc.consumed += info.consumed; acc.available += info.available;
+        return acc;
+      }, { total: 0, consumed: 0, available: 0 });
       tableEl.innerHTML = `
         <table class="mvoa-table">
           <thead><tr><th>Category</th><th>Total Budget</th><th>Consumed</th><th>Available</th>${showActionCol ? '<th></th>' : ''}</tr></thead>
@@ -666,6 +671,15 @@ const FinanceModule = (function () {
               </tr>`;
             }).join('')}
           </tbody>
+          <tfoot>
+            <tr style="font-weight:700;border-top:2px solid var(--border);">
+              <td>Total</td>
+              <td>${formatAmount(totals.total)}</td>
+              <td>${formatAmount(totals.consumed)}</td>
+              <td style="color:${totals.available < 0 ? '#b3261e' : 'green'};">${formatAmount(totals.available)}</td>
+              ${showActionCol ? '<td></td>' : ''}
+            </tr>
+          </tfoot>
         </table>`;
       tableEl.querySelectorAll('.fin-budget-action-btn').forEach(btn => {
         btn.addEventListener('click', () => {
