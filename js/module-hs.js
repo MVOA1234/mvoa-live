@@ -2325,7 +2325,16 @@ const HSModule = (function () {
     // l.Shift === shift generically), so grouping by them here is a
     // one-line fix, not a deeper change.
     const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? activeRoundKeys() : [null];
-    const items = itemsCache.filter(i => i.TemplateID === template.TemplateID).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
+    // "Diesel Level Before/After Top Up" don't belong in this raw
+    // per-item grid: "After Top Up" only ever gets a value on the rare
+    // shift a top-up actually happens (via the separate Log Diesel
+    // Top-Up screen), so it's blank almost every day here; "Before Top
+    // Up" is really just the shift-start tank level feeding the Diesel
+    // Consumed calculation, not a standalone Pass/Fail-style reading —
+    // that computed figure already has its own proper home in the DG
+    // Operations (Weekly) report. Showing either raw row here was just
+    // confusing, mostly-blank noise.
+    const items = itemsCache.filter(i => i.TemplateID === template.TemplateID && !/diesel level (before|after) top up/i.test(i.CheckItem)).sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
     // Two logs can land on the same day+shift bucket when a technician's
     // checklist got submitted twice for the same shift (e.g. a retry
     // after a network hiccup, or a genuine resubmission). Picking
@@ -3696,6 +3705,23 @@ const HSModule = (function () {
               }
               return;
             }
+            // Deliberately does NOT run this reading through the generic
+            // ±20%-of-TypicalValue applyOutlierGuard below. That check
+            // assumes a value normally hovers near one typical number —
+            // true for something like an oil pressure gauge, but diesel
+            // level is measured every single shift now and is SUPPOSED to
+            // swing across the whole range every top-up cycle (high right
+            // after a top-up, all the way down toward 0% right before the
+            // next one). Comparing it against a fixed "typical" percentage
+            // would flag that entirely normal low end every time — see the
+            // "same as last reading" check just above instead, which
+            // still catches a genuinely stale/un-rechecked entry without
+            // caring what the actual level is.
+            const remarks = `Recorded: ${val}${unit}`;
+            pendingResults[itemId] = { result: String(val), remarks, numericValue: val };
+            if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
+            if (statusEl) { statusEl.textContent = remarks; statusEl.style.color = 'inherit'; }
+            return;
           }
           const remarks = `Recorded: ${val}${unit}`;
           const isOutlier = applyOutlierGuard(String(val), remarks);
