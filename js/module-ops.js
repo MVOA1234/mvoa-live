@@ -26,6 +26,7 @@ const OpsModule = (function () {
   let tasksCache = [];
   let categories = [];
   let assigneeOptions = [];
+  let rolesForAssignMatch = []; // see loadCategoriesAndAssignees + isAssigneeOf
   let currentCategory = null; // null = show sub-tile grid; otherwise the selected category object
   let currentView = 'open';
   let pendingAsset = null;
@@ -66,8 +67,22 @@ const OpsModule = (function () {
   // everywhere those already look at isAssigneeOf.
   function isAssigneeOf(t, user) {
     if (!t.AssignedTo) return false;
-    if (t.AssignedTo.indexOf('user:') === 0) return t.AssignedTo.substring('user:'.length) === user.name;
     if (t.AssignedTo.indexOf('role:') === 0) return t.AssignedTo.substring('role:'.length) === MVOA.displayTitle(user);
+    if (t.AssignedTo.indexOf('user:') === 0) {
+      const assignedName = t.AssignedTo.substring('user:'.length);
+      if (assignedName === user.name) return true;
+      // LEGACY tasks — created before role-based assignment existed —
+      // are still frozen to one specific person's name in the sheet.
+      // Rather than requiring every old row to be rewritten, look up
+      // that original assignee's CURRENT Title and, if the person
+      // viewing right now shares it, treat them as the assignee too —
+      // same outcome a "role:" task gives, just derived instead of
+      // stored. If that original person's name isn't found at all
+      // (renamed/removed from Roles), this just falls through to false,
+      // same as before.
+      const assignedPerson = rolesForAssignMatch.find(r => r.name === assignedName);
+      if (assignedPerson && MVOA.displayTitle(assignedPerson) === MVOA.displayTitle(user)) return true;
+    }
     return false;
   }
   function hasUnreadNote(t, user) {
@@ -226,6 +241,12 @@ const OpsModule = (function () {
   async function loadCategoriesAndAssignees(force) {
     categories = (await MVOA.loadCategories(force)).filter(c => c.Active);
     assigneeOptions = await MVOA.loadAssigneeOptions();
+    // Cached alongside assigneeOptions — used by isAssigneeOf below to
+    // look up a LEGACY "user:<name>" task's current Title, so tasks
+    // created before role-based assignment existed still get the same
+    // "anyone with this title" treatment a "role:" task gets, without
+    // needing every old row rewritten in the sheet.
+    rolesForAssignMatch = await MVOA.loadRoles(force);
     await MVOA.loadDailyOpsPermissionsMatrix(force);
   }
 
