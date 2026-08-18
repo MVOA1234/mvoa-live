@@ -562,11 +562,13 @@ const FinanceModule = (function () {
       ? `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`
       : `${t.label}${countSuffix(countFor(t.view))}`;
     container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="fin-back-btn" class="btn-secondary">← Back to Finance Application</button>
+      </div>
       ${headerHtml}
       <p style="margin:0 0 8px;font-weight:600;color:var(--mvoa-blue);">${groupLabel}</p>
       <div class="ops-tabs">
         ${subTabs.map(t => `<button data-view="${t.view}" class="ops-tab-btn ${currentView===t.view?'active':''}">${tabLabelHtml(t)}</button>`).join('')}
-        <button id="fin-back-btn" class="ops-tab-btn">← Back to Finance Application</button>
         <button id="fin-refresh-btn" class="ops-tab-btn" title="Reload from sheet" style="margin-left:auto;">↻ Refresh</button>
       </div>
       <div id="fin-view-body"></div>
