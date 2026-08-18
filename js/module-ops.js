@@ -54,8 +54,21 @@ const OpsModule = (function () {
   // unread for the other until they open the thread.
   // ───────────────────────────────────────────────────────────
   function isCreatorOf(t, user) { return t.CreatedBy === user.name; }
+  // A task is either assigned to one specific person ("user:<name>") or
+  // to a role/title generically ("role:<Title>") — see loadAssigneeOptions
+  // and createOpsTask in shared.js. For a role assignment, ANY active
+  // user whose current Title matches counts as "the" assignee — e.g. a
+  // task assigned to "role:Facility Manager" is equally the assignee's
+  // task for every active Facility Manager, not just whichever one
+  // happened to be picked when it was created. This one function gates
+  // closing, delegating, and the "New"/unread-notes tracking below, so
+  // extending it here is enough to extend role-based ownership
+  // everywhere those already look at isAssigneeOf.
   function isAssigneeOf(t, user) {
-    return !!t.AssignedTo && t.AssignedTo.indexOf('user:') === 0 && t.AssignedTo.substring('user:'.length) === user.name;
+    if (!t.AssignedTo) return false;
+    if (t.AssignedTo.indexOf('user:') === 0) return t.AssignedTo.substring('user:'.length) === user.name;
+    if (t.AssignedTo.indexOf('role:') === 0) return t.AssignedTo.substring('role:'.length) === MVOA.displayTitle(user);
+    return false;
   }
   function hasUnreadNote(t, user) {
     if (!t.LastNoteAt || t.LastNoteAuthor === user.name) return false; // no notes yet, or your own latest note
@@ -358,7 +371,12 @@ const OpsModule = (function () {
     const warnEl = scope.querySelector(warningSelector);
     if (!select || !warnEl) return;
     const value = select.value;
-    if (!value || value.indexOf('user:') !== 0) { warnEl.textContent = ''; return; } // blank or a technician — technicians are covered by assigneeEditAccess itself, but nothing to warn against mid-typing here
+    // Blank, or a technician — technicians have no login/Title in the
+    // permissions system at all, so there's nothing meaningful to warn
+    // about mid-typing for them. "user:" (one person) and "role:" (a
+    // title generically) both go through the same live check below,
+    // since assigneeEditAccess already knows how to evaluate either.
+    if (!value || value.indexOf('tech:') === 0) { warnEl.textContent = ''; return; }
     const label = select.options[select.selectedIndex].textContent;
     try {
       const hasEdit = await MVOA.assigneeEditAccess(currentCategory, value);
@@ -513,7 +531,7 @@ const OpsModule = (function () {
       if (submitAnotherBtn) submitAnotherBtn.disabled = false;
       return;
     }
-    if (assignedTo.indexOf('user:') === 0) {
+    if (assignedTo.indexOf('user:') === 0 || assignedTo.indexOf('role:') === 0) {
       const hasEdit = await MVOA.assigneeEditAccess(currentCategory, assignedTo);
       if (!hasEdit) {
         const label = MVOA.assigneeLabel(assignedTo, assigneeOptions);
@@ -787,7 +805,10 @@ const OpsModule = (function () {
         <label style="margin:0;">Delegate this task to
           <select id="ops-delegate-select-${taskId}">
             <option value="">— No delegate —</option>
-            ${assigneeOptions.map(o => `<option value="${o.value}" ${task.DelegatedTo===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
+            <!-- "role:" options excluded here on purpose — delegation means
+                 handing the actual work to one specific person, unlike
+                 AssignedTo (which CAN legitimately be a whole role). -->
+            ${assigneeOptions.filter(o => o.value.indexOf('role:') !== 0).map(o => `<option value="${o.value}" ${task.DelegatedTo===o.value?'selected':''}>${escapeHtml(o.label)}</option>`).join('')}
           </select>
         </label>
         <button class="btn-primary ops-delegate-save" data-task-id="${taskId}" style="margin-top:8px;width:100%;">Save</button>
@@ -837,7 +858,7 @@ const OpsModule = (function () {
     formBody.querySelector('.ops-reassign-save').addEventListener('click', async () => {
       const select = formBody.querySelector(`#ops-reassign-select-${taskId}`);
       if (!select.value) { errEl.textContent = 'Please select someone to reassign this task to.'; return; }
-      if (select.value.indexOf('user:') === 0) {
+      if (select.value.indexOf('user:') === 0 || select.value.indexOf('role:') === 0) {
         const hasEdit = await MVOA.assigneeEditAccess(currentCategory, select.value);
         if (!hasEdit) {
           const label = MVOA.assigneeLabel(select.value, assigneeOptions);
