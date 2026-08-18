@@ -1260,6 +1260,51 @@
     return next;
   }
 
+  // Parses the row number a sheetsAppend() call just wrote to out of the
+  // Sheets API's response shape (`updates.updatedRange`, e.g.
+  // "AttLog!A21:I21" → 21) — so a background photo upload knows exactly
+  // which row to patch once it finishes, without an extra sheetsRead
+  // just to look the new row up again.
+  function parseAppendedRowNumber(appendResult) {
+    const range = appendResult && appendResult.updates && appendResult.updates.updatedRange;
+    if (!range) return null;
+    const m = range.match(/![A-Z]+(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  // Uploads the photo AFTER the check-in/check-out has already been
+  // written, and patches it into that row once it lands — never awaited
+  // by processAttendanceScanImpl. Uploading via the Apps Script Drive
+  // proxy (base64-encode the whole photo, POST it, have the script write
+  // it to Drive, then hand back a URL) routinely takes several seconds,
+  // and there's no reason to make the person standing at the gate stand
+  // there waiting for THAT once the attendance record itself — the part
+  // that actually matters — has already been written in a fraction of
+  // the time. Same "a photo is nice-to-have, the record is not" reasoning
+  // already used for a failed upload (see the old try/catch this
+  // replaced); this just applies it to a slow one too, not only a
+  // failed one.
+  function attachPhotoInBackground(rowNumber, photoFile, staffId, isCheckIn, now) {
+    if (!photoFile || !rowNumber) return;
+    MVOA.uploadPhotoToDrive(photoFile, `${staffId}_${isoDateLocal(now)}_${isCheckIn ? 'in' : 'out'}.jpg`)
+      .then(async (photoUrl) => {
+        if (!photoUrl) return;
+        // Re-read the row fresh right before patching — plenty can have
+        // happened to it in the several seconds the upload took (most
+        // notably: this same session getting checked out), and blindly
+        // writing back the field values captured back when the upload
+        // started would silently undo that.
+        const freshRows = await MVOA.sheetsRead(MVOA.TABS.attLog);
+        const freshRow = rowsToObjs(freshRows, LOG_COLS).find(l => l.rowNumber === rowNumber);
+        if (!freshRow) return; // row's gone (e.g. purged) — nothing to attach to
+        const updated = isCheckIn
+          ? [freshRow.LogID, freshRow.StaffID, freshRow.Date, freshRow.CheckInTime, photoUrl, freshRow.CheckOutTime, freshRow.CheckOutPhotoURL, freshRow.Status, freshRow.LoggedBy]
+          : [freshRow.LogID, freshRow.StaffID, freshRow.Date, freshRow.CheckInTime, freshRow.CheckInPhotoURL, freshRow.CheckOutTime, photoUrl, freshRow.Status, freshRow.LoggedBy];
+        await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, rowNumber, updated);
+      })
+      .catch(() => { /* best-effort — the person has already walked away; a photo that never attaches just leaves that link blank, same as today's "camera unavailable" case */ });
+  }
+
   async function processAttendanceScanImpl(staffId, photoFile, user) {
     const staff = staffById(staffId);
     if (!staff) return { type: 'error', message: 'Not recognised — this ID is not enrolled.' };
@@ -1272,17 +1317,6 @@
     const open = staffLogs.filter(l => l.CheckInTime && !l.CheckOutTime)
       .sort((a, b) => b.CheckInTime.localeCompare(a.CheckInTime))[0];
 
-    let photoUrl = '';
-    if (photoFile) {
-      try {
-        photoUrl = await MVOA.uploadPhotoToDrive(photoFile, `${staffId}_${isoDateLocal(now)}_${open ? 'out' : 'in'}.jpg`);
-      } catch (e) {
-        // A failed photo upload shouldn't block the actual check-in/out —
-        // the attendance record itself matters more; log without a photo.
-        photoUrl = '';
-      }
-    }
-
     if (!open) {
       const existingIds = rows.slice(1).map(r => r[0]).filter(Boolean);
       const logId = MVOA.nextId('LOG', existingIds);
@@ -1292,11 +1326,13 @@
       // "Currently checked in" panel in renderAttendanceLogs for staff
       // whose open session started on an earlier date than the one being
       // viewed — the date-filtered table below only matches by this Date.
-      await MVOA.sheetsAppend(MVOA.TABS.attLog, [logId, staffId, isoDateLocal(now), nowIso, photoUrl, '', '', 'CheckedIn', (user && user.name) || '']);
+      const appendResult = await MVOA.sheetsAppend(MVOA.TABS.attLog, [logId, staffId, isoDateLocal(now), nowIso, '', '', '', 'CheckedIn', (user && user.name) || '']);
+      attachPhotoInBackground(parseAppendedRowNumber(appendResult), photoFile, staffId, true, now);
       return { type: 'in', message: `${staff.Name} — CHECK-IN at ${formatTime(nowIso)}`, staff };
     } else {
       await MVOA.sheetsUpdateRow(MVOA.TABS.attLog, open.rowNumber,
-        [open.LogID, open.StaffID, open.Date, open.CheckInTime, open.CheckInPhotoURL, nowIso, photoUrl, 'CheckedOut', (user && user.name) || '']);
+        [open.LogID, open.StaffID, open.Date, open.CheckInTime, open.CheckInPhotoURL, nowIso, '', 'CheckedOut', (user && user.name) || '']);
+      attachPhotoInBackground(open.rowNumber, photoFile, staffId, false, now);
       return { type: 'out', message: `${staff.Name} — CHECK-OUT at ${formatTime(nowIso)}`, staff };
     }
   }
