@@ -682,14 +682,22 @@ const MVOA = (function () {
     return !!sectionMatrix[displayTitle(user)];
   }
 
-  // Checks whether a given AssignedTo value ("user:Name" or "tech:ID") —
-  // not necessarily the currently logged-in user — would have Edit
-  // rights on a category. Used to warn at assignment time (New Task /
-  // Reassign) if the chosen person wouldn't actually be able to close
-  // their own task. Technicians never get edit access here since they
-  // have no login/Title in the permissions system at all.
+  // Checks whether a given AssignedTo value ("user:Name", "tech:ID", or
+  // "role:Title") — not necessarily the currently logged-in user — would
+  // have Edit rights on a category. Used to warn at assignment time (New
+  // Task / Reassign) if the chosen person/role wouldn't actually be able
+  // to close their own task. Technicians never get edit access here
+  // since they have no login/Title in the permissions system at all.
+  // For a "role:" value there's no one specific person to check — the
+  // permissions matrix is keyed by Title anyway (see canEditCategory), so
+  // a synthetic {title} stand-in is enough; it doesn't need to be an
+  // actual active person.
   async function assigneeEditAccess(category, assignedToValue) {
-    if (!assignedToValue || assignedToValue.indexOf('user:') !== 0) return false;
+    if (!assignedToValue) return false;
+    if (assignedToValue.indexOf('role:') === 0) {
+      return canEditCategory(category, { role: '', title: assignedToValue.substring('role:'.length) });
+    }
+    if (assignedToValue.indexOf('user:') !== 0) return false;
     const name = assignedToValue.substring('user:'.length);
     const users = await loadRoles();
     const person = users.find(u => u.name === name);
@@ -698,21 +706,32 @@ const MVOA = (function () {
   }
 
   // Combined Assigned-To options: app Users (from Roles, active only) +
-  // external Technicians. Stored/returned as {value, label} where value
-  // is "user:<name>" or "tech:<TechnicianID>" so the two namespaces never collide.
+  // external Technicians + Roles/Titles themselves. Stored/returned as
+  // {value, label} where value is "user:<name>", "tech:<TechnicianID>",
+  // or "role:<Title>" so the three namespaces never collide. A "role:"
+  // option assigns the task to WHOEVER currently holds that title — not
+  // frozen to one person the way "user:" is — so if two people share a
+  // title (e.g. two Facility Managers), either one can act as the
+  // assignee of record for that task. Role options are derived from
+  // whatever distinct Titles currently exist among active users, so a
+  // title with nobody active in it doesn't show up as a dead-end choice.
   async function loadAssigneeOptions() {
     const [users, techs] = await Promise.all([loadRoles(), loadTechnicians()]);
-    const userOpts = users.filter(u => u.active).map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + displayTitle(u) + ')' }));
+    const activeUsers = users.filter(u => u.active);
+    const userOpts = activeUsers.map(u => ({ value: 'user:' + u.name, label: u.name + ' (' + displayTitle(u) + ')' }));
     const techOpts = techs.filter(t => t.Active).map(t => ({ value: 'tech:' + t.TechnicianID, label: t.Name + ' (Technician)' }));
-    return userOpts.concat(techOpts).sort((a, b) => a.label.localeCompare(b.label));
+    const titles = [...new Set(activeUsers.map(u => displayTitle(u)).filter(Boolean))];
+    const roleOpts = titles.map(t => ({ value: 'role:' + t, label: t + ' — Role (anyone with this title)' }));
+    return userOpts.concat(techOpts, roleOpts).sort((a, b) => a.label.localeCompare(b.label));
   }
 
   function assigneeLabel(assignedTo, assigneeOptions) {
     if (!assignedTo) return '';
     const found = (assigneeOptions || []).find(o => o.value === assignedTo);
     if (found) return found.label;
-    // fallback if options weren't loaded / person since deactivated
-    return assignedTo.replace(/^user:|^tech:/, '');
+    // fallback if options weren't loaded / person since deactivated /
+    // the title no longer has anyone active holding it
+    return assignedTo.replace(/^user:|^tech:|^role:/, '');
   }
 
 
@@ -768,25 +787,30 @@ const MVOA = (function () {
 
   // Creates a Daily Ops task from another module (currently: Plant
   // Rounds auto-flagging a failed checklist item). categoryName must
-  // match an OpsCategories.Name exactly; assigneeTitle is resolved to
-  // the first active user whose displayTitle() matches (e.g.
-  // "Facility Manager") — if nobody matches, the task is created
-  // unassigned rather than failing outright, since a system-generated
-  // task with no valid target title still shouldn't silently vanish.
+  // match an OpsCategories.Name exactly; assigneeTitle becomes a
+  // "role:<Title>" assignment (e.g. "role:Facility Manager") rather than
+  // being resolved down to one specific person at creation time — ANY
+  // active user who currently holds that title can act as the assignee
+  // of record (close it, delegate it, see the "New" badge clear when
+  // they open it), same as a manually-assigned "Role" option from
+  // loadAssigneeOptions. Previously this picked "the first active user
+  // whose displayTitle() matches" and froze the task to that one person
+  // by name — which meant a second person sharing the exact same title
+  // had no more claim to the task than a total stranger. No check that
+  // anyone currently holds the title at all — an auto-created task with
+  // an assigneeTitle nobody currently holds still gets that role
+  // assignment (rather than silently going unassigned), so it's ready
+  // to be picked up the moment someone with that title is added.
   // Returns the new TaskID.
   async function createOpsTask({ categoryName, title, description, assigneeTitle, priority, createdBy }) {
-    const [categories, existingRows, users] = await Promise.all([
-      loadCategories(), sheetsRead(TABS.opsTasks), loadRoles()
+    const [categories, existingRows] = await Promise.all([
+      loadCategories(), sheetsRead(TABS.opsTasks)
     ]);
     const category = categories.find(c => c.Name === categoryName);
     if (!category) throw new Error(`createOpsTask: no category named "${categoryName}"`);
     const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
     const taskId = nextId('TASK', existingIds);
-    let assignedTo = '';
-    if (assigneeTitle) {
-      const person = users.find(u => u.active && displayTitle(u) === assigneeTitle);
-      if (person) assignedTo = 'user:' + person.name;
-    }
+    const assignedTo = assigneeTitle ? 'role:' + assigneeTitle : '';
     const now = new Date().toISOString();
     const row = {
       TaskID: taskId, Title: title, Description: description || '', Priority: priority || 'Medium',
