@@ -784,13 +784,22 @@
     // One row per SESSION, not per staff member — a staff member can have
     // more than one session on the same Date (shifts crossing midnight, or
     // two separate shifts in one day), and every one of them stays visible
-    // here, not just the latest. Staff with no session that date get a
-    // single "Not scanned" row instead.
+    // here, not just the latest. Staff with no session that STARTED on
+    // this date get a single "Not scanned" row instead — UNLESS an
+    // overnight session from an earlier date is still open (CheckInTime
+    // set, no CheckOutTime yet). Without this check, someone who checked
+    // in yesterday evening and hasn't checked out yet would show as
+    // "Not scanned" in today's table even while the "Currently checked
+    // in" panel above correctly lists them as on-site right now — that
+    // mismatch (visibly on-site up top, "—"/Not scanned in the table)
+    // is exactly what looked wrong. Surface that carried-over session
+    // here too, same as the panel does, instead of hiding it.
     const tableRows = [];
     rows.forEach(s => {
       const sessions = dayLogs.filter(x => x.StaffID === s.StaffID).sort((a, b) => a.CheckInTime.localeCompare(b.CheckInTime));
-      if (!sessions.length) { tableRows.push({ s, l: null }); return; }
-      sessions.forEach(l => tableRows.push({ s, l }));
+      if (sessions.length) { sessions.forEach(l => tableRows.push({ s, l })); return; }
+      const carriedOver = allLogsCache.find(x => x.StaffID === s.StaffID && x.CheckInTime && !x.CheckOutTime);
+      tableRows.push({ s, l: carriedOver || null, carriedOver: !!carriedOver });
     });
 
     // Person-level summary (not session-level): "on-site" means currently
@@ -839,14 +848,20 @@
           <table class="mvoa-table">
             <thead><tr><th>Name</th><th>Agency</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
             <tbody>
-              ${tableRows.length ? tableRows.map(({ s, l }) => {
+              ${tableRows.length ? tableRows.map(({ s, l, carriedOver }) => {
                 const status = !l ? 'Not scanned' : (l.Status === 'CheckedOut' ? 'Checked out' : 'On-site');
                 const statusColor = !l ? '#6b7280' : (l.Status === 'CheckedOut' ? '#41464b' : '#1e6b33');
+                // A carried-over row's check-in genuinely happened on an
+                // earlier date (an overnight session still open) — note
+                // that date next to the time so it doesn't read as if
+                // they checked in today, matching the "since <date>"
+                // phrasing the "Currently checked in" panel already uses.
+                const carriedNote = carriedOver ? ` <span class="muted" style="font-size:0.75rem;">(since ${escapeHtml(l.Date)})</span>` : '';
                 return `
                   <tr>
                     <td>${escapeHtml(s.Name)}</td>
                     <td>${escapeHtml(agencyName(s.AgencyID))}</td>
-                    <td>${l && l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) + (l.CheckInPhotoURL ? ` <a href="${l.CheckInPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') : '—'}</td>
+                    <td>${l && l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) + (l.CheckInPhotoURL ? ` <a href="${l.CheckInPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') + carriedNote : '—'}</td>
                     <td>${l && l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) + (l.CheckOutPhotoURL ? ` <a href="${l.CheckOutPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') : '—'}</td>
                     <td style="color:${statusColor};font-weight:600;">${status}</td>
                   </tr>
