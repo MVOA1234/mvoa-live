@@ -655,7 +655,16 @@ const FinanceModule = (function () {
       }, { total: 0, consumed: 0, available: 0 });
       tableEl.innerHTML = `
         <table class="mvoa-table">
-          <thead><tr><th>Category</th><th>Total Budget</th><th>Consumed</th><th>Available</th>${showActionCol ? '<th></th>' : ''}</tr></thead>
+          <thead>
+            <tr><th>Category</th><th>Total Budget</th><th>Consumed</th><th>Available</th>${showActionCol ? '<th></th>' : ''}</tr>
+            <tr style="font-weight:700;background:var(--mvoa-blue-pale,#eef2f7);position:sticky;top:0;">
+              <td>Total</td>
+              <td>${formatAmount(totals.total)}</td>
+              <td>${formatAmount(totals.consumed)}</td>
+              <td style="color:${totals.available < 0 ? '#b3261e' : 'green'};">${formatAmount(totals.available)}</td>
+              ${showActionCol ? '<td></td>' : ''}
+            </tr>
+          </thead>
           <tbody>
             ${rows.map(b => {
               const info = budgetInfoFor(b.Category, fy);
@@ -671,15 +680,6 @@ const FinanceModule = (function () {
               </tr>`;
             }).join('')}
           </tbody>
-          <tfoot>
-            <tr style="font-weight:700;border-top:2px solid var(--border);">
-              <td>Total</td>
-              <td>${formatAmount(totals.total)}</td>
-              <td>${formatAmount(totals.consumed)}</td>
-              <td style="color:${totals.available < 0 ? '#b3261e' : 'green'};">${formatAmount(totals.available)}</td>
-              ${showActionCol ? '<td></td>' : ''}
-            </tr>
-          </tfoot>
         </table>`;
       tableEl.querySelectorAll('.fin-budget-action-btn').forEach(btn => {
         btn.addEventListener('click', () => {
