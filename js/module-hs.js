@@ -1038,14 +1038,16 @@ const HSModule = (function () {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const monday = mondayOfWeek(today);
 
-    // Sunday-only weekly evaluation — see evaluateWeeklyInOutCompliance.
-    // Deliberately client-triggered (no reliable background trigger
-    // exists in this app yet) rather than skipped: whoever opens this
-    // screen on a Sunday causes the check to run, with its own dedup so
-    // opening it repeatedly that day never creates duplicate tasks.
-    if (today.getDay() === 0) {
-      await evaluateWeeklyInOutCompliance(logs, monday, today);
-    }
+    // Weekly evaluation — see evaluateWeeklyInOutCompliance. Deliberately
+    // client-triggered (no reliable background trigger exists in this
+    // app yet) rather than skipped: whoever opens this screen causes the
+    // check to run, with its own dedup so opening it repeatedly never
+    // creates duplicate tasks. Creating a NEW shortfall ticket only
+    // happens on Sunday, once the full week's count is actually known —
+    // but auto-CLOSING an already-open ticket (because visits since
+    // caught up to the weekly minimum) can and should happen any day,
+    // not just once a week, so that's run every time regardless.
+    await evaluateWeeklyInOutCompliance(logs, monday, today, /* closeOnly */ today.getDay() !== 0);
 
     function countThisWeek(typeKey, direction) {
       return logs.filter(l => l.Type === typeKey && l.Direction === direction &&
@@ -1192,16 +1194,36 @@ const HSModule = (function () {
   // shouldn't prevent detecting a NEW shortfall this week, but this
   // exact week's task should never be created twice regardless of
   // whether it's since been closed.
-  async function evaluateWeeklyInOutCompliance(logs, monday, today) {
-    await runOnceAtATime('weeklyInOut', () => evaluateWeeklyInOutComplianceImpl(logs, monday, today));
+  async function evaluateWeeklyInOutCompliance(logs, monday, today, closeOnly) {
+    await runOnceAtATime('weeklyInOut', () => evaluateWeeklyInOutComplianceImpl(logs, monday, today, closeOnly));
   }
-  async function evaluateWeeklyInOutComplianceImpl(logs, monday, today) {
+  // closeOnly=true skips the create branch entirely (used on non-Sunday
+  // calls — a mid-week shortfall isn't a real violation yet, the week
+  // isn't over) but still runs the close branch every time, so a ticket
+  // raised last Sunday can auto-resolve the moment enough visits catch
+  // up, not just the following Sunday.
+  async function evaluateWeeklyInOutComplianceImpl(logs, monday, today, closeOnly) {
+    const closeRules = [];
     for (const t of IN_OUT_TYPES) {
       if (!t.weeklyMin) continue;
       const count = logs.filter(l => l.Type === t.key && l.Direction === 'IN' &&
         new Date(l.Timestamp) >= monday && new Date(l.Timestamp) <= new Date(today.getTime() + 86400000)).length;
-      if (count >= t.weeklyMin) continue;
-      const title = `Plant Rounds: ${t.key} — only ${count} visit(s) this week (week of ${isoDate(monday)})`;
+      // Middle of the title (the count) can legitimately differ from
+      // whatever it was when a ticket was first raised — matching on a
+      // prefix+suffix pair (rather than the exact original title) is
+      // what lets this find and close that older ticket even though the
+      // count it originally complained about has since changed.
+      const prefix = `Plant Rounds: ${t.key} — only `;
+      const suffix = ` visit(s) this week (week of ${isoDate(monday)})`;
+      if (count >= t.weeklyMin) {
+        closeRules.push({
+          matches: title => title.indexOf(prefix) === 0 && title.endsWith(suffix),
+          note: `${t.key} now has ${count} visit(s) this week (needed ${t.weeklyMin}).`
+        });
+        continue;
+      }
+      if (closeOnly) continue;
+      const title = `${prefix}${count}${suffix}`;
       try {
         const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
         const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
@@ -1220,6 +1242,9 @@ const HSModule = (function () {
         // next time someone opens this screen today.
       }
     }
+    if (closeRules.length) {
+      try { await MVOA.autoCloseOpsTasks(closeRules); } catch (e) { /* best-effort — retries next sweep */ }
+    }
   }
 
   // WEEKLY-ONLY ITEMS (DayApplicability === 'WeeklyOnce') — e.g. Cob Web
@@ -1237,9 +1262,10 @@ const HSModule = (function () {
   }
   async function evaluateWeeklyItemComplianceImpl(qrTarget) {
     const now = new Date();
-    if (now.getDay() !== 0) return; // Sunday only
+    const isSunday = now.getDay() === 0;
     const monday = mondayOfWeek(now);
     const relevantTemplates = templatesCache.filter(t => t.QRTarget === qrTarget);
+    const closeRules = [];
     for (const template of relevantTemplates) {
       const weeklyItems = itemsCache.filter(i => i.TemplateID === template.TemplateID && i.DayApplicability === 'WeeklyOnce');
       if (!weeklyItems.length) continue;
@@ -1255,12 +1281,20 @@ const HSModule = (function () {
         const resultRows = await MVOA.sheetsRead(MVOA.TABS.hsItemResults);
         results = rowsToObjs(resultRows, RESULT_COLS);
       } catch (e) {
-        return; // best-effort — passive check, just retries next time this screen opens
+        continue; // best-effort — skip this template this pass, retries next time this screen opens
       }
       for (const item of weeklyItems) {
         const donePass = results.some(r => r.ItemID === item.ItemID && logIdsThisWeek.has(r.LogID) && r.Result === 'Pass');
-        if (donePass) continue;
         const title = `Plant Rounds: ${item.CheckItem} not done this week — ${categoryLabel(qrTarget)} (week of ${isoDate(monday)})`;
+        if (donePass) {
+          // A closed task from a PAST week never matches here (its own
+          // week-of date is baked into the title), so this only ever
+          // touches this week's ticket, exactly the one this Pass
+          // actually resolves.
+          closeRules.push({ matches: t => t === title, note: `${item.CheckItem} now has a Pass recorded this week.` });
+          continue;
+        }
+        if (!isSunday) continue; // creating a NEW shortfall ticket waits for the full week to be known — closing an existing one doesn't
         try {
           const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
           const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
@@ -1277,6 +1311,9 @@ const HSModule = (function () {
           // best-effort — same reasoning as above
         }
       }
+    }
+    if (closeRules.length) {
+      try { await MVOA.autoCloseOpsTasks(closeRules); } catch (e) { /* best-effort — retries next sweep */ }
     }
   }
 
@@ -1346,6 +1383,7 @@ const HSModule = (function () {
       <div class="card" style="max-width:420px;margin:0;">
         <button id="hs-report-failed" class="btn-secondary" style="width:100%;margin-bottom:8px;">❌ Failed Items Log</button>
         <button id="hs-report-tasks" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔗 Auto-Flagged Task Resolution</button>
+        <button id="hs-report-autoclose" class="btn-secondary" style="width:100%;margin-bottom:8px;">✅ Auto-Close Activity</button>
         <button id="hs-report-shift" class="btn-secondary" style="width:100%;margin-bottom:8px;">🕐 Shift Coverage (Daily)</button>
         <button id="hs-report-dg-weekly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔧 DG Operations (Weekly)</button>
         <button id="hs-report-dg-monthly" class="btn-secondary" style="width:100%;margin-bottom:8px;">🔧 DG Set Operations (Monthly)</button>
@@ -1359,6 +1397,7 @@ const HSModule = (function () {
     container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
     container.querySelector('#hs-report-failed').addEventListener('click', () => renderFailedItemsReport(container));
     container.querySelector('#hs-report-tasks').addEventListener('click', () => renderTaskResolutionReport(container));
+    container.querySelector('#hs-report-autoclose').addEventListener('click', () => renderAutoCloseActivityReport(container));
     container.querySelector('#hs-report-shift').addEventListener('click', () => renderShiftCoverageReport(container));
     container.querySelector('#hs-report-dg-weekly').addEventListener('click', () => renderDgOperationsReport(container, 'weekly'));
     container.querySelector('#hs-report-dg-monthly').addEventListener('click', () => renderDgOperationsReport(container, 'monthly'));
@@ -2973,8 +3012,17 @@ const HSModule = (function () {
         });
     });
 
+    // Everything up to the trailing "(<cycleKey>)" is stable for a given
+    // template+asset — the cycleKey itself changes cycle to cycle, so
+    // matching on this prefix (rather than the full title) is what lets
+    // the close pass below find a ticket raised for an OLDER cycle even
+    // though "now" has since moved on to a newer one.
+    function overdueTitlePrefix(c) {
+      return `Plant Rounds: ${c.template.Name}${c.assetLabel ? ` (${c.assetLabel})` : ''} not performed — ${categoryLabel(c.template.QRTarget)} (`;
+    }
+
     for (const c of candidates.filter(c => c.due.overdue)) {
-      const title = `Plant Rounds: ${c.template.Name}${c.assetLabel ? ` (${c.assetLabel})` : ''} not performed — ${categoryLabel(c.template.QRTarget)} (${c.due.cycleKey})`;
+      const title = overdueTitlePrefix(c) + `${c.due.cycleKey})`;
       if (existingTitles.has(title)) continue;
       try {
         await MVOA.createOpsTask({
@@ -2989,6 +3037,22 @@ const HSModule = (function () {
       } catch (e) {
         // best-effort — retries next time this screen opens
       }
+    }
+
+    // AUTO-CLOSE — for every template+asset that is NOT (or no longer)
+    // overdue, close any open ticket that was raised for an earlier
+    // cycle of the SAME template+asset. This is what lets a technician
+    // actually logging the checklist resolve its own overdue ticket,
+    // instead of it sitting open forever until a human notices and
+    // closes it by hand. Batched into one autoCloseOpsTasks call (one
+    // OpsTasks read total) rather than one call per candidate.
+    const closeRules = candidates.filter(c => !c.due.overdue).map(c => {
+      const prefix = overdueTitlePrefix(c);
+      const label = `${c.template.Name}${c.assetLabel ? ` (${c.assetLabel})` : ''}`;
+      return { matches: title => title.indexOf(prefix) === 0, note: `${label} has since been logged — now shows "${c.due.text}".` };
+    });
+    if (closeRules.length) {
+      try { await MVOA.autoCloseOpsTasks(closeRules); } catch (e) { /* best-effort — retries next sweep */ }
     }
   }
 
@@ -3038,10 +3102,14 @@ const HSModule = (function () {
       return;
     }
 
-    // Passive Sunday check for this category's WeeklyOnce items — not
-    // awaited, same reasoning as the In/Out Log's weekly check: runs in
-    // the background whenever someone opens this category on a Sunday,
-    // never blocks rendering the screen itself.
+    // Passive check for this category's WeeklyOnce items — not awaited,
+    // runs in the background whenever someone opens this category, never
+    // blocks rendering the screen itself. Creating a NEW shortfall
+    // ticket only happens on Sunday (the day-gate lives inside the impl
+    // now, alongside the auto-close logic) — but auto-closing an
+    // already-open one runs every day, so opening this category on any
+    // day of the week can resolve last Sunday's ticket the moment the
+    // item actually gets logged.
     evaluateWeeklyItemCompliance(currentScan.qrTarget);
     // Same passive, non-blocking treatment for rounds that were never
     // logged at all once their window closed.
@@ -4020,7 +4088,7 @@ const HSModule = (function () {
   // OpsTasks column indexes — must match OPS_TASK_COLS in shared.js.
   // Read directly by index rather than pulling in module-ops.js's own
   // column list, since modules don't share internals with each other.
-  const OPS_TASK_COL_IDX = { Title: 1, Description: 2, CreatedDate: 7, Status: 9, ClosedDate: 12, ClosedBy: 13 };
+  const OPS_TASK_COL_IDX = { Title: 1, Description: 2, CreatedDate: 7, Status: 9, ComplianceComment: 10, ClosedDate: 12, ClosedBy: 13 };
 
   // Both Failed Items Log and Task Resolution are derived from actual
   // AUTO-CREATED TASKS (found via the "(Plant Rounds log LOGID)" marker
@@ -4163,6 +4231,74 @@ const HSModule = (function () {
         ClosedBy: x.bucket === 'Approved' ? x.closedBy : '', ClosedDate: x.bucket === 'Approved' ? formatDate(x.closedDate) : ''
       }));
       printTablePdf('Auto-Flagged Task Resolution', ['Item', 'LoggedAt', 'TaskStatus', 'ClosedBy', 'ClosedDate'], pdfRows);
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // AUTO-CLOSE ACTIVITY — every OpsTask the system closed on its own
+  // (via MVOA.autoCloseOpsTasks, see the overdue-checklist / weekly
+  // In/Out / weekly item compliance checks above), for reviewing that
+  // the auto-close logic is actually making the right call. Deliberately
+  // its OWN report rather than folded into Auto-Flagged Task Resolution
+  // above — that one only picks up tickets carrying a "(Plant Rounds log
+  // HSLOG-...)" marker in their Description, which the auto-closable
+  // ticket types never had to begin with. Identified purely by ClosedBy
+  // = the fixed system string autoCloseOpsTasks always writes — nothing
+  // else ever writes that exact value, so this can't accidentally pick
+  // up a human's own close.
+  // ───────────────────────────────────────────────────────────
+  const AUTO_CLOSE_ACTOR = 'System (Plant Rounds — auto-close)';
+  async function loadAutoClosedOpsTasks() {
+    const rows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
+    return rows.slice(1)
+      .filter(r => (r[OPS_TASK_COL_IDX.ClosedBy] || '') === AUTO_CLOSE_ACTOR)
+      .map(r => ({
+        title: (r[OPS_TASK_COL_IDX.Title] || '').replace(/^Plant Rounds:\s*/, ''),
+        // Strip the "Auto-closed by system: " prefix back off for
+        // display — the report's own heading already makes clear
+        // every row here was auto-closed, so repeating it per-row
+        // would just be noise.
+        resolutionNote: (r[OPS_TASK_COL_IDX.ComplianceComment] || '').replace(/^Auto-closed by system:\s*/, ''),
+        createdDate: r[OPS_TASK_COL_IDX.CreatedDate] || '',
+        closedDate: r[OPS_TASK_COL_IDX.ClosedDate] || ''
+      }))
+      .sort((a, b) => (b.closedDate || '').localeCompare(a.closedDate || ''));
+  }
+  async function renderAutoCloseActivityReport(container) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-reports" class="btn-secondary">← Reports</button>
+        <strong>✅ Auto-Close Activity</strong>
+        <button id="hs-autoclose-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
+      <p class="muted" style="margin:0 0 10px;">Tickets the system closed automatically, because the activity they flagged was later logged in Villa Complex Rounds — not because anyone hit Close. Review these to confirm they're actually correct; anything wrong can be reopened from Daily Operations.</p>
+      <div id="hs-autoclose-list"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
+
+    const listEl = container.querySelector('#hs-autoclose-list');
+    let closed;
+    try {
+      closed = await loadAutoClosedOpsTasks();
+    } catch (e) {
+      listEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+    listEl.innerHTML = closed.length ? closed.map(x => `
+        <div class="mvoa-list-item">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(x.title)}</strong>
+            ${MVOA.statusBadgeHtml('Approved')}
+          </div>
+          <p class="muted" style="margin:4px 0;font-size:0.85rem;">${escapeHtml(x.resolutionNote)}</p>
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">Raised ${formatDate(x.createdDate)} · Auto-closed ${formatDate(x.closedDate)}</p>
+        </div>
+    `).join('') : '<p class="muted">No tickets have been auto-closed yet.</p>';
+    container.querySelector('#hs-autoclose-pdf').addEventListener('click', () => {
+      const pdfRows = closed.map(x => ({
+        Ticket: x.title, Reason: x.resolutionNote, Raised: formatDate(x.createdDate), AutoClosed: formatDate(x.closedDate)
+      }));
+      printTablePdf('Auto-Close Activity', ['Ticket', 'Reason', 'Raised', 'AutoClosed'], pdfRows);
     });
   }
 
