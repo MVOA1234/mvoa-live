@@ -405,7 +405,12 @@
           <button id="att-staff-add" class="btn-primary" style="margin-bottom:12px;" ${agenciesCache.length ? '' : 'disabled'}>+ Add Staff</button>
           ${agenciesCache.length ? '' : '<p class="muted" style="margin:0 0 12px;">Add an agency first (Agencies tab) before enrolling staff.</p>'}
         ` : ''}
-        <div style="overflow-x:auto;">
+        <div class="mvoa-row" style="gap:6px;margin-bottom:6px;">
+          <button id="att-staff-scroll-left" class="btn-secondary" style="padding:4px 10px;" title="Scroll table left">◀</button>
+          <button id="att-staff-scroll-right" class="btn-secondary" style="padding:4px 10px;" title="Scroll table right">▶</button>
+          <span class="muted" style="font-size:0.75rem;">Scroll to see all columns</span>
+        </div>
+        <div id="att-staff-table-wrap" style="overflow-x:auto;">
         <table class="mvoa-table">
           <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Code</th><th></th></tr></thead>
           <tbody>
@@ -432,6 +437,9 @@
         </div>
       </div>
     `;
+    const staffTableWrap = host.querySelector('#att-staff-table-wrap');
+    host.querySelector('#att-staff-scroll-left')?.addEventListener('click', () => staffTableWrap.scrollBy({ left: -160, behavior: 'smooth' }));
+    host.querySelector('#att-staff-scroll-right')?.addEventListener('click', () => staffTableWrap.scrollBy({ left: 160, behavior: 'smooth' }));
     host.querySelectorAll('.att-staff-qr').forEach(btn => btn.addEventListener('click', () => {
       const s = staffCache.find(x => x.StaffID === btn.dataset.id);
       if (s) showStaffIdCard(s);
