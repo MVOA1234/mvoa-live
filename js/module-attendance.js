@@ -981,7 +981,7 @@
               <div style="margin-top:8px;">
                 <strong style="font-size:0.8rem;color:var(--mvoa-blue);">${escapeHtml(agency)} (${openNowByAgency.get(agency).length})</strong>
                 <div class="muted" style="font-size:0.82rem;margin-top:2px;">
-                  ${openNowByAgency.get(agency).map(({ l, s }) => `${escapeHtml(s.Name)} — since ${escapeHtml(formatTime(l.CheckInTime))}${l.Date !== isoDateLocal(new Date()) ? ' on ' + escapeHtml(l.Date) : ''}`).join('<br>')}
+                  ${openNowByAgency.get(agency).map(({ l, s }) => `${escapeHtml(s.Name)}${s.Role ? ' (' + escapeHtml(s.Role) + ')' : ''} — since ${escapeHtml(formatTime(l.CheckInTime))}${l.Date !== isoDateLocal(new Date()) ? ' on ' + escapeHtml(l.Date) : ''}`).join('<br>')}
                 </div>
               </div>
             `).join('')}
