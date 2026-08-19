@@ -750,30 +750,56 @@
     modal.querySelector('#att-badge-print').addEventListener('click', () => printStaffIdCard(staff, logoUrl));
   }
 
+  // Bug found in testing: the printed page's window.onload doesn't fire
+  // until the Google Drive thumbnail <img> finishes loading — and Drive's
+  // thumbnail endpoint can be slow (or, for a just-uploaded photo, not
+  // ready yet), which stalled window.print() and made the whole
+  // Print/Save dialog feel hung. window.open() still happens synchronously
+  // right here (so popup blockers don't kick in — they require it tied
+  // directly to the click), but we write a "Preparing…" placeholder into
+  // it immediately and only fill in the real card — with or without the
+  // photo — once the photo has either loaded, failed, or hit a 3s cap,
+  // whichever comes first, instead of ever waiting on it indefinitely.
   function printStaffIdCard(staff, logoUrl) {
     const win = window.open('', '_blank');
-    win.document.write(`
-      <html>
-      <head>
-        <title>ID Card — ${escapeHtml(staff.Name)}</title>
-        <style>
-          html, body { height:auto; }
-          body { margin:0; padding:24px; display:flex; align-items:center; justify-content:center; min-height:100vh; font-family:-apple-system, Arial, sans-serif; background:#f2f2f2; box-sizing:border-box; }
-          @media print {
-            body { background:#fff; padding:0; min-height:0; height:auto; display:block; }
-            @page { size: landscape; margin: 10mm; }
-          }
-        </style>
-      </head>
-      <body>
-        ${idCardInnerHtml(staff, logoUrl)}
-        <script>
-          window.onload = () => { window.print(); };
-        </script>
-      </body>
-      </html>
-    `);
+    win.document.write('<html><body style="margin:0;padding:24px;font-family:-apple-system,Arial,sans-serif;color:#6b7280;">Preparing ID card…</body></html>');
     win.document.close();
+    const doPrint = (photoOk) => {
+      if (!win || win.closed) return; // user closed the tab before the photo settled
+      const staffForPrint = photoOk ? staff : Object.assign({}, staff, { PhotoURL: '' });
+      win.document.open();
+      win.document.write(`
+        <html>
+        <head>
+          <title>ID Card — ${escapeHtml(staff.Name)}</title>
+          <style>
+            html, body { height:auto; }
+            body { margin:0; padding:24px; display:flex; align-items:center; justify-content:center; min-height:100vh; font-family:-apple-system, Arial, sans-serif; background:#f2f2f2; box-sizing:border-box; }
+            @media print {
+              body { background:#fff; padding:0; min-height:0; height:auto; display:block; }
+              @page { size: landscape; margin: 10mm; }
+            }
+          </style>
+        </head>
+        <body>
+          ${idCardInnerHtml(staffForPrint, logoUrl)}
+          <script>
+            window.onload = () => { window.print(); };
+          </script>
+        </body>
+        </html>
+      `);
+      win.document.close();
+    };
+    const photoThumb = staff.PhotoURL ? drivePhotoThumbUrl(staff.PhotoURL, 200) : '';
+    if (!photoThumb) { doPrint(true); return; }
+    let settled = false;
+    const settle = (ok) => { if (settled) return; settled = true; doPrint(ok); };
+    const img = new Image();
+    img.onload = () => settle(true);
+    img.onerror = () => settle(false);
+    img.src = photoThumb;
+    setTimeout(() => settle(false), 3000);
   }
 
   // ─────────────────────────────────────────────
