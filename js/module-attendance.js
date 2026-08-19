@@ -114,6 +114,10 @@
   let attSettingsCache = {};   // Key -> Value map from AttSettings, e.g. {RetentionDays: '90'}
   let retentionCleanupRan = false; // throttle: run the passive photo-link cleanup at most
                                     // once per session, not on every mount()
+  let staffIdPrintSelection = new Set(); // StaffIDs checked in the Staff list for bulk ID
+                                          // card printing — kept at module scope so it
+                                          // survives a checkbox toggle re-render; left as-is
+                                          // after printing so the same batch can be reprinted
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -395,6 +399,12 @@
     const editable = canEditSection(SECTION_STAFF, user);
     const canHardDelete = editable && MVOA.isAdmin(user);
     const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
+    // Drop any selected StaffIDs that no longer exist in the active list
+    // (e.g. deactivated since last checked) so the print button's count
+    // and the bulk print itself never reference stale staff.
+    const rowIds = new Set(rows.map(s => s.StaffID));
+    [...staffIdPrintSelection].forEach(id => { if (!rowIds.has(id)) staffIdPrintSelection.delete(id); });
+    const selectedCount = staffIdPrintSelection.size;
     host.innerHTML = `
       <div class="card">
         <p class="muted" style="margin:0 0 10px;">
@@ -405,6 +415,7 @@
           <button id="att-staff-add" class="btn-primary" style="margin-bottom:12px;" ${agenciesCache.length ? '' : 'disabled'}>+ Add Staff</button>
           ${agenciesCache.length ? '' : '<p class="muted" style="margin:0 0 12px;">Add an agency first (Agencies tab) before enrolling staff.</p>'}
         ` : ''}
+        <button id="att-staff-print-selected" class="btn-secondary" style="margin-bottom:12px;display:block;" ${rows.length ? '' : 'disabled'}>🖨 Print Selected ID Cards${selectedCount ? ` (${selectedCount})` : ''}</button>
         <div class="mvoa-row" style="gap:6px;margin-bottom:6px;">
           <button id="att-staff-scroll-left" class="btn-secondary" style="padding:4px 10px;" title="Scroll table left">◀</button>
           <button id="att-staff-scroll-right" class="btn-secondary" style="padding:4px 10px;" title="Scroll table right">▶</button>
@@ -412,10 +423,11 @@
         </div>
         <div id="att-staff-table-wrap" style="overflow-x:auto;">
         <table class="mvoa-table">
-          <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Code</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="att-staff-select-all" ${rows.length && selectedCount === rows.length ? 'checked' : ''}></th><th>Name</th><th>Agency</th><th>Role</th><th>Code</th><th></th></tr></thead>
           <tbody>
             ${rows.length ? rows.map(s => `
               <tr>
+                <td><input type="checkbox" class="att-staff-select" data-id="${escapeHtml(s.StaffID)}" ${staffIdPrintSelection.has(s.StaffID) ? 'checked' : ''}></td>
                 <td>${escapeHtml(s.Name)}</td>
                 <td>${escapeHtml(agencyName(s.AgencyID))}</td>
                 <td>${escapeHtml(s.Role)}</td>
@@ -431,7 +443,7 @@
                   </div>
                 </td>
               </tr>
-            `).join('') : `<tr><td colspan="5" class="muted">No staff enrolled yet.</td></tr>`}
+            `).join('') : `<tr><td colspan="6" class="muted">No staff enrolled yet.</td></tr>`}
           </tbody>
         </table>
         </div>
@@ -444,6 +456,26 @@
       const s = staffCache.find(x => x.StaffID === btn.dataset.id);
       if (s) showStaffIdCard(s);
     }));
+    // Selection checkboxes just mutate the module-level Set and refresh
+    // this same screen (cheap — staffCache itself isn't re-fetched) so
+    // the "select all" checkbox and the print button's count stay in sync
+    // without a full data reload.
+    host.querySelector('#att-staff-select-all')?.addEventListener('change', (e) => {
+      if (e.target.checked) rows.forEach(s => staffIdPrintSelection.add(s.StaffID));
+      else rows.forEach(s => staffIdPrintSelection.delete(s.StaffID));
+      renderStaffList(host, user);
+    });
+    host.querySelectorAll('.att-staff-select').forEach(cb => cb.addEventListener('change', (e) => {
+      if (e.target.checked) staffIdPrintSelection.add(cb.dataset.id);
+      else staffIdPrintSelection.delete(cb.dataset.id);
+      renderStaffList(host, user);
+    }));
+    host.querySelector('#att-staff-print-selected')?.addEventListener('click', () => {
+      const selected = rows.filter(s => staffIdPrintSelection.has(s.StaffID));
+      if (!selected.length) { alert('Select at least one staff member first (checkbox on the left of each row).'); return; }
+      const logoUrl = new URL('assets/logo.png', window.location.href).href;
+      printStaffIdCardsBulk(selected, logoUrl);
+    });
     if (editable) {
       const addBtn = host.querySelector('#att-staff-add');
       if (addBtn) addBtn.addEventListener('click', () => renderStaffForm(host, null, user));
@@ -800,6 +832,80 @@
     img.onerror = () => settle(false);
     img.src = photoThumb;
     setTimeout(() => settle(false), 3000);
+  }
+
+  // ─── Bulk ID card printing (Staff list → checkboxes → "Print Selected
+  // ID Cards") — lays every selected staff member's card out on A4 at a
+  // fixed 85mm x 60mm each, 2 per row with spacing, wrapping onto
+  // further pages automatically. Each card is built from the SAME
+  // idCardInnerHtml() used everywhere else (so a bulk-printed card always
+  // matches the single-card one exactly) at its normal 440px design
+  // width, then shrunk to fit the 85mm cell with `zoom` — chosen over
+  // `transform:scale()` because zoom actually reflows the box down to
+  // its scaled size, so the 2-per-row grid lays out cleanly instead of
+  // the unscaled 440px-wide boxes overlapping/wrapping oddly.
+  // MM_TO_PX assumes the standard CSS 96dpi reference (1in = 25.4mm =
+  // 96px) — the browser's own print scaling should stay at 100% for the
+  // physical 85mm to come out accurate; a "Fit to page" print setting
+  // will shrink everything including this ratio.
+  const ID_CARD_DESIGN_WIDTH_PX = 440;
+  const ID_CARD_PRINT_WIDTH_MM = 85;
+  const ID_CARD_PRINT_HEIGHT_MM = 60;
+  function printStaffIdCardsBulk(staffList, logoUrl) {
+    const win = window.open('', '_blank');
+    win.document.write('<html><body style="margin:0;padding:24px;font-family:-apple-system,Arial,sans-serif;color:#6b7280;">Preparing ID cards…</body></html>');
+    win.document.close();
+
+    const preload = (staff) => new Promise(resolve => {
+      const photoThumb = staff.PhotoURL ? drivePhotoThumbUrl(staff.PhotoURL, 200) : '';
+      if (!photoThumb) { resolve({ staff, photoOk: true }); return; }
+      let settled = false;
+      const settle = (ok) => { if (settled) return; settled = true; resolve({ staff, photoOk: ok }); };
+      const img = new Image();
+      img.onload = () => settle(true);
+      img.onerror = () => settle(false);
+      img.src = photoThumb;
+      setTimeout(() => settle(false), 3000);
+    });
+
+    Promise.all(staffList.map(preload)).then(results => {
+      if (!win || win.closed) return;
+      const zoomFactor = (ID_CARD_PRINT_WIDTH_MM * 96 / 25.4 / ID_CARD_DESIGN_WIDTH_PX).toFixed(4);
+      const cardsHtml = results.map(({ staff, photoOk }) => {
+        const staffForPrint = photoOk ? staff : Object.assign({}, staff, { PhotoURL: '' });
+        return `
+          <div class="id-card-cell">
+            <div style="width:${ID_CARD_DESIGN_WIDTH_PX}px;zoom:${zoomFactor};">
+              ${idCardInnerHtml(staffForPrint, logoUrl)}
+            </div>
+          </div>`;
+      }).join('');
+      win.document.open();
+      win.document.write(`
+        <html>
+        <head>
+          <title>ID Cards (${staffList.length})</title>
+          <style>
+            html, body { margin:0; padding:0; }
+            body { padding:10mm; font-family:-apple-system, Arial, sans-serif; background:#f2f2f2; box-sizing:border-box; }
+            .id-card-grid { display:grid; grid-template-columns: repeat(2, ${ID_CARD_PRINT_WIDTH_MM}mm); gap:10mm; justify-content:center; }
+            .id-card-cell { width:${ID_CARD_PRINT_WIDTH_MM}mm; height:${ID_CARD_PRINT_HEIGHT_MM}mm; display:flex; align-items:center; justify-content:center; overflow:hidden; page-break-inside:avoid; break-inside:avoid; }
+            @media print {
+              body { background:#fff; }
+              @page { size: A4 portrait; margin: 10mm; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="id-card-grid">${cardsHtml}</div>
+          <script>
+            window.onload = () => { window.print(); };
+          </script>
+        </body>
+        </html>
+      `);
+      win.document.close();
+    });
   }
 
   // ─────────────────────────────────────────────
