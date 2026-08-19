@@ -829,15 +829,30 @@
       .map(l => ({ l, s: staffById(l.StaffID) }))
       .filter(r => r.s)
       .sort((a, b) => a.l.CheckInTime.localeCompare(b.l.CheckInTime));
+    // Grouped by agency (alphabetical), each group's people sorted by
+    // check-in time — same grouping order used everywhere else agencies
+    // are listed (agencyName(...).localeCompare(...)).
+    const openNowByAgency = new Map();
+    openNow.forEach(r => {
+      const agency = agencyName(r.s.AgencyID);
+      if (!openNowByAgency.has(agency)) openNowByAgency.set(agency, []);
+      openNowByAgency.get(agency).push(r);
+    });
+    const openNowAgencies = [...openNowByAgency.keys()].sort((a, b) => a.localeCompare(b));
 
     host.innerHTML = `
       <div class="card">
         ${openNow.length ? `
           <div style="margin-bottom:14px;padding:10px 12px;background:#e3f1eb;border-radius:8px;">
             <strong style="font-size:0.85rem;">🟢 Currently checked in (${openNow.length})</strong>
-            <div class="muted" style="font-size:0.82rem;margin-top:4px;">
-              ${openNow.map(({ l, s }) => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))}) — since ${escapeHtml(formatTime(l.CheckInTime))}${l.Date !== isoDateLocal(new Date()) ? ' on ' + escapeHtml(l.Date) : ''}`).join('<br>')}
-            </div>
+            ${openNowAgencies.map(agency => `
+              <div style="margin-top:8px;">
+                <strong style="font-size:0.8rem;color:var(--mvoa-blue);">${escapeHtml(agency)} (${openNowByAgency.get(agency).length})</strong>
+                <div class="muted" style="font-size:0.82rem;margin-top:2px;">
+                  ${openNowByAgency.get(agency).map(({ l, s }) => `${escapeHtml(s.Name)} — since ${escapeHtml(formatTime(l.CheckInTime))}${l.Date !== isoDateLocal(new Date()) ? ' on ' + escapeHtml(l.Date) : ''}`).join('<br>')}
+                </div>
+              </div>
+            `).join('')}
           </div>
         ` : ''}
         <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:flex-end;">
