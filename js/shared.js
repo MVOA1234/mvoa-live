@@ -69,6 +69,29 @@ const MVOA = (function () {
   };
 
   // ───────────────────────────────────────────────────────────
+  // BOUNDED-READ ROW LIMITS — central place to define (or change) how many
+  // of the most recent rows sheetsRead() fetches for a tab, instead of the
+  // whole sheet, when a caller opts in with sheetsRead(tab, { recent: true }).
+  //
+  // This keeps the read fast (and the client-side processing after it) as
+  // a log-style sheet grows into the tens of thousands of rows over time —
+  // see TABS.attLog below as the first sheet this was added for.
+  //
+  // Add or edit entries here any time. A sheet with no entry (or a limit
+  // of 0) always falls back to a full, unbounded read — the same as before
+  // this existed — even if a caller passes { recent: true }.
+  //
+  // IMPORTANT: only pass { recent: true } at a call site that genuinely
+  // only needs the newest rows (a live "what's happening right now" view).
+  // Anything that lets someone look at an older date or a past month
+  // (Monthly Report, historical approvals, etc.) must keep calling
+  // sheetsRead(tab) with no options — bounding it would silently make
+  // older rows invisible once the sheet grows past the limit below.
+  const SHEET_RECENT_ROW_LIMITS = {
+    [TABS.attLog]: 3000
+  };
+
+  // ───────────────────────────────────────────────────────────
   // GOOGLE SHEETS API (read via API key, write via service-account JWT)
   // ───────────────────────────────────────────────────────────
   const NETWORK_TIMEOUT_MS = 15000;
@@ -93,20 +116,78 @@ const MVOA = (function () {
     }
   }
 
-  async function sheetsRead(sheetName) {
+  // opts.recent: true — opt into the bounded read described above, using
+  // whatever limit SHEET_RECENT_ROW_LIMITS has for this sheet (no entry, or
+  // omitting opts entirely, reads the whole sheet exactly as before).
+  async function sheetsRead(sheetName, opts) {
     // Uses the service-account token, not the plain API key — a bare API key
     // can only read spreadsheets that are public ("anyone with the link"),
     // and this Sheet is intentionally kept Restricted. The service account
     // already has Editor access, so reuse that for reads too.
     const token = await getServiceAccountToken();
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}`;
+    const authHeaders = { 'Authorization': 'Bearer ' + token };
+    const fullReadUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}`;
+
+    async function readFull() {
+      const r = await fetchWithTimeout(fullReadUrl, { headers: authHeaders });
+      if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        throw new Error(`Sheets read error (${sheetName}): ${r.status} ${body}`);
+      }
+      const d = await r.json();
+      return d.values || [];
+    }
+
+    const limit = (opts && opts.recent) ? (SHEET_RECENT_ROW_LIMITS[sheetName] || 0) : 0;
+    if (!limit) return readFull();
+
+    // Bounded read: first find out how many rows of data exist — a single
+    // column is a cheap way to count without pulling every column yet.
+    const colAUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName + '!A:A')}`;
+    const colAResp = await fetchWithTimeout(colAUrl, { headers: authHeaders });
+    if (!colAResp.ok) {
+      const body = await colAResp.text().catch(() => '');
+      throw new Error(`Sheets read error (${sheetName}): ${colAResp.status} ${body}`);
+    }
+    const totalRows = ((await colAResp.json()).values || []).length; // includes the header row
+
+    // Not big enough yet for bounding to be worth it — one plain read.
+    if (totalRows <= limit + 1) return readFull();
+
+    // Fetch the header row and the most recent `limit` data rows together
+    // in a single batchGet, so this stays two requests total either way.
+    const startRow = totalRows - limit + 1;
+    const ranges = [`${sheetName}!1:1`, `${sheetName}!A${startRow}:ZZ${totalRows}`]
+      .map(rg => `ranges=${encodeURIComponent(rg)}`).join('&');
+    const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values:batchGet?${ranges}`;
+    const batchResp = await fetchWithTimeout(batchUrl, { headers: authHeaders });
+    if (!batchResp.ok) {
+      const body = await batchResp.text().catch(() => '');
+      throw new Error(`Sheets read error (${sheetName}): ${batchResp.status} ${body}`);
+    }
+    const batchData = await batchResp.json();
+    const [headerRange, dataRange] = batchData.valueRanges || [];
+    const headerRow = (headerRange && headerRange.values && headerRange.values[0]) || [];
+    const dataRows = (dataRange && dataRange.values) || [];
+    return [headerRow, ...dataRows];
+  }
+
+  // Cheap row count for a sheet — reads only column A instead of the whole
+  // tab, so it stays fast even on a sheet with many columns. Returns the
+  // number of DATA rows (header row not counted). Used by the "Sheet
+  // Sizes" diagnostics view so growth can be monitored without pulling
+  // every column of every log sheet.
+  async function sheetsRowCount(sheetName) {
+    const token = await getServiceAccountToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName + '!A:A')}`;
     const r = await fetchWithTimeout(url, { headers: { 'Authorization': 'Bearer ' + token } });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
       throw new Error(`Sheets read error (${sheetName}): ${r.status} ${body}`);
     }
     const d = await r.json();
-    return d.values || [];
+    const rows = d.values || [];
+    return Math.max(0, rows.length - 1); // exclude the header row
   }
 
   async function sheetsWrite(sheetName, data) {
@@ -1186,7 +1267,7 @@ const MVOA = (function () {
   return {
     CFG, TABS,
     loadConfig, saveConfig,
-    sheetsRead, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow, sheetsEnsureTab, sheetsDeleteRows,
+    sheetsRead, sheetsRowCount, SHEET_RECENT_ROW_LIMITS, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow, sheetsEnsureTab, sheetsDeleteRows,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
     isAdmin, resetUserPin, setUserActive, renameUser,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
