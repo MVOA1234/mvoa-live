@@ -1001,7 +1001,7 @@
         </div>
         <div style="max-height:60vh;overflow:auto;">
           <table class="mvoa-table">
-            <thead><tr><th>Name</th><th>Agency</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
+            <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
             <tbody>
               ${tableRows.length ? tableRows.map(({ s, l, carriedOver }) => {
                 const status = !l ? 'Not scanned' : (l.Status === 'CheckedOut' ? 'Checked out' : 'On-site');
@@ -1016,12 +1016,13 @@
                   <tr>
                     <td>${escapeHtml(s.Name)}</td>
                     <td>${escapeHtml(agencyName(s.AgencyID))}</td>
+                    <td>${escapeHtml(s.Role || '—')}</td>
                     <td>${l && l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) + (l.CheckInPhotoURL ? ` <a href="${l.CheckInPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') + carriedNote : '—'}</td>
                     <td>${l && l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) + (l.CheckOutPhotoURL ? ` <a href="${l.CheckOutPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') : '—'}</td>
                     <td style="color:${statusColor};font-weight:600;">${status}</td>
                   </tr>
                 `;
-              }).join('') : `<tr><td colspan="5" class="muted">No active staff enrolled yet.</td></tr>`}
+              }).join('') : `<tr><td colspan="6" class="muted">No active staff enrolled yet.</td></tr>`}
             </tbody>
           </table>
         </div>
