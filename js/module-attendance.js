@@ -93,10 +93,15 @@
   // so it's added to the tab list separately in mount()/renderShell()
   // rather than living in NAV_TABS below.
   const SECTION_CODES = 'Codes';
+  // Order here drives both the tab bar's left-to-right order AND which
+  // tab opens by default — mount() opens whichever tab is first in this
+  // list that the current user can see (see visibleTabsFor/mount below).
+  // Codes is NOT listed here — it's admin-only and always appended after
+  // these in visibleTabsFor(), so it stays last regardless of this order.
   const NAV_TABS = [
+    { key: SECTION_LOGS, label: 'Attendance Log' },
     { key: SECTION_AGENCIES, label: 'Agencies' },
     { key: SECTION_STAFF, label: 'Staff' },
-    { key: SECTION_LOGS, label: 'Attendance Log' },
     { key: SECTION_SETTINGS, label: 'Settings' }
   ];
 
