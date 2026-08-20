@@ -2428,7 +2428,18 @@ const HSModule = (function () {
     // just a bare Pass/Fail.
     function numericDisplayValue(item, resultObj) {
       const match = (resultObj.Remarks || '').match(/[-\d.]+/);
-      return match ? match[0] + (item.Unit || '') : (resultObj.Result || '');
+      if (!match) return resultObj.Result || '';
+      // Diesel/Fuel tank-level % readings always display to 2 decimal
+      // places — this is still exactly the number the technician typed
+      // (parseFloat, not a rounded or re-derived figure), just formatted
+      // consistently, so small shift-to-shift differences (e.g. 84 vs
+      // 84.37) are visible instead of getting collapsed to whole percent.
+      const isDieselLevelPct = item.Unit === '%' && /^fuel level$|diesel level before top up/i.test(item.CheckItem || '');
+      if (isDieselLevelPct) {
+        const n = parseFloat(match[0]);
+        if (!isNaN(n)) return n.toFixed(2) + (item.Unit || '');
+      }
+      return match[0] + (item.Unit || '');
     }
     function cellHtml(item, resultObj) {
       if (!resultObj) return '<span class="muted">—</span>';
