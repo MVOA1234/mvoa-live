@@ -4016,7 +4016,17 @@ const HSModule = (function () {
       // but still needs a second look. Always routed to Maintenance
       // regardless of the section's normal FailTaskCategory, since this
       // is "please recheck this reading," not a functional failure.
-      const outlierItems = items.filter(i => pendingResults[i.ItemID]?.outlierFlag && pendingResults[i.ItemID]?.outlierConfirmed);
+      // "Diesel Level Before Top Up" is EXCLUDED from this auto-flag
+      // (Aug 2026, per user request) — the app now logs the actual
+      // top-up quantity directly, in litres, through the standalone
+      // "Log Diesel Top-Up" screen, so an outlier/confirmed reading on
+      // this item is just the routine shift-start tank-level entry, not
+      // something that needs a Facility Manager to go re-check a gauge.
+      // It still counts toward the Diesel Consumed math exactly as
+      // before (see loadDgOperationsData) — only the recheck-task
+      // auto-flag is turned off for it.
+      const outlierItems = items.filter(i => pendingResults[i.ItemID]?.outlierFlag && pendingResults[i.ItemID]?.outlierConfirmed
+        && !/diesel level before top up/i.test(i.CheckItem));
       for (const item of outlierItems) {
         try {
           await MVOA.createOpsTask({
