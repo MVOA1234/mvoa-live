@@ -524,6 +524,7 @@ const HSModule = (function () {
     const duty = rowsToObjs(rows, SHIFT_DUTY_COLS); // rowNumber tracked for in-place updates
 
     const today = new Date(); today.setHours(0, 0, 0, 0);
+    const now = new Date(); // actual current time — used below to also lock a shift once ITS window has passed today, not just once the whole day has passed
     const monday = mondayOfWeek(today);
     const days = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday); d.setDate(d.getDate() + i); return d; });
     const shifts = ['1st', '2nd', '3rd'];
@@ -533,12 +534,29 @@ const HSModule = (function () {
       return duty.find(r => r.Date === dateStr && r.Shift === shift) || null;
     }
 
+    // Same shift clock windows as isWithinShiftWindow elsewhere in this
+    // file (1st 7am-2pm, 2nd 2pm-9pm, 3rd 9pm-7am). Only 1st and 2nd
+    // need a same-day check here — both start and end within one
+    // calendar day, so a day-level lock alone misses "it's 6pm, 1st
+    // shift ended hours ago, but 2nd/3rd haven't happened yet." 3rd
+    // shift's window for a given date runs into the NEXT calendar day,
+    // so by the time it's actually over, that date has already rolled
+    // into the past and gets caught by the day-level lock below instead
+    // — it deliberately never locks purely from today's clock time.
+    function shiftEndedToday(shift) {
+      const h = now.getHours() + now.getMinutes() / 60;
+      if (shift === '1st') return h >= 14;
+      if (shift === '2nd') return h >= 21;
+      return false; // 3rd
+    }
+
     const cellsHtml = shifts.map(shift => `
       <tr>
         <td style="font-weight:600;">${shift}</td>
         ${days.map((d, i) => {
           const dateStr = isoDate(d);
-          const editable = d.getTime() >= today.getTime();
+          const isToday = d.getTime() === today.getTime();
+          const editable = d.getTime() >= today.getTime() && !(isToday && shiftEndedToday(shift));
           const entry = entryFor(dateStr, shift);
           const currentName = entry ? entry.Name : '';
           if (!editable) {
@@ -552,7 +570,7 @@ const HSModule = (function () {
     `).join('');
 
     bodyEl.innerHTML = `
-      <p class="muted" style="margin:0 0 10px;">Past days this week are locked. Today and the rest of the week can be adjusted (e.g. for leave/readjustment).</p>
+      <p class="muted" style="margin:0 0 10px;">Past days this week are locked, and today's 1st/2nd shift also locks once that shift's window has ended. The rest of the week can still be adjusted (e.g. for leave/readjustment).</p>
       <div class="card" style="max-width:100%;margin:0;max-height:72vh;overflow:auto;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table">
           <thead><tr><th>Shift</th>${days.map((d, i) => `<th>${dayLabels[i]}<br><span class="muted" style="font-weight:400;">${d.toLocaleDateString()}</span></th>`).join('')}</tr></thead>
