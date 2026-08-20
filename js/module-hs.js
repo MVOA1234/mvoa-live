@@ -149,6 +149,7 @@ const HSModule = (function () {
       return;
     }
     currentScan = null;
+    pruneOldDrafts(); // best-effort cleanup of yesterday-and-older in-progress-round drafts (see the IN-PROGRESS ROUND DRAFT block below)
     renderHome(container);
   }
 
@@ -3226,6 +3227,80 @@ const HSModule = (function () {
       shiftDayBucket(l.Timestamp, shift) === todayBucket
     ) || null;
   }
+
+  // ───────────────────────────────────────────────────────────
+  // IN-PROGRESS ROUND DRAFT — saved to localStorage so a checklist round
+  // survives the page getting reloaded mid-round. This exists for a real
+  // field issue reported for Security's Daily Rounds (Photo/
+  // PhotoLocation items): if the ASO gets a phone call while on a round,
+  // backgrounding the browser for the length of a call is much more
+  // likely to lead the phone's OS to reclaim the tab and reload it from
+  // scratch than the brief hand-off to the camera app is — and that
+  // reload wipes every in-memory JS variable, including every photo
+  // taken so far that round. Combined with hs-photo-capture below now
+  // uploading each photo to Drive the moment it's taken (instead of
+  // waiting for final submission), a reload like that now costs at most
+  // the one item that was mid-capture when the interruption hit, not the
+  // whole round.
+  //
+  // Scoped by template + shift/round + today's day-bucket (same
+  // shiftDayBucket used by hasSubmittedToday above, so a 3rd-shift round
+  // that straddles midnight keys consistently) — so a draft can never
+  // bleed into a different day's or a different round's entries. Applies
+  // to every shift/round-based checklist that goes through
+  // renderChecklistForm/submitChecklist, not just Security's rounds —
+  // same shared code path, same benefit.
+  function draftKey(templateId, shift) {
+    return `mvoa_hs_draft_${templateId}_${shift || 'none'}_${shiftDayBucket(new Date(), shift)}`;
+  }
+  function saveDraft() {
+    if (!currentTemplate || !currentTemplate.TemplateID) return;
+    try {
+      // photoFile (a raw File/Blob) can never survive JSON serialization
+      // or a reload anyway — every Photo/PhotoLocation item is uploaded
+      // the moment it's captured specifically so photoFile is never the
+      // only copy of it (see hs-photo-capture), so it's safe — and
+      // correct — to just drop it here rather than save a stale file ref.
+      const results = {};
+      Object.keys(pendingResults).forEach(itemId => {
+        const { photoFile, ...rest } = pendingResults[itemId];
+        results[itemId] = rest;
+      });
+      localStorage.setItem(draftKey(currentTemplate.TemplateID, currentShift), JSON.stringify({
+        performedBy: pendingPerformedBy, results
+      }));
+    } catch (e) { /* best-effort — a full/unavailable localStorage should never block the round itself */ }
+  }
+  let saveDraftTimer = null;
+  function saveDraftDebounced() {
+    clearTimeout(saveDraftTimer);
+    saveDraftTimer = setTimeout(saveDraft, 400);
+  }
+  function loadDraft(templateId, shift) {
+    try {
+      const raw = localStorage.getItem(draftKey(templateId, shift));
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function clearDraft(templateId, shift) {
+    try { localStorage.removeItem(draftKey(templateId, shift)); } catch (e) { /* ignore */ }
+  }
+  // Best-effort housekeeping so a device used for rounds every day
+  // doesn't quietly accumulate an ever-growing pile of abandoned/old
+  // draft entries in localStorage. Safe to run any time — only ever
+  // touches this module's own draft keys, and only removes keys whose
+  // date suffix isn't today's.
+  function pruneOldDrafts() {
+    try {
+      const todaySuffix = '_' + new Date().toDateString();
+      const toRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.indexOf('mvoa_hs_draft_') === 0 && k.indexOf(todaySuffix) === -1) toRemove.push(k);
+      }
+      toRemove.forEach(k => localStorage.removeItem(k));
+    } catch (e) { /* ignore */ }
+  }
   // Shift time windows: 1st 7am-2pm, 2nd 2pm-9pm, 3rd 9pm-7am (wraps
   // past midnight). Entries are only allowed within the matching
   // shift's actual clock window — e.g. 3rd shift can't be logged
@@ -3430,6 +3505,25 @@ const HSModule = (function () {
       return;
     }
 
+    // RESTORE IN-PROGRESS DRAFT — if this exact round/shift was already
+    // partway filled in before the page got reloaded (see the IN-
+    // PROGRESS ROUND DRAFT block above hasSubmittedToday), pick it back
+    // up here instead of starting blank. Only fires when pendingResults
+    // is genuinely empty, which only happens right when a fresh round
+    // starts (template-card click resets it) — normal navigation within
+    // an already-in-progress round (tapping Pass/Fail, capturing a
+    // photo, etc.) never re-runs this function's top-level body in a way
+    // that could clobber answers currently being edited.
+    let restoredDraft = false;
+    if (Object.keys(pendingResults).length === 0) {
+      const draft = loadDraft(currentTemplate.TemplateID, currentShift);
+      if (draft && draft.results && Object.keys(draft.results).length) {
+        pendingResults = draft.results;
+        if (draft.performedBy) pendingPerformedBy = draft.performedBy;
+        restoredDraft = true;
+      }
+    }
+
     const items = itemsCache
       .filter(i => i.TemplateID === currentTemplate.TemplateID)
       .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
@@ -3465,6 +3559,7 @@ const HSModule = (function () {
         <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : isRoundBased ? ' — ' + shiftLabel(currentShift) : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
       ${showZone ? `<div class="card" style="max-width:600px;margin:0 0 12px 0;background:#eef6fb;"><p style="margin:0;font-weight:700;color:var(--mvoa-blue);">📍 Today's Zone: ${escapeHtml(landscapeZoneForToday())}</p></div>` : ''}
+      ${restoredDraft ? `<div class="card" style="max-width:600px;margin:0 0 12px 0;background:#fff8e1;"><p style="margin:0;font-weight:700;color:#8a6d00;">↺ Restored your progress from before the app closed — anything already filled in or photographed is still here.</p></div>` : ''}
       <div class="card" style="max-width:600px;margin:0 0 12px 0;">
         <label>Performed By
           <input type="text" id="hs-performed-by" value="${escapeHtml(pendingPerformedBy)}">
@@ -3480,7 +3575,7 @@ const HSModule = (function () {
         <p class="error-text" id="hs-form-error"></p>
       </div>
     `;
-    container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; });
+    container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; saveDraftDebounced(); });
     container.querySelector('#hs-back-scan').addEventListener('click', () => { currentShift = ''; renderScanResult(container); });
 
     const listEl = container.querySelector('#hs-items-list');
@@ -3579,15 +3674,22 @@ const HSModule = (function () {
       // "Time:" in Remarks below), since Main Gate, Location 2, and
       // Location 3 are a walk apart and get photographed several
       // minutes apart in practice, not simultaneously at submission.
-      const hasPhoto = !!current.photoName;
+      // hasPhoto keys off photoUrl (the uploaded-to-Drive result), not
+      // just photoName — a photo that's mid-upload or failed to upload
+      // has a photoName but no photoUrl yet, and must NOT show as "✓
+      // done" until it's actually, safely stored. See hs-photo-capture
+      // above, which now uploads the moment the photo is taken.
+      const hasPhoto = !!current.photoUrl;
+      const uploading = !!current.photoUploading;
       inputHtml = `
         ${item.InputType === 'PhotoLocation' ? `
           <input type="text" class="hs-photoloc-input" data-item-id="${item.ItemID}" value="${escapeHtml(current.locationText || '')}" placeholder="Which location did you enter?" style="width:100%;margin-top:6px;box-sizing:border-box;">
         ` : ''}
         <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
-          <button class="btn-secondary hs-photo-capture" data-item-id="${item.ItemID}" style="margin:0;">📷 ${hasPhoto ? 'Retake Photo' : 'Take Photo'}</button>
-          ${hasPhoto ? `<span class="muted" style="font-size:0.8rem;">✓ ${escapeHtml(current.photoName)}</span>` : ''}
+          <button class="btn-secondary hs-photo-capture" data-item-id="${item.ItemID}" ${uploading ? 'disabled' : ''} style="margin:0;">📷 ${uploading ? 'Uploading…' : hasPhoto ? 'Retake Photo' : 'Take Photo'}</button>
+          ${hasPhoto && !uploading ? `<span class="muted" style="font-size:0.8rem;">✓ ${escapeHtml(current.photoName)} uploaded</span>` : ''}
         </div>
+        ${current.photoError ? `<p class="error-text" style="margin:4px 0 0;font-size:0.8rem;">⚠️ ${escapeHtml(current.photoError)}</p>` : ''}
       `;
     } else { // Text
       inputHtml = `<textarea class="hs-text-input" data-item-id="${item.ItemID}" rows="2" style="width:100%;margin-top:6px;box-sizing:border-box;">${escapeHtml(current.result || '')}</textarea>`;
@@ -3626,6 +3728,7 @@ const HSModule = (function () {
         pendingResults[itemId].entries.push(addBtn.dataset.prefix || '');
         const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
         if (row && item) row.outerHTML = renderItemRow(item);
+        saveDraft();
         return;
       }
       const removeBtn = e.target.closest('.hs-assetlist-remove');
@@ -3636,6 +3739,7 @@ const HSModule = (function () {
         if (pendingResults[itemId] && pendingResults[itemId].entries) pendingResults[itemId].entries.splice(idx, 1);
         const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
         if (row && item) row.outerHTML = renderItemRow(item);
+        saveDraft();
         return;
       }
       const scanBtn = e.target.closest('.hs-assetlist-scan');
@@ -3648,6 +3752,7 @@ const HSModule = (function () {
           pendingResults[itemId].entries[idx] = assetId;
           const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
           if (row && item) row.outerHTML = renderItemRow(item);
+          saveDraft();
         });
         return;
       }
@@ -3657,7 +3762,7 @@ const HSModule = (function () {
         const item = items.find(i => i.ItemID === itemId);
         // Forces the actual camera (not gallery/file picker) — proof of
         // presence at the moment of the round is the whole point.
-        MVOA.pickAttachment({ photoOnly: true, useCamera: true }).then(a => {
+        MVOA.pickAttachment({ photoOnly: true, useCamera: true }).then(async a => {
           if (!a) return; // cancelled
           // Stamp the moment THIS photo was actually taken — Main Gate,
           // Location 2, and Location 3 are a walk apart, so by the time
@@ -3669,8 +3774,32 @@ const HSModule = (function () {
           const capturedAt = (a.file && typeof a.file.lastModified === 'number' && a.file.lastModified > 0)
             ? new Date(a.file.lastModified).toISOString()
             : new Date().toISOString();
-          pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoFile: a.file, photoName: a.name, capturedAt });
-          const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+          // Uploaded to Drive right here, the moment it's taken — NOT
+          // deferred to final submission like before. This is the actual
+          // fix for the reported field issue: if the ASO gets a phone
+          // call mid-round, the browser can get reclaimed and reloaded
+          // by the phone's OS while backgrounded for the call, wiping
+          // every in-memory variable (including any photo still only
+          // held as an unsent file). Uploading immediately means any
+          // photo already taken before that happens is safely stored in
+          // Drive regardless of what happens to the page afterward —
+          // only the one photo genuinely mid-capture when the
+          // interruption hits would ever need retaking.
+          pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoUploading: true, photoName: a.name, photoError: '' });
+          let row = listEl.querySelector(`[data-item-row="${itemId}"]`);
+          if (row && item) row.outerHTML = renderItemRow(item);
+          try {
+            const filenameBase = `${currentTemplate.TemplateID}_${currentShift || 'na'}_${itemId}_${Date.now()}_${a.name}`;
+            const photoUrl = await MVOA.uploadPhotoToDrive(a.file, filenameBase);
+            pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoUrl, photoName: a.name, capturedAt, photoUploading: false, photoError: '' });
+            saveDraft();
+          } catch (err) {
+            // Surface the failure immediately, while the ASO is still
+            // standing at that location — better than silently losing it
+            // and only finding out at final submission, far from the spot.
+            pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { photoUploading: false, photoError: (err && err.message) || 'Upload failed — check your connection and try again.' });
+          }
+          row = listEl.querySelector(`[data-item-row="${itemId}"]`);
           if (row && item) row.outerHTML = renderItemRow(item);
         });
         return;
@@ -3683,6 +3812,7 @@ const HSModule = (function () {
       const row = listEl.querySelector(`[data-item-row="${itemId}"]`);
       const item = items.find(i => i.ItemID === itemId);
       if (row && item) row.outerHTML = renderItemRow(item);
+      saveDraft();
     });
 
     listEl.addEventListener('input', (e) => {
@@ -3691,16 +3821,20 @@ const HSModule = (function () {
       if (e.target.classList.contains('hs-assetlist-input')) {
         const idx = parseInt(e.target.dataset.idx, 10);
         if (pendingResults[itemId] && pendingResults[itemId].entries) pendingResults[itemId].entries[idx] = e.target.value;
+        saveDraftDebounced();
         return; // no re-render — would steal focus mid-typing, same reasoning as Numeric
       }
       if (e.target.classList.contains('hs-photoloc-input')) {
         pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { locationText: e.target.value });
+        saveDraftDebounced();
         return; // no re-render — would steal focus mid-typing
       }
       if (e.target.classList.contains('hs-remarks-input')) {
         pendingResults[itemId] = Object.assign({}, pendingResults[itemId], { remarks: e.target.value });
+        saveDraftDebounced();
       } else if (e.target.classList.contains('hs-text-input')) {
         pendingResults[itemId] = { result: e.target.value };
+        saveDraftDebounced();
       } else if (e.target.classList.contains('hs-numeric-input')) {
         const item = items.find(i => i.ItemID === itemId);
         const statusEl = listEl.querySelector(`.hs-numeric-status[data-item-id="${itemId}"]`);
@@ -3752,6 +3886,7 @@ const HSModule = (function () {
                 statusEl.innerHTML = `⚠️ This is LOWER than the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — a running-hours meter can't go backwards. Please double-check this value.`;
                 statusEl.style.color = '#b3261e';
               }
+              saveDraftDebounced();
               return;
             }
           }
@@ -3771,6 +3906,7 @@ const HSModule = (function () {
                 statusEl.innerHTML = `⚠️ This is the SAME as the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — please recheck the gauge rather than re-entering the same number from memory.`;
                 statusEl.style.color = '#b3261e';
               }
+              saveDraftDebounced();
               return;
             }
             // Deliberately does NOT run this reading through the generic
@@ -3789,6 +3925,7 @@ const HSModule = (function () {
             pendingResults[itemId] = { result: String(val), remarks, numericValue: val };
             if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
             if (statusEl) { statusEl.textContent = remarks; statusEl.style.color = 'inherit'; }
+            saveDraftDebounced();
             return;
           }
           const remarks = `Recorded: ${val}${unit}`;
@@ -3797,6 +3934,7 @@ const HSModule = (function () {
             statusEl.textContent = isOutlier ? `⚠️ ${remarks} — this looks far outside the usual range. Please recheck the value.` : remarks;
             statusEl.style.color = isOutlier ? '#b3261e' : 'inherit';
           }
+          saveDraftDebounced();
           return;
         }
         const threshold = parseFloat(item.FailThreshold);
@@ -3813,6 +3951,7 @@ const HSModule = (function () {
             statusEl.style.color = isFail ? '#b3261e' : 'green';
           }
         }
+        saveDraftDebounced();
       }
     });
 
@@ -3823,6 +3962,7 @@ const HSModule = (function () {
         const itemId = e.target.dataset.itemId;
         if (pendingResults[itemId]) pendingResults[itemId].outlierConfirmed = e.target.checked;
       }
+      saveDraft();
     });
   }
 
@@ -3834,6 +3974,14 @@ const HSModule = (function () {
   async function submitChecklist(container, items) {
     if (isSubmittingChecklist) return;
     const errEl = container.querySelector('#hs-form-error');
+    // Guard against racing an in-flight photo upload (started by
+    // hs-photo-capture above, which now uploads immediately on capture)
+    // — wait for it rather than either submitting without that photo or
+    // uploading it twice.
+    if (items.some(i => pendingResults[i.ItemID]?.photoUploading)) {
+      errEl.textContent = 'A photo is still uploading — please wait a moment and try again.';
+      return;
+    }
     const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
     const isRoundBased = currentTemplate.RoundBased === 'TRUE' || currentTemplate.RoundBased === 'true';
     // Authoritative re-check right before writing — the shift-selection
@@ -3917,16 +4065,19 @@ const HSModule = (function () {
       // Photo / PhotoLocation — Security's Daily Rounds. Never blocks
       // submission (a round can genuinely happen without every location
       // reached), but per Note 3 a missing photo IS a Fail, same as any
-      // other failed check — uploads happen here, right before the
-      // generic result-row serialization below, writing result/remarks
-      // in the exact shape that existing generic code already expects,
-      // so no special-casing needed downstream.
+      // other failed check. The actual upload no longer happens here —
+      // each photo is uploaded to Drive immediately when captured (see
+      // hs-photo-capture above), specifically so it's never at risk of
+      // being lost between capture and this final submit step. This
+      // loop just finalizes result/remarks in the exact shape the
+      // generic result-row serialization below already expects, using
+      // whatever photoUrl capture already produced.
       for (const item of items) {
         if (item.InputType !== 'Photo' && item.InputType !== 'PhotoLocation') continue;
         const r = pendingResults[item.ItemID] || {};
         const needsLocation = item.InputType === 'PhotoLocation';
         const missingLocation = needsLocation && !(r.locationText || '').trim();
-        if (!r.photoFile) {
+        if (!r.photoUrl) {
           pendingResults[item.ItemID] = Object.assign({}, r, { result: 'Fail', remarks: missingLocation ? 'No photo captured and no location entered.' : 'No photo captured.' });
           continue;
         }
@@ -3934,8 +4085,6 @@ const HSModule = (function () {
           pendingResults[item.ItemID] = Object.assign({}, r, { result: 'Fail', remarks: 'Photo captured but no location entered.' });
           continue;
         }
-        submitBtn.textContent = 'Uploading photo…';
-        const photoUrl = await MVOA.uploadPhotoToDrive(r.photoFile, `${logId}_${item.ItemID}_${r.photoName}`);
         // Time: <ISO> records the moment THIS photo was actually taken
         // (see the hs-photo-capture handler above) — separate from
         // this log row's own Timestamp, which is when the whole round
@@ -3945,10 +4094,9 @@ const HSModule = (function () {
         const capturedAt = r.capturedAt || new Date().toISOString();
         pendingResults[item.ItemID] = Object.assign({}, r, {
           result: 'Pass',
-          remarks: needsLocation ? `Location: ${r.locationText.trim()} | Photo: ${photoUrl} | Time: ${capturedAt}` : `Photo: ${photoUrl} | Time: ${capturedAt}`
+          remarks: needsLocation ? `Location: ${r.locationText.trim()} | Photo: ${r.photoUrl} | Time: ${capturedAt}` : `Photo: ${r.photoUrl} | Time: ${capturedAt}`
         });
       }
-      submitBtn.textContent = 'Submitting…';
 
       const anyFail = items.some(i => pendingResults[i.ItemID]?.result === 'Fail') ||
         items.some(i => i.InputType === 'AssetList' && (pendingResults[i.ItemID]?.entries || []).some(v => v && v.trim()));
@@ -4076,6 +4224,7 @@ const HSModule = (function () {
         }
       }
 
+      clearDraft(currentTemplate.TemplateID, currentShift); // round is fully saved now — no reason to keep the in-progress copy around
       await loadAll(); // refresh due-status cache for the next scan
       currentTemplate = null; currentShift = ''; pendingResults = {};
       renderScanResult(container);
