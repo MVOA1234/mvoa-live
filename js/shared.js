@@ -101,25 +101,142 @@ const MVOA = (function () {
   // forever with no error to show. This wraps fetch with an
   // AbortController so a stuck request fails visibly within 15s
   // instead of hanging indefinitely.
-  async function fetchWithTimeout(url, options, timeoutMs = NETWORK_TIMEOUT_MS) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        throw new Error(`Request timed out after ${timeoutMs / 1000}s — check your connection: ${url}`);
+  function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+  // One automatic retry after a short pause on a network-level failure
+  // (timeout, DNS hiccup, offline blip, etc.) — the kind of brief stall
+  // that clears itself up a second later, rather than a real problem.
+  // This does NOT retry on an actual HTTP error response (403, 500, ...);
+  // fetch() only throws for network-level failures, a non-2xx response
+  // still resolves normally and is handled by the caller as before.
+  //
+  // IMPORTANT — retry is OPT-IN via the `retry` param, and is only ever
+  // passed as true from call sites that are safe to repeat: plain GET
+  // reads (sheetsRead, sheetsRowCount, the tab-existence checks) and the
+  // OAuth token exchange. A timeout doesn't guarantee the request never
+  // reached Google's servers — for a write (append/update/delete), a
+  // blind retry after an already-successful-but-slow-to-respond request
+  // could create a duplicate row (e.g. a duplicate attendance check-in
+  // or a duplicate finance approval). So every write path below keeps
+  // its original no-retry behavior; only read-style calls opt in.
+  const RETRY_DELAY_MS = 1500;
+
+  // ───────────────────────────────────────────────────────────
+  // REQUEST SPACING — every user of this app shares ONE service-account
+  // identity, so Google's per-user Sheets API quota (60 reads/min, 60
+  // writes/min) is really a pool shared across everyone using the app at
+  // once. A single screen that needs several different tabs at the same
+  // moment (e.g. a dashboard pulling 5+ sheets on load) used to fire all
+  // of those requests in the same instant — fine on its own, but stacked
+  // across several people opening the app around the same time, this is
+  // what can push a one-minute window over the per-user cap and produce
+  // the timeouts users have been seeing.
+  //
+  // This adds a small stagger (REQUEST_STAGGER_MS) between consecutive
+  // Sheets API calls dispatched from THIS browser tab, so one screen's
+  // own burst spreads out into more of a steady trickle instead of a
+  // spike. It can only smooth out what one tab does — it can't see or
+  // coordinate with other users' tabs — so it's a complement to, not a
+  // substitute for, the read cache below (which is what actually cuts
+  // down duplicate requests across different users/tabs hitting the
+  // same sheet within a few seconds of each other).
+  const REQUEST_STAGGER_MS = 120;
+  let lastSheetsApiDispatch = 0;
+  let dispatchChain = Promise.resolve();
+
+  function staggerSheetsApiCall() {
+    // Chains onto a shared promise so concurrent callers queue up in the
+    // order they arrived, instead of each one racing to compute its own
+    // "wait until" time off a stale lastSheetsApiDispatch value.
+    dispatchChain = dispatchChain.then(async () => {
+      const waitFor = Math.max(0, (lastSheetsApiDispatch + REQUEST_STAGGER_MS) - Date.now());
+      if (waitFor > 0) await sleep(waitFor);
+      lastSheetsApiDispatch = Date.now();
+    });
+    return dispatchChain;
+  }
+
+  async function fetchWithTimeout(url, options, timeoutMs = NETWORK_TIMEOUT_MS, retry = false) {
+    async function attempt() {
+      if (url.indexOf('sheets.googleapis.com') !== -1) await staggerSheetsApiCall();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          throw new Error(`Request timed out after ${timeoutMs / 1000}s — check your connection: ${url}`);
+        }
+        throw e;
+      } finally {
+        clearTimeout(timer);
       }
-      throw e;
-    } finally {
-      clearTimeout(timer);
     }
+
+    if (!retry) return attempt();
+
+    try {
+      return await attempt();
+    } catch (e) {
+      await sleep(RETRY_DELAY_MS);
+      return attempt(); // second failure is allowed to throw straight to the caller
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // SHORT-LIVED READ CACHE — de-duplicates identical reads that happen
+  // within a few seconds of each other. This is the main lever for
+  // staying under the shared per-user Sheets API quota during a burst
+  // of concurrent app usage (several people/tabs loading the same
+  // sheet around the same moment, or one screen re-reading a tab it
+  // just read a moment ago) — it's genuinely fresh data almost all the
+  // time (TTL is short), and every write function below clears the
+  // relevant cache entries immediately so a save is never masked by a
+  // stale cached read on the same device.
+  //
+  // Concurrent callers requesting the SAME sheet (same bounded/full
+  // mode) while a read is already in flight share that one in-flight
+  // request rather than each firing their own — this is often the
+  // biggest win, since a single screen frequently reads a tab more
+  // than once during render.
+  const READ_CACHE_TTL_MS = 12000;
+  const readCache = new Map(); // key -> { promise, timestamp }
+
+  function readCacheKey(sheetName, opts) {
+    return sheetName + '|' + ((opts && opts.recent) ? 'recent' : 'full');
+  }
+
+  function clearReadCache(sheetName) {
+    // Clears both the bounded and full-read entries for this sheet —
+    // called after any successful write so the next read is never
+    // served a pre-write cached copy.
+    readCache.delete(readCacheKey(sheetName, null));
+    readCache.delete(readCacheKey(sheetName, { recent: true }));
   }
 
   // opts.recent: true — opt into the bounded read described above, using
   // whatever limit SHEET_RECENT_ROW_LIMITS has for this sheet (no entry, or
   // omitting opts entirely, reads the whole sheet exactly as before).
   async function sheetsRead(sheetName, opts) {
+    const cacheKey = readCacheKey(sheetName, opts);
+    const cached = readCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < READ_CACHE_TTL_MS) {
+      const rows = await cached.promise;
+      return rows.slice(); // shallow copy — a caller mutating the returned array must never corrupt the shared cache entry
+    }
+
+    const promise = sheetsReadUncached(sheetName, opts);
+    readCache.set(cacheKey, { promise, timestamp: Date.now() });
+    try {
+      const rows = await promise;
+      return rows.slice();
+    } catch (e) {
+      readCache.delete(cacheKey); // never cache a failure — let the next call try fresh
+      throw e;
+    }
+  }
+
+  async function sheetsReadUncached(sheetName, opts) {
     // Uses the service-account token, not the plain API key — a bare API key
     // can only read spreadsheets that are public ("anyone with the link"),
     // and this Sheet is intentionally kept Restricted. The service account
@@ -129,7 +246,7 @@ const MVOA = (function () {
     const fullReadUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}`;
 
     async function readFull() {
-      const r = await fetchWithTimeout(fullReadUrl, { headers: authHeaders });
+      const r = await fetchWithTimeout(fullReadUrl, { headers: authHeaders }, NETWORK_TIMEOUT_MS, true);
       if (!r.ok) {
         const body = await r.text().catch(() => '');
         throw new Error(`Sheets read error (${sheetName}): ${r.status} ${body}`);
@@ -144,7 +261,7 @@ const MVOA = (function () {
     // Bounded read: first find out how many rows of data exist — a single
     // column is a cheap way to count without pulling every column yet.
     const colAUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName + '!A:A')}`;
-    const colAResp = await fetchWithTimeout(colAUrl, { headers: authHeaders });
+    const colAResp = await fetchWithTimeout(colAUrl, { headers: authHeaders }, NETWORK_TIMEOUT_MS, true);
     if (!colAResp.ok) {
       const body = await colAResp.text().catch(() => '');
       throw new Error(`Sheets read error (${sheetName}): ${colAResp.status} ${body}`);
@@ -160,7 +277,7 @@ const MVOA = (function () {
     const ranges = [`${sheetName}!1:1`, `${sheetName}!A${startRow}:ZZ${totalRows}`]
       .map(rg => `ranges=${encodeURIComponent(rg)}`).join('&');
     const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values:batchGet?${ranges}`;
-    const batchResp = await fetchWithTimeout(batchUrl, { headers: authHeaders });
+    const batchResp = await fetchWithTimeout(batchUrl, { headers: authHeaders }, NETWORK_TIMEOUT_MS, true);
     if (!batchResp.ok) {
       const body = await batchResp.text().catch(() => '');
       throw new Error(`Sheets read error (${sheetName}): ${batchResp.status} ${body}`);
@@ -180,7 +297,7 @@ const MVOA = (function () {
   async function sheetsRowCount(sheetName) {
     const token = await getServiceAccountToken();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName + '!A:A')}`;
-    const r = await fetchWithTimeout(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    const r = await fetchWithTimeout(url, { headers: { 'Authorization': 'Bearer ' + token } }, NETWORK_TIMEOUT_MS, true);
     if (!r.ok) {
       const body = await r.text().catch(() => '');
       throw new Error(`Sheets read error (${sheetName}): ${r.status} ${body}`);
@@ -199,6 +316,7 @@ const MVOA = (function () {
       body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: data })
     });
     if (!r.ok) throw new Error(`Sheets write error (${sheetName}): ${r.status}`);
+    clearReadCache(sheetName);
     return r.json();
   }
 
@@ -211,6 +329,7 @@ const MVOA = (function () {
       body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: [row] })
     });
     if (!r.ok) throw new Error(`Sheets append error (${sheetName}): ${r.status}`);
+    clearReadCache(sheetName);
     return r.json();
   }
 
@@ -225,6 +344,7 @@ const MVOA = (function () {
       body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: rows })
     });
     if (!r.ok) throw new Error(`Sheets append error (${sheetName}): ${r.status}`);
+    clearReadCache(sheetName);
     return r.json();
   }
 
@@ -240,6 +360,7 @@ const MVOA = (function () {
       body: JSON.stringify({ range, majorDimension: 'ROWS', values: [rowValues] })
     });
     if (!r.ok) throw new Error(`Sheets update error (${sheetName} row ${rowNumber}): ${r.status}`);
+    clearReadCache(sheetName);
     return r.json();
   }
 
@@ -256,7 +377,7 @@ const MVOA = (function () {
     if (!rowNumbers || !rowNumbers.length) return;
     const token = await getServiceAccountToken();
     const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}?fields=sheets.properties(sheetId,title)`;
-    const metaRes = await fetchWithTimeout(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+    const metaRes = await fetchWithTimeout(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } }, NETWORK_TIMEOUT_MS, true);
     if (!metaRes.ok) throw new Error(`Could not look up sheet ID for ${sheetName}: ${metaRes.status}`);
     const meta = await metaRes.json();
     const sheetMeta = (meta.sheets || []).find(s => s.properties && s.properties.title === sheetName);
@@ -276,6 +397,7 @@ const MVOA = (function () {
       const body = await r.text().catch(() => '');
       throw new Error(`Sheets delete rows error (${sheetName}): ${r.status} ${body}`);
     }
+    clearReadCache(sheetName);
     return r.json();
   }
 
@@ -286,7 +408,7 @@ const MVOA = (function () {
   async function sheetsEnsureTab(sheetName, headerRow) {
     const token = await getServiceAccountToken();
     const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}?fields=sheets.properties.title`;
-    const metaRes = await fetchWithTimeout(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+    const metaRes = await fetchWithTimeout(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } }, NETWORK_TIMEOUT_MS, true);
     if (!metaRes.ok) throw new Error(`Could not check existing tabs: ${metaRes.status}`);
     const meta = await metaRes.json();
     const exists = (meta.sheets || []).some(s => s.properties && s.properties.title === sheetName);
@@ -303,7 +425,7 @@ const MVOA = (function () {
       if (body.indexOf('already exists') !== -1) return false;
       throw new Error(`Could not create tab ${sheetName}: ${createRes.status} ${body}`);
     }
-    if (headerRow && headerRow.length) await sheetsAppend(sheetName, headerRow);
+    if (headerRow && headerRow.length) await sheetsAppend(sheetName, headerRow); // also clears this sheet's read cache
     return true;
   }
 
@@ -331,7 +453,7 @@ const MVOA = (function () {
     const resp = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
-    });
+    }, NETWORK_TIMEOUT_MS, true); // safe to retry — this only requests a token, it doesn't mutate any data
     const tok = await resp.json();
     if (!tok.access_token) throw new Error('Token exchange failed: ' + JSON.stringify(tok));
     saTokenCache = { token: tok.access_token, expires: Date.now() + (tok.expires_in - 60) * 1000 };
