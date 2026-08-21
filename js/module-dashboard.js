@@ -59,7 +59,7 @@
 //     list always matches what the tile showed, with no extra sheet
 //     reads. In/Out Log isn't a tile and already shows its full
 //     IN/OUT list inline, so it has no separate drill-down.
-//   - CURRENT SHIFT GAUGE READINGS (Diesel Level / Sump 1 Level / Sump 2
+//   - CURRENT SHIFT READINGS (Diesel Level / Sump 1 Level / Sump 2
 //     Level) are the one exception to "everything moves with the
 //     dropdown" above — these three are a live snapshot (the most
 //     recent shift-start reading logged, all-time, not a period total),
@@ -565,7 +565,7 @@ const DashboardModule = (function () {
         </div>
 
         ${currentPeriod === 'day' ? `
-        <p style="margin:0 0 6px;font-weight:600;">Current Shift Gauge Readings <span class="muted" style="font-weight:400;font-size:0.8rem;">(measured at start of shift — Day view only)</span></p>
+        <p style="margin:0 0 6px;font-weight:600;">Current Shift Readings <span class="muted" style="font-weight:400;font-size:0.8rem;">(measured at start of shift — Day view only)</span></p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
           ${statTile(dg.currentGauges.diesel ? dg.currentGauges.diesel.value.toFixed(2) + '%' : '—', 'Diesel Level', null, null)}
           ${statTile(dg.currentGauges.sump1 ? dg.currentGauges.sump1.value.toFixed(2) + '%' : '—', 'Sump 1 Level', null, null)}
