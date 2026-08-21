@@ -59,6 +59,15 @@
 //     list always matches what the tile showed, with no extra sheet
 //     reads. In/Out Log isn't a tile and already shows its full
 //     IN/OUT list inline, so it has no separate drill-down.
+//   - CURRENT SHIFT GAUGE READINGS (Diesel Level / Sump 1 Level / Sump 2
+//     Level) are the one exception to "everything moves with the
+//     dropdown" above — these three are a live snapshot (the most
+//     recent shift-start reading logged, all-time, not a period total),
+//     so they're shown ONLY in Day view and are not clickable (nothing
+//     period-shaped to list, same reasoning as Fuel Efficiency). Sump
+//     1/2 aren't part of the DG Set template at all — they're looked up
+//     by CheckItem name across every active item, wherever they
+//     actually live.
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('dashboard', {
@@ -252,6 +261,30 @@ const DashboardModule = (function () {
     return m ? parseFloat(m[1]) : NaN;
   }
 
+  // Latest single reading for a gauge-style item (Diesel level, Sump 1/2
+  // level, etc.) — NOT period-scoped like the DG totals above. This is
+  // "what did the most recent shift's check actually read," so it
+  // always reflects the current tank/sump level regardless of which
+  // Day/Week/Month range is selected; only whether it's SHOWN is gated
+  // on Day view (see the Daily-only tiles in the render section below).
+  // itemIds can list more than one ItemID (e.g. the current Diesel
+  // Level item plus the legacy Fuel Level item it replaced) so whichever
+  // was actually logged most recently wins, same fallback convention
+  // used throughout module-hs.js's own DG Set math.
+  function latestNumericReading(results, logs, itemIds) {
+    if (!itemIds || !itemIds.length) return null;
+    let best = null;
+    results.forEach(r => {
+      if (!itemIds.includes(r.ItemID)) return;
+      const log = logs.find(l => l.LogID === r.LogID);
+      if (!log || !log.Timestamp) return;
+      const val = extractNumericResult(r);
+      if (isNaN(val)) return;
+      if (!best || log.Timestamp > best.timestamp) best = { value: val, timestamp: log.Timestamp, shift: log.Shift };
+    });
+    return best;
+  }
+
   async function loadDgPeriodMetrics(range) {
     const [itemRows, logRows, resultRows] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.hsItems),
@@ -267,6 +300,13 @@ const DashboardModule = (function () {
     const beforeItem = items.find(i => /diesel level before top up/i.test(i.CheckItem));
     const afterItem = items.find(i => /diesel level after top up/i.test(i.CheckItem));
     const legacyLevelItem = items.find(i => /^fuel level$/i.test((i.CheckItem || '').trim()));
+    // Sump 1/2 level aren't part of the DG Set template at all (a
+    // different checklist/category logs them), but items/logs/results
+    // above already cover every active item across the whole app, so
+    // they're just as reachable here by name — no separate sheet read
+    // needed.
+    const sump1Item = items.find(i => /sump\s*1/i.test(i.CheckItem || ''));
+    const sump2Item = items.find(i => /sump\s*2/i.test(i.CheckItem || ''));
     const relevantIds = [hoursItem, kwhItem, beforeItem, afterItem, legacyLevelItem].filter(Boolean).map(i => i.ItemID);
 
     const byDateShift = {};
@@ -383,7 +423,21 @@ const DashboardModule = (function () {
     const totalDiesel = sum(inPeriodRows.map(r => r.dieselConsumedLitres).filter(v => typeof v === 'number'));
     const totalTopUp = sum(inPeriodRows.map(r => r.dieselTopUpLitres).filter(v => typeof v === 'number'));
     const fuelEfficiency = (typeof totalDiesel === 'number' && totalKwh) ? Math.round((totalDiesel / totalKwh) * 1000) / 1000 : null;
-    return { totalHours, totalKwh, totalDiesel, totalTopUp, fuelEfficiency, rows: inPeriodRows };
+
+    // Current-shift gauge snapshot — the most recent reading logged for
+    // each, all-time (not scoped to `range`), since "current level" only
+    // ever means "as of the last time someone checked," not a total over
+    // a selected period. Diesel level falls back to the legacy Fuel
+    // Level item wherever that's the more recent of the two, same as
+    // the period math above.
+    const dieselIds = [beforeItem, legacyLevelItem].filter(Boolean).map(i => i.ItemID);
+    const currentGauges = {
+      diesel: latestNumericReading(results, logs, dieselIds),
+      sump1: latestNumericReading(results, logs, sump1Item ? [sump1Item.ItemID] : []),
+      sump2: latestNumericReading(results, logs, sump2Item ? [sump2Item.ItemID] : [])
+    };
+
+    return { totalHours, totalKwh, totalDiesel, totalTopUp, fuelEfficiency, rows: inPeriodRows, currentGauges };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -509,6 +563,15 @@ const DashboardModule = (function () {
           ${statTile(dg.totalTopUp ?? '—', 'Diesel Top Up (L)', null, 'dgDetail')}
           ${statTile(dg.fuelEfficiency ?? '—', 'Fuel Efficiency (L/kWh)', null, 'dgDetail')}
         </div>
+
+        ${currentPeriod === 'day' ? `
+        <p style="margin:0 0 6px;font-weight:600;">Current Shift Gauge Readings <span class="muted" style="font-weight:400;font-size:0.8rem;">(measured at start of shift — Day view only)</span></p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+          ${statTile(dg.currentGauges.diesel ? dg.currentGauges.diesel.value.toFixed(2) + '%' : '—', 'Diesel Level', null, null)}
+          ${statTile(dg.currentGauges.sump1 ? dg.currentGauges.sump1.value.toFixed(2) + '%' : '—', 'Sump 1 Level', null, null)}
+          ${statTile(dg.currentGauges.sump2 ? dg.currentGauges.sump2.value.toFixed(2) + '%' : '—', 'Sump 2 Level', null, null)}
+        </div>
+        ` : ''}
 
         <p style="margin:0 0 6px;font-weight:600;">In/Out Log</p>
         ${inOut.length ? inOut.map(g => `
