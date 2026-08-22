@@ -329,11 +329,24 @@ const DashboardModule = (function () {
       if (log.Timestamp < entry.timestamp) entry.timestamp = log.Timestamp;
       const val = extractNumericResult(r);
       if (isNaN(val)) return;
-      if (hoursItem && r.ItemID === hoursItem.ItemID) entry.hours = val;
-      if (kwhItem && r.ItemID === kwhItem.ItemID) entry.kwh = val;
-      if (beforeItem && r.ItemID === beforeItem.ItemID) entry.dieselBefore = val;
-      if (afterItem && r.ItemID === afterItem.ItemID) entry.dieselAfter = val;
-      if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) entry.legacyLevel = val;
+      // Mirrors the same guard in module-hs.js's loadDgOperationsData —
+      // a duplicate/resubmitted log for the same shift can otherwise let
+      // a stale earlier reading silently win over the correct, more
+      // recent one purely because of the order the Sheets API happened
+      // to return rows in. Each field only accepts a value from a
+      // result whose own log is at least as recent as what's already
+      // stored for that field.
+      function setIfNewer(field, atField) {
+        if (entry[atField] === undefined || log.Timestamp >= entry[atField]) {
+          entry[field] = val;
+          entry[atField] = log.Timestamp;
+        }
+      }
+      if (hoursItem && r.ItemID === hoursItem.ItemID) setIfNewer('hours', '_hoursAt');
+      if (kwhItem && r.ItemID === kwhItem.ItemID) setIfNewer('kwh', '_kwhAt');
+      if (beforeItem && r.ItemID === beforeItem.ItemID) setIfNewer('dieselBefore', '_dieselBeforeAt');
+      if (afterItem && r.ItemID === afterItem.ItemID) setIfNewer('dieselAfter', '_dieselAfterAt');
+      if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) setIfNewer('legacyLevel', '_legacyAt');
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     // Fall back to the legacy Fuel Level reading wherever a date+shift
