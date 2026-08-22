@@ -2531,7 +2531,18 @@ const HSModule = (function () {
     const pdfRows = [];
     shifts.forEach(shift => {
       if (shift) {
-        bodyHtml += `<tr><td colspan="${daysInMonth + 1}" style="background:var(--card-bg);font-weight:700;position:sticky;left:0;">${shiftLabel(shift)} Shift</td></tr>`;
+        // A single colspan cell here used to look right at rest, but a
+        // sticky "left" cell whose own width already spans every column
+        // combined has nothing distinct to pin against — table cells
+        // only reliably stick to the left edge when they occupy ONE
+        // column, same as every other row in this table (Item, Performed
+        // By, Overall Notes, all render their sticky cell that way). So
+        // this splits into the same shape: one real sticky cell sized to
+        // the Item column, plus a plain (non-sticky, non-colspan) cell
+        // per day just for the continuous highlighted band — the shift
+        // label now stays visible while scrolling horizontally exactly
+        // like every other row's left column does.
+        bodyHtml += `<tr><td style="background:var(--card-bg);font-weight:700;position:sticky;left:0;z-index:1;">${shiftLabel(shift)} Shift</td>${dayHeaders.map(() => `<td style="background:var(--card-bg);"></td>`).join('')}</tr>`;
         const sectionRow = { Item: '— ' + shiftLabel(shift) + ' Shift —' };
         dayHeaders.forEach(d => sectionRow[String(d)] = '');
         pdfRows.push(sectionRow);
