@@ -257,11 +257,15 @@
         ${editable ? '<button id="att-agency-add" class="btn-primary" style="margin-bottom:12px;">+ Add Agency</button>' : ''}
         <div style="overflow-x:auto;">
         <table class="mvoa-table">
-          <thead><tr><th>Name</th><th>Type</th>${editable ? '<th></th>' : ''}</tr></thead>
+          <thead><tr>
+            <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;">Name</th>
+            <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Type</th>
+            ${editable ? '<th style="position:sticky;top:0;z-index:2;background:#eef2f6;"></th>' : ''}
+          </tr></thead>
           <tbody>
             ${rows.length ? rows.map(a => `
               <tr>
-                <td>${escapeHtml(a.Name)}</td>
+                <td style="position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(a.Name)}</td>
                 <td>${escapeHtml(a.Type)}</td>
                 ${editable ? `
                   <td>
@@ -428,12 +432,19 @@
         </div>
         <div id="att-staff-table-wrap" style="overflow-x:auto;">
         <table class="mvoa-table">
-          <thead><tr><th><input type="checkbox" id="att-staff-select-all" ${rows.length && selectedCount === rows.length ? 'checked' : ''}></th><th>Name</th><th>Agency</th><th>Role</th><th>Code</th><th></th></tr></thead>
+          <thead><tr>
+            <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:36px;"><input type="checkbox" id="att-staff-select-all" ${rows.length && selectedCount === rows.length ? 'checked' : ''}></th>
+            <th style="position:sticky;top:0;left:36px;z-index:3;background:#eef2f6;">Name</th>
+            <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Agency</th>
+            <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Role</th>
+            <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Code</th>
+            <th style="position:sticky;top:0;z-index:2;background:#eef2f6;"></th>
+          </tr></thead>
           <tbody>
             ${rows.length ? rows.map(s => `
               <tr>
-                <td><input type="checkbox" class="att-staff-select" data-id="${escapeHtml(s.StaffID)}" ${staffIdPrintSelection.has(s.StaffID) ? 'checked' : ''}></td>
-                <td>${escapeHtml(s.Name)}</td>
+                <td style="position:sticky;left:0;z-index:1;background:#fff;width:36px;"><input type="checkbox" class="att-staff-select" data-id="${escapeHtml(s.StaffID)}" ${staffIdPrintSelection.has(s.StaffID) ? 'checked' : ''}></td>
+                <td style="position:sticky;left:36px;z-index:1;background:#fff;">${escapeHtml(s.Name)}</td>
                 <td>${escapeHtml(agencyName(s.AgencyID))}</td>
                 <td>${escapeHtml(s.Role)}</td>
                 <td style="font-family:ui-monospace,Menlo,monospace;letter-spacing:2px;">${escapeHtml(s.Code)}</td>
