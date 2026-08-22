@@ -1006,7 +1006,14 @@
         </div>
         <div style="max-height:60vh;overflow:auto;">
           <table class="mvoa-table">
-            <thead><tr><th>Name</th><th>Agency</th><th>Role</th><th>Check-in</th><th>Check-out</th><th>Status</th></tr></thead>
+            <thead><tr>
+              <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;">Name</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Agency</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Role</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Check-in</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Check-out</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Status</th>
+            </tr></thead>
             <tbody>
               ${tableRows.length ? tableRows.map(({ s, l, carriedOver }) => {
                 const status = !l ? 'Not scanned' : (l.Status === 'CheckedOut' ? 'Checked out' : 'On-site');
@@ -1019,7 +1026,7 @@
                 const carriedNote = carriedOver ? ` <span class="muted" style="font-size:0.75rem;">(since ${escapeHtml(l.Date)})</span>` : '';
                 return `
                   <tr>
-                    <td>${escapeHtml(s.Name)}</td>
+                    <td style="position:sticky;left:0;z-index:1;background:#fff;">${escapeHtml(s.Name)}</td>
                     <td>${escapeHtml(agencyName(s.AgencyID))}</td>
                     <td>${escapeHtml(s.Role || '—')}</td>
                     <td>${l && l.CheckInTime ? escapeHtml(formatTime(l.CheckInTime)) + (l.CheckInPhotoURL ? ` <a href="${l.CheckInPhotoURL}" target="_blank" rel="noopener">📷</a>` : '') + carriedNote : '—'}</td>
