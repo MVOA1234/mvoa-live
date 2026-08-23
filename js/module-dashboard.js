@@ -562,11 +562,12 @@ const DashboardModule = (function () {
       </div>
 
       <div class="card" style="max-width:900px;margin:0;">
-        <h3 style="margin:0 0 12px;color:var(--mvoa-blue);">Plant Rounds &amp; Compliance</h3>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+        <h3 style="margin:0 0 12px;color:var(--mvoa-blue);">Villa Complex Rounds</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
           ${statTile(prTaskStats.totalFailedTasks, 'Total Failed Tasks', prTaskStats.totalFailedTasks ? '#b3261e' : null, 'totalFailedTasks')}
           ${statTile(prTaskStats.notPerformed, 'Total Tasks Not Performed', prTaskStats.notPerformed ? '#b3261e' : null, 'totalNotPerformed')}
         </div>
+        <p class="muted" style="margin:0 0 16px;font-size:0.8rem;">Total Failed Tasks need to be closed under appropriate category in Daily Operations. Total Tasks Not Performed need to be closed by performing those tasks in Villa Complex Rounds.</p>
 
         <p style="margin:0 0 6px;font-weight:600;">DG Set Operations</p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
