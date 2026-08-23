@@ -2307,6 +2307,30 @@ const HSModule = (function () {
   let monthlyReportCategory = '';
   let monthlyReportTemplateId = '';
   let monthlyReportMonth = ''; // 'YYYY-MM', defaults to current month on first render
+  let monthlyReportAssetId = ''; // set only for templates that cover multiple physical
+  // units under one checklist (e.g. 18 Distribution Panels, each scanned
+  // separately) — '' means the template has no per-asset breakdown at all.
+
+  // Same union-of-registered-and-logged approach as the Due Status
+  // dashboard's per-asset expansion (see renderDueDashboard above): the
+  // pre-registered master list (HSCategoryAssets) so a never-scanned unit
+  // still shows up, PLUS any AssetID actually seen in this template's logs
+  // (covers a unit scanned before/after being added to — or after being
+  // deactivated from — the master list, e.g. a scrapped panel whose
+  // history should still be viewable here even though it's now Active=FALSE
+  // and therefore absent from categoryAssetsCache).
+  function assetOptionsForTemplate(template) {
+    if (!template) return [];
+    const registeredIds = categoryAssetsCache.filter(a => a.CategoryKey === template.QRTarget).map(a => a.AssetID);
+    const loggedIds = [...new Set(logsCache.filter(l => l.TemplateID === template.TemplateID && l.AssetID).map(l => l.AssetID))];
+    const assetIds = [...new Set([...registeredIds, ...loggedIds])];
+    return assetIds.map(aid => {
+      const registered = categoryAssetsCache.find(a => a.CategoryKey === template.QRTarget && a.AssetID === aid);
+      const sample = logsCache.find(l => l.TemplateID === template.TemplateID && l.AssetID === aid);
+      const label = (registered && registered.AssetLabel) || (sample && sample.AssetName) || aid;
+      return { assetId: aid, label };
+    }).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+  }
 
   function renderMonthlyReport(container) {
     if (!monthlyReportMonth) {
@@ -2328,6 +2352,9 @@ const HSModule = (function () {
         <label>Checklist
           <select id="hs-monthly-template"><option value="">— Select a category first —</option></select>
         </label>
+        <label id="hs-monthly-asset-wrap" class="hidden">Panel / Asset
+          <select id="hs-monthly-asset"><option value="">— Select —</option></select>
+        </label>
         <label>Month
           <input type="month" id="hs-monthly-picker" value="${monthlyReportMonth}">
         </label>
@@ -2337,6 +2364,8 @@ const HSModule = (function () {
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
 
     const templateSelect = container.querySelector('#hs-monthly-template');
+    const assetWrap = container.querySelector('#hs-monthly-asset-wrap');
+    const assetSelect = container.querySelector('#hs-monthly-asset');
     function populateTemplateOptions() {
       // CustomScreen templates (In/Out Log) can't show data here at all
       // — see the In/Out Monthly Report. RoundBased templates (Daily
@@ -2354,16 +2383,44 @@ const HSModule = (function () {
       if (!available.some(t => t.TemplateID === monthlyReportTemplateId)) monthlyReportTemplateId = available[0].TemplateID;
       templateSelect.value = monthlyReportTemplateId;
     }
+    // Templates that cover several physical units under one checklist
+    // (e.g. 9 EB + 9 DG Distribution Panels, each scanned separately) get
+    // an extra "Panel / Asset" picker so the matrix below can show one
+    // specific unit's own history — without this, the matrix has no way
+    // to tell which unit's log to show on a day several units were
+    // checked, and silently picks whichever happened to be logged last.
+    function populateAssetOptions() {
+      const template = templateById(monthlyReportTemplateId);
+      const options = assetOptionsForTemplate(template);
+      if (!options.length) {
+        assetWrap.classList.add('hidden');
+        monthlyReportAssetId = '';
+        return;
+      }
+      assetWrap.classList.remove('hidden');
+      assetSelect.innerHTML = options.map(o => `<option value="${o.assetId}" ${monthlyReportAssetId===o.assetId?'selected':''}>${escapeHtml(o.label)}</option>`).join('');
+      if (!options.some(o => o.assetId === monthlyReportAssetId)) monthlyReportAssetId = options[0].assetId;
+      assetSelect.value = monthlyReportAssetId;
+    }
     if (monthlyReportCategory) populateTemplateOptions();
+    if (monthlyReportTemplateId) populateAssetOptions();
 
     container.querySelector('#hs-monthly-category').addEventListener('change', (e) => {
       monthlyReportCategory = e.target.value;
       monthlyReportTemplateId = '';
+      monthlyReportAssetId = '';
       populateTemplateOptions();
+      populateAssetOptions();
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
     templateSelect.addEventListener('change', (e) => {
       monthlyReportTemplateId = e.target.value;
+      monthlyReportAssetId = '';
+      populateAssetOptions();
+      renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
+    });
+    assetSelect.addEventListener('change', (e) => {
+      monthlyReportAssetId = e.target.value;
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
     container.querySelector('#hs-monthly-picker').addEventListener('change', (e) => {
@@ -2383,6 +2440,16 @@ const HSModule = (function () {
       tableEl.innerHTML = '<p class="muted">No template found for this category/checklist.</p>';
       return;
     }
+    // Templates covering multiple physical units (see assetOptionsForTemplate)
+    // require picking one before showing a matrix — otherwise a day with
+    // several units checked would only ever show whichever log happened to
+    // be most recent, silently hiding every other unit's results.
+    const assetOptions = assetOptionsForTemplate(template);
+    if (assetOptions.length && !monthlyReportAssetId) {
+      tableEl.innerHTML = '<p class="muted">Choose a panel / asset to see its monthly matrix.</p>';
+      return;
+    }
+    const assetLabel = assetOptions.length ? (assetOptions.find(o => o.assetId === monthlyReportAssetId) || {}).label || '' : '';
     tableEl.innerHTML = '<p class="muted">Loading…</p>';
     let results;
     try {
@@ -2425,7 +2492,12 @@ const HSModule = (function () {
       const dateStr = new Date(year, month - 1, day).toDateString();
       const matches = logsCache.filter(l => l.TemplateID === template.TemplateID &&
         shiftDayBucket(l.Timestamp, shift) === dateStr &&
-        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+        (!shift || l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))) &&
+        // When this template covers multiple physical units, only that
+        // one unit's logs count here — otherwise a day several panels
+        // were checked would mix results from whichever panel happened
+        // to be logged last into what looks like a single day's reading.
+        (!monthlyReportAssetId || l.AssetID === monthlyReportAssetId));
       if (!matches.length) return null;
       if (matches.length === 1) return matches[0];
       return matches.reduce((latest, l) => new Date(l.Timestamp) > new Date(latest.Timestamp) ? l : latest);
@@ -2575,7 +2647,7 @@ const HSModule = (function () {
 
     tableEl.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:8px;">
-        <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${escapeHtml(template.Name)}</p>
+        <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${escapeHtml(template.Name)}${assetLabel ? ' — ' + escapeHtml(assetLabel) : ''}</p>
         <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
       </div>
       <div class="card" style="max-width:100%;margin:0;max-height:72vh;overflow:auto;-webkit-overflow-scrolling:touch;">
@@ -2587,7 +2659,7 @@ const HSModule = (function () {
     `;
     tableEl.querySelector('#hs-monthly-pdf').addEventListener('click', () => {
       const pdfColumns = ['Item', ...dayHeaders.map(String)];
-      const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${template.Name} — ${monthlyReportMonth}`;
+      const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${template.Name}${assetLabel ? ' — ' + assetLabel : ''} — ${monthlyReportMonth}`;
       printTablePdf(title, pdfColumns, pdfRows);
     });
   }
