@@ -59,6 +59,13 @@ const HSModule = (function () {
   let categoriesCache = [];
   let templatesCache = [];
   let itemsCache = [];
+  let allItemsCache = []; // unfiltered — includes Active=FALSE items, so a
+  // historical log referencing a since-deactivated item (e.g. "Fuse
+  // Melting"/"Fuse Burning", removed from the checklist but still present
+  // in old submissions) can still show its real name instead of a raw
+  // ItemID code. itemsCache stays Active-only everywhere logging/rendering
+  // the current checklist happens — this is only for looking up names in
+  // old results.
   let itemOptionsCache = [];
   let logsCache = [];
   let categoryAssetsCache = []; // per-asset master list — CategoryKey|AssetID|AssetLabel|Active
@@ -164,7 +171,8 @@ const HSModule = (function () {
     ]);
     categoriesCache = rowsToObjs(categories, CATEGORY_COLS).filter(c => c.Active === 'TRUE' || c.Active === 'true' || c.Active === true || c.Active === '1');
     templatesCache = rowsToObjs(templates, TEMPLATE_COLS).filter(t => t.Active === 'TRUE' || t.Active === 'true' || t.Active === true || t.Active === '1');
-    itemsCache = rowsToObjs(items, ITEM_COLS).filter(i => i.Active === 'TRUE' || i.Active === 'true' || i.Active === true || i.Active === '1');
+    allItemsCache = rowsToObjs(items, ITEM_COLS);
+    itemsCache = allItemsCache.filter(i => i.Active === 'TRUE' || i.Active === 'true' || i.Active === true || i.Active === '1');
     itemOptionsCache = rowsToObjs(options, OPTION_COLS);
     logsCache = rowsToObjs(logs, LOG_COLS);
     // Optional tab — a per-asset master list (e.g. all 18 Distribution
@@ -2838,9 +2846,14 @@ const HSModule = (function () {
           <div class="mvoa-row"><strong>${escapeHtml((log && (log.AssetName || log.AssetID)) || '')} — ${log ? formatDate(log.Timestamp) : ''}</strong>
             <button id="hs-panel-detail-close" class="btn-secondary" style="font-size:0.75rem;padding:3px 8px;">✕ Close</button>
           </div>
-          ${log && log.Notes ? `<p class="muted" style="margin:6px 0;">Overall Notes: ${escapeHtml(log.Notes)}</p>` : ''}
+          <p style="margin:6px 0;padding:6px 8px;background:var(--card-bg,#f5f6f8);border-radius:6px;font-size:0.85rem;"><strong>Overall Notes:</strong> ${log && log.Notes && log.Notes.trim() ? escapeHtml(log.Notes) : '<span class="muted">— none entered —</span>'}</p>
           ${itemResults.length ? itemResults.map(r => {
-            const item = itemsCache.find(i => i.ItemID === r.ItemID);
+            // allItemsCache (not the Active-only itemsCache) so an item
+            // since removed from the checklist (e.g. a deactivated Fuse
+            // Melting/Burning check) still shows its real name here
+            // instead of a raw ItemID code — this is a historical
+            // record of what was actually checked at the time.
+            const item = allItemsCache.find(i => i.ItemID === r.ItemID);
             const resultHtml = r.Result === 'Fail' ? '<span style="color:#b3261e;font-weight:700;">✕ Fail</span>'
               : r.Result === 'Pass' ? '<span style="color:green;font-weight:700;">✓ Pass</span>'
               : escapeHtml(r.Result);
@@ -2990,7 +3003,9 @@ const HSModule = (function () {
     }
     const rows = results.filter(r => r.LogID === logId);
     detailsEl.innerHTML = rows.length ? rows.map(r => {
-      const item = itemsCache.find(i => i.ItemID === r.ItemID);
+      const item = allItemsCache.find(i => i.ItemID === r.ItemID); // allItemsCache, not the
+      // Active-only itemsCache — a since-deactivated item still shows its
+      // real name in old submissions instead of a raw ItemID code.
       const resultHtml = r.Result === 'Fail' ? '<span style="color:#b3261e;font-weight:700;">✕ Fail</span>'
         : r.Result === 'Pass' ? '<span style="color:green;font-weight:700;">✓ Pass</span>'
         : escapeHtml(r.Result);
