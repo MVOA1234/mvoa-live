@@ -1136,19 +1136,25 @@
       const datesPresent = new Set(sessions.map(l => l.Date));
       const cells = [];
       for (let d = 1; d <= daysInMonth; d++) {
-        if (d > capDay) { cells.push('<td></td>'); continue; }
+        if (d > capDay) { cells.push('<td style="width:36px;"></td>'); continue; }
         const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const present = datesPresent.has(iso);
-        cells.push(`<td style="color:${present ? '#1e6b33' : '#b3261e'};font-weight:700;text-align:center;">${present ? 'P' : 'A'}</td>`);
+        cells.push(`<td style="width:36px;color:${present ? '#1e6b33' : '#b3261e'};font-weight:700;text-align:center;">${present ? 'P' : 'A'}</td>`);
       }
-      return `<tr><td>${showAgency ? escapeHtml(ag) : ''}</td><td>${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
+      return `<tr><td style="position:sticky;left:0;z-index:1;background:#fff;width:80px;">${showAgency ? escapeHtml(ag) : ''}</td><td style="position:sticky;left:80px;z-index:1;background:#fff;width:140px;">${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
     });
 
+    // Agency and Staff Name stay pinned to the left edge while scrolling
+    // through a full month of day columns (same sticky pattern as the
+    // Attendance Log/Agencies/Staff tables) — table-layout:fixed with
+    // explicit widths on every column keeps the two sticky columns'
+    // `left` offsets (0 / 80px) matching their actual rendered width, so
+    // they stay flush against each other instead of gapping or overlapping.
     return `
-      <table class="mvoa-table att-pa-grid">
+      <table class="mvoa-table att-pa-grid" style="table-layout:fixed;border-collapse:separate;border-spacing:0;">
         <thead>
           <tr><th colspan="${2 + daysInMonth}" style="text-align:center;">Attendance Record for the Month of ${escapeHtml(monthLabel)}</th></tr>
-          <tr><th>Agency</th><th>Staff Name</th>${dayHeaders.map(h => `<th style="text-align:center;">${h}</th>`).join('')}</tr>
+          <tr><th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:80px;">Agency</th><th style="position:sticky;top:0;left:80px;z-index:3;background:#eef2f6;width:140px;">Staff Name</th>${dayHeaders.map(h => `<th style="position:sticky;top:0;z-index:2;background:#eef2f6;width:36px;text-align:center;">${h}</th>`).join('')}</tr>
         </thead>
         <tbody>
           ${bodyRows.length ? bodyRows.join('') : `<tr><td colspan="${2 + daysInMonth}" class="muted">No staff.</td></tr>`}
@@ -1213,14 +1219,22 @@
           const outs = daySessions.map(l => l.CheckOutTime ? escapeHtml(formatTime(l.CheckOutTime)) : '—').join('<br>');
           cells.push(`<td style="text-align:center;white-space:nowrap;">${ins}</td><td style="text-align:center;white-space:nowrap;">${outs}</td>`);
         }
-        return `<tr><td>${showAgency ? escapeHtml(ag) : ''}</td><td>${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
+        return `<tr><td style="position:sticky;left:0;z-index:1;background:#fff;width:80px;">${showAgency ? escapeHtml(ag) : ''}</td><td style="position:sticky;left:80px;z-index:1;background:#fff;width:140px;">${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
       });
 
+      // Agency and Staff Name stay pinned left during horizontal scroll
+      // here too — same left:0/80px offsets as the Attendance Record grid
+      // above so both reports behave consistently. Not made top-sticky as
+      // well: this table's header is 2 rows tall via a rowspan (day-name
+      // row + In/Out sub-row), and pinning both without overlapping needs
+      // a hardcoded pixel offset for the second row that would silently
+      // drift out of sync with any future font/padding change — left-only
+      // stickiness avoids that fragility while still fixing what was asked.
       return `
         <table class="mvoa-table att-times-grid">
           <thead>
             <tr><th colspan="${2 + dayHeaders.length * 2}" style="text-align:center;">Daily Check In/Out Time Report for ${escapeHtml(monthLabel)} — Days ${start}–${end}</th></tr>
-            <tr><th rowspan="2">Agency</th><th rowspan="2">Staff Name</th>${dayHeaders.map(h => `<th colspan="2" style="text-align:center;">${h}</th>`).join('')}</tr>
+            <tr><th rowspan="2" style="position:sticky;left:0;z-index:2;background:#eef2f6;width:80px;">Agency</th><th rowspan="2" style="position:sticky;left:80px;z-index:2;background:#eef2f6;width:140px;">Staff Name</th>${dayHeaders.map(h => `<th colspan="2" style="text-align:center;">${h}</th>`).join('')}</tr>
             <tr>${dayHeaders.map(() => `<th style="text-align:center;">In</th><th style="text-align:center;">Out</th>`).join('')}</tr>
           </thead>
           <tbody>
