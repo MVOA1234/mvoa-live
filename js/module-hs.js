@@ -2310,6 +2310,9 @@ const HSModule = (function () {
   let monthlyReportAssetId = ''; // set only for templates that cover multiple physical
   // units under one checklist (e.g. 18 Distribution Panels, each scanned
   // separately) — '' means the template has no per-asset breakdown at all.
+  let monthlyReportPanelGroup = ''; // set only when useGroupedPanelReport(template) —
+  // the shared prefix (e.g. "EB Distribution Panel") whose numbered panels
+  // (1-8) are shown together as rows in the compact grouped matrix.
 
   // Same union-of-registered-and-logged approach as the Due Status
   // dashboard's per-asset expansion (see renderDueDashboard above): the
@@ -2330,6 +2333,36 @@ const HSModule = (function () {
       const label = (registered && registered.AssetLabel) || (sample && sample.AssetName) || aid;
       return { assetId: aid, label };
     }).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+  }
+
+  // Groups an asset-per-template list by stripping a trailing number off
+  // each label — "EB Distribution Panel 3" groups under "EB Distribution
+  // Panel" as panel #3, "DG Distribution Panel 7" groups under "DG
+  // Distribution Panel" as panel #7. Any label with no trailing number
+  // becomes its own single-panel group (safe fallback for other per-asset
+  // categories that don't happen to follow a "<name> <number>" pattern).
+  function assetGroupsForTemplate(template) {
+    const options = assetOptionsForTemplate(template);
+    const groups = new Map();
+    options.forEach(o => {
+      const m = /^(.*?)\s*(\d+)$/.exec(o.label.trim());
+      const groupLabel = m ? m[1].trim() : o.label.trim();
+      const num = m ? parseInt(m[2], 10) : 1;
+      if (!groups.has(groupLabel)) groups.set(groupLabel, []);
+      groups.get(groupLabel).push({ assetId: o.assetId, label: o.label, num });
+    });
+    return [...groups.entries()]
+      .map(([groupLabel, panels]) => ({ groupLabel, panels: panels.sort((a, b) => a.num - b.num) }))
+      .sort((a, b) => a.groupLabel.localeCompare(b.groupLabel));
+  }
+  // Only worth switching to the compact grouped Panel × Day matrix when
+  // grouping actually collapses several individually-scanned units under
+  // shared prefixes (e.g. 16 Distribution Panels → 2 groups) — otherwise
+  // (every asset already its own group) the per-asset dropdown + full
+  // item-detail matrix below is still the more useful view.
+  function useGroupedPanelReport(template) {
+    const groups = assetGroupsForTemplate(template);
+    return groups.length > 0 && groups.length < assetOptionsForTemplate(template).length;
   }
 
   function renderMonthlyReport(container) {
@@ -2355,6 +2388,9 @@ const HSModule = (function () {
         <label id="hs-monthly-asset-wrap" class="hidden">Panel / Asset
           <select id="hs-monthly-asset"><option value="">— Select —</option></select>
         </label>
+        <label id="hs-monthly-group-wrap" class="hidden">Panel Group
+          <select id="hs-monthly-group"><option value="">— Select —</option></select>
+        </label>
         <label>Month
           <input type="month" id="hs-monthly-picker" value="${monthlyReportMonth}">
         </label>
@@ -2366,6 +2402,8 @@ const HSModule = (function () {
     const templateSelect = container.querySelector('#hs-monthly-template');
     const assetWrap = container.querySelector('#hs-monthly-asset-wrap');
     const assetSelect = container.querySelector('#hs-monthly-asset');
+    const groupWrap = container.querySelector('#hs-monthly-group-wrap');
+    const groupSelect = container.querySelector('#hs-monthly-group');
     function populateTemplateOptions() {
       // CustomScreen templates (In/Out Log) can't show data here at all
       // — see the In/Out Monthly Report. RoundBased templates (Daily
@@ -2389,8 +2427,24 @@ const HSModule = (function () {
     // specific unit's own history — without this, the matrix has no way
     // to tell which unit's log to show on a day several units were
     // checked, and silently picks whichever happened to be logged last.
-    function populateAssetOptions() {
+    // When the template's assets group into a handful of numbered panels
+    // per prefix (Distribution Panels: EB/DG), show the compact "Panel
+    // Group" picker instead of a dropdown listing all 16 individual units
+    // — otherwise fall back to the original one-unit-at-a-time picker.
+    function populatePanelPickers() {
       const template = templateById(monthlyReportTemplateId);
+      if (useGroupedPanelReport(template)) {
+        assetWrap.classList.add('hidden');
+        monthlyReportAssetId = '';
+        groupWrap.classList.remove('hidden');
+        const groups = assetGroupsForTemplate(template);
+        groupSelect.innerHTML = groups.map(g => `<option value="${escapeHtml(g.groupLabel)}" ${monthlyReportPanelGroup===g.groupLabel?'selected':''}>${escapeHtml(g.groupLabel)}</option>`).join('');
+        if (!groups.some(g => g.groupLabel === monthlyReportPanelGroup)) monthlyReportPanelGroup = groups[0].groupLabel;
+        groupSelect.value = monthlyReportPanelGroup;
+        return;
+      }
+      groupWrap.classList.add('hidden');
+      monthlyReportPanelGroup = '';
       const options = assetOptionsForTemplate(template);
       if (!options.length) {
         assetWrap.classList.add('hidden');
@@ -2403,24 +2457,30 @@ const HSModule = (function () {
       assetSelect.value = monthlyReportAssetId;
     }
     if (monthlyReportCategory) populateTemplateOptions();
-    if (monthlyReportTemplateId) populateAssetOptions();
+    if (monthlyReportTemplateId) populatePanelPickers();
 
     container.querySelector('#hs-monthly-category').addEventListener('change', (e) => {
       monthlyReportCategory = e.target.value;
       monthlyReportTemplateId = '';
       monthlyReportAssetId = '';
+      monthlyReportPanelGroup = '';
       populateTemplateOptions();
-      populateAssetOptions();
+      populatePanelPickers();
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
     templateSelect.addEventListener('change', (e) => {
       monthlyReportTemplateId = e.target.value;
       monthlyReportAssetId = '';
-      populateAssetOptions();
+      monthlyReportPanelGroup = '';
+      populatePanelPickers();
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
     assetSelect.addEventListener('change', (e) => {
       monthlyReportAssetId = e.target.value;
+      renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
+    });
+    groupSelect.addEventListener('change', (e) => {
+      monthlyReportPanelGroup = e.target.value;
       renderMonthlyMatrix(container.querySelector('#hs-monthly-table'));
     });
     container.querySelector('#hs-monthly-picker').addEventListener('change', (e) => {
@@ -2439,6 +2499,13 @@ const HSModule = (function () {
     if (!template) {
       tableEl.innerHTML = '<p class="muted">No template found for this category/checklist.</p>';
       return;
+    }
+    if (useGroupedPanelReport(template)) {
+      if (!monthlyReportPanelGroup) {
+        tableEl.innerHTML = '<p class="muted">Choose a panel group to see its monthly matrix.</p>';
+        return;
+      }
+      return renderGroupedPanelMatrix(tableEl, template);
     }
     // Templates covering multiple physical units (see assetOptionsForTemplate)
     // require picking one before showing a matrix — otherwise a day with
@@ -2660,6 +2727,140 @@ const HSModule = (function () {
     tableEl.querySelector('#hs-monthly-pdf').addEventListener('click', () => {
       const pdfColumns = ['Item', ...dayHeaders.map(String)];
       const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${template.Name}${assetLabel ? ' — ' + assetLabel : ''} — ${monthlyReportMonth}`;
+      printTablePdf(title, pdfColumns, pdfRows);
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // GROUPED PANEL MATRIX — for templates whose assets group into a
+  // handful of numbered panels per prefix (Distribution Panels: EB 1-8 /
+  // DG 1-8). Rows = panel (with its own due-status shown right under its
+  // label, since each panel has its own inspection history and cadence),
+  // columns = day of month, cell = a single overall Pass/Fail mark for
+  // that panel that day (Fail = any item on that panel's checklist
+  // failed) — same P/A-grid shape as the Staff Attendance monthly report,
+  // so a whole panel group's month is scannable at a glance instead of
+  // needing 8-16 separate dropdown selections.
+  // A 📝 mark next to the Pass/Fail flags a submission that has remarks
+  // (either the log's Overall Notes, or a per-item Remark) — tapping ANY
+  // mark opens the full item-by-item breakdown (with remarks) below the
+  // table, so nothing from the original detailed view is actually lost,
+  // it's just one tap away instead of always on-screen.
+  // ───────────────────────────────────────────────────────────
+  async function renderGroupedPanelMatrix(tableEl, template) {
+    const group = assetGroupsForTemplate(template).find(g => g.groupLabel === monthlyReportPanelGroup);
+    if (!group) {
+      tableEl.innerHTML = '<p class="muted">Panel group not found.</p>';
+      return;
+    }
+    tableEl.innerHTML = '<p class="muted">Loading…</p>';
+    let results;
+    try {
+      results = await loadItemResults();
+    } catch (e) {
+      tableEl.innerHTML = `<p class="error-text">Could not load: ${e.message}</p>`;
+      return;
+    }
+
+    const [year, month] = monthlyReportMonth.split('-').map(Number); // month is 1-based
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+
+    // Same "most recent submission wins" rule as logForDayShift above —
+    // a duplicate/resubmitted log for the same panel+day shouldn't be
+    // picked arbitrarily.
+    function logForPanelDay(assetId, day) {
+      const dateStr = new Date(year, month - 1, day).toDateString();
+      const matches = logsCache.filter(l => l.TemplateID === template.TemplateID && l.AssetID === assetId && new Date(l.Timestamp).toDateString() === dateStr);
+      if (!matches.length) return null;
+      if (matches.length === 1) return matches[0];
+      return matches.reduce((latest, l) => new Date(l.Timestamp) > new Date(latest.Timestamp) ? l : latest);
+    }
+    function statusFor(assetId, day) {
+      const log = logForPanelDay(assetId, day);
+      if (!log) return null;
+      const itemResults = results.filter(r => r.LogID === log.LogID);
+      const fail = itemResults.some(r => r.Result === 'Fail');
+      const hasNotes = !!(log.Notes && log.Notes.trim()) || itemResults.some(r => r.Remarks && r.Remarks.trim());
+      return { log, itemResults, fail, hasNotes };
+    }
+
+    const pdfRows = [];
+    const bodyRows = group.panels.map(panel => {
+      const due = dueInfo(template, panel.assetId);
+      const cells = dayHeaders.map(d => statusFor(panel.assetId, d));
+      const rowHtml = `<tr>
+        <td style="position:sticky;left:0;z-index:1;background:#fff;white-space:normal;word-wrap:break-word;">
+          ${escapeHtml(panel.label)}<br><span class="muted" style="font-size:0.65rem;${due.overdue ? 'color:#b3261e;font-weight:700;' : ''}">${due.overdue ? '⚠️ ' : ''}${escapeHtml(due.text)}</span>
+        </td>
+        ${cells.map(st => {
+          if (!st) return '<td class="muted" style="text-align:center;">—</td>';
+          const mark = st.fail ? '<span style="color:#b3261e;font-weight:700;">✕</span>' : '<span style="color:green;font-weight:700;">✓</span>';
+          const note = st.hasNotes ? '<span style="font-size:0.6rem;" title="Has remarks">📝</span>' : '';
+          return `<td style="text-align:center;"><button class="hs-panel-cell-btn" data-log-id="${escapeHtml(st.log.LogID)}" style="background:none;border:none;cursor:pointer;padding:2px;font:inherit;">${mark}${note}</button></td>`;
+        }).join('')}
+      </tr>`;
+      const pdfRow = { Panel: panel.label + (due.overdue ? ' (Overdue)' : '') };
+      dayHeaders.forEach((d, i) => {
+        const st = cells[i];
+        pdfRow[String(d)] = st ? (st.fail ? 'Fail' : 'Pass') + (st.hasNotes ? ' *' : '') : '';
+      });
+      pdfRows.push(pdfRow);
+      return rowHtml;
+    }).join('');
+
+    tableEl.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:8px;">
+        <p class="muted" style="margin:0;">${escapeHtml(categoryLabel(monthlyReportCategory))} — ${escapeHtml(template.Name)} — ${escapeHtml(group.groupLabel)}</p>
+        <button id="hs-monthly-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
+      <p class="muted" style="font-size:0.75rem;margin:0 0 8px;">✓ / ✕ = overall pass/fail for that panel that day &nbsp;·&nbsp; 📝 = has remarks — tap any mark for the full item breakdown &nbsp;·&nbsp; — = not inspected. Due status for each panel is shown under its name.</p>
+      <div class="card" style="max-width:100%;margin:0 0 12px;max-height:60vh;overflow:auto;-webkit-overflow-scrolling:touch;">
+        <table class="mvoa-table" style="table-layout:fixed;border-collapse:separate;border-spacing:0;">
+          <thead><tr>
+            <th style="width:170px;word-wrap:break-word;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Panel</th>
+            ${dayHeaders.map(d => `<th style="width:34px;position:sticky;top:0;z-index:3;background:#eef2f6;">${d}</th>`).join('')}
+          </tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+      <div id="hs-panel-detail" class="card hidden" style="max-width:600px;"></div>
+    `;
+
+    const detailEl = tableEl.querySelector('#hs-panel-detail');
+    tableEl.querySelectorAll('.hs-panel-cell-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const logId = btn.dataset.logId;
+        const log = logsCache.find(l => l.LogID === logId);
+        const itemResults = results.filter(r => r.LogID === logId);
+        detailEl.classList.remove('hidden');
+        detailEl.innerHTML = `
+          <div class="mvoa-row"><strong>${escapeHtml((log && (log.AssetName || log.AssetID)) || '')} — ${log ? formatDate(log.Timestamp) : ''}</strong>
+            <button id="hs-panel-detail-close" class="btn-secondary" style="font-size:0.75rem;padding:3px 8px;">✕ Close</button>
+          </div>
+          ${log && log.Notes ? `<p class="muted" style="margin:6px 0;">Overall Notes: ${escapeHtml(log.Notes)}</p>` : ''}
+          ${itemResults.length ? itemResults.map(r => {
+            const item = itemsCache.find(i => i.ItemID === r.ItemID);
+            const resultHtml = r.Result === 'Fail' ? '<span style="color:#b3261e;font-weight:700;">✕ Fail</span>'
+              : r.Result === 'Pass' ? '<span style="color:green;font-weight:700;">✓ Pass</span>'
+              : escapeHtml(r.Result);
+            return `<div style="padding:5px 0;border-top:1px solid var(--border);">
+              <div class="mvoa-row"><span style="font-size:0.85rem;">${escapeHtml(item ? item.CheckItem : r.ItemID)}</span><span style="font-size:0.85rem;">${resultHtml}</span></div>
+              ${r.Remarks ? `<p class="muted" style="font-size:0.78rem;margin:2px 0;">${escapeHtml(r.Remarks)}</p>` : ''}
+            </div>`;
+          }).join('') : '<p class="muted">No item results found.</p>'}
+        `;
+        detailEl.querySelector('#hs-panel-detail-close').addEventListener('click', () => {
+          detailEl.classList.add('hidden');
+          detailEl.innerHTML = '';
+        });
+        detailEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    });
+
+    tableEl.querySelector('#hs-monthly-pdf').addEventListener('click', () => {
+      const pdfColumns = ['Panel', ...dayHeaders.map(String)];
+      const title = `Monthly Report — ${categoryLabel(monthlyReportCategory)} — ${template.Name} — ${group.groupLabel} — ${monthlyReportMonth}`;
       printTablePdf(title, pdfColumns, pdfRows);
     });
   }
