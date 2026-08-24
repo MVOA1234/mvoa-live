@@ -1146,12 +1146,20 @@
 
     // Agency and Staff Name stay pinned to the left edge while scrolling
     // through a full month of day columns (same sticky pattern as the
-    // Attendance Log/Agencies/Staff tables) — table-layout:fixed with
-    // explicit widths on every column keeps the two sticky columns'
-    // `left` offsets (0 / 80px) matching their actual rendered width, so
-    // they stay flush against each other instead of gapping or overlapping.
+    // Attendance Log/Agencies/Staff tables). table-layout:fixed was tried
+    // here to lock in the sticky columns' widths, but this table's first
+    // <thead> row is a single colspan title cell with no per-column width
+    // of its own — with fixed layout, browsers don't reliably fall back to
+    // the second row (the real column headers) to size each column from,
+    // so every column collapsed to near-zero width and the day numbers
+    // rendered on top of the Agency/Name text instead of beside it. Left
+    // at the default auto layout (same as the working Check-in/Check-out
+    // Times grid below, which has the identical title-row shape and was
+    // never broken), the browser sizes columns from actual cell content —
+    // the inline `width` hints still apply as sizing hints, close enough
+    // to keep the two sticky columns' left:0/80px offsets lined up.
     return `
-      <table class="mvoa-table att-pa-grid" style="table-layout:fixed;border-collapse:separate;border-spacing:0;">
+      <table class="mvoa-table att-pa-grid">
         <thead>
           <tr><th colspan="${2 + daysInMonth}" style="text-align:center;">Attendance Record for the Month of ${escapeHtml(monthLabel)}</th></tr>
           <tr><th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:80px;">Agency</th><th style="position:sticky;top:0;left:80px;z-index:3;background:#eef2f6;width:140px;">Staff Name</th>${dayHeaders.map(h => `<th style="position:sticky;top:0;z-index:2;background:#eef2f6;width:36px;text-align:center;">${h}</th>`).join('')}</tr>
