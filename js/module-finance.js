@@ -169,7 +169,17 @@ const FinanceModule = (function () {
     // other. Blank = an unread note exists (once at least one note has
     // been added); reset to blank every time a note is appended; set to
     // now the first time anyone opens the Notes thread after that.
-    'NotesOpenedAt'];
+    'NotesOpenedAt',
+    // Only populated when RequestType === 'PaymentRequest' AND no
+    // Contract was linked — a direct reference to the RequestID of the
+    // Schedule A/B/C Approval-to-Spend request this payment is against,
+    // for adhoc/one-off/CAPEX/Miscellaneous payments that never went
+    // through the Contracts registry (no Work Order/AMC/agreement sitting
+    // behind them). A single Approval-to-Spend can legitimately be linked
+    // by more than one Payment Request over time (CAPEX installments, an
+    // AMC's multiple payment cycles), so this is never "consumed" by a
+    // link — just referenced.
+    'LinkedSpendRequestID'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -218,7 +228,19 @@ const FinanceModule = (function () {
   // fake approver columns. See computePaymentRequestState().
   const PAYMENT_RULE_COLS = ['PaymentType','FMRequired','OpsHeadRequired',
     'SecretaryRequired','TreasurerRequired','PresidentRequired','MinimumDocs',
-    'RequiresContractLookup','Notes'];
+    'RequiresContractLookup','Notes',
+    // Which Schedule A/B/C spend Category(ies) this Payment Type is paid
+    // against — comma-separated (a single Payment Type can cover several
+    // spend categories, e.g. one "Utility Payments" type for several
+    // separate utility-account categories). Drives both the Contract/
+    // Approval-to-Spend link pickers on New Payment Request (filtered to
+    // only show items registered/approved under a matching category) and
+    // RequiresContractLookup's enforcement. Left blank for Payment Types
+    // with no such upstream spend category (Salaries) or where mapping
+    // hasn't been filled in yet — the link pickers fall back to showing
+    // everything, unfiltered, rather than silently hiding the right
+    // option because of an incomplete mapping.
+    'SpendCategory'];
 
   let rulesCache = [];
   let requestsCache = [];
@@ -1548,8 +1570,31 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   let paymentPendingAttachments = [];
   let selectedContractId = '';
+  // The direct "Link to Approval to Spend" counterpart to selectedContractId
+  // — mutually exclusive with it (picking one clears the other, see
+  // refreshContractPicker/refreshSpendRequestPicker below): a Contract's
+  // own ApprovedRequestID already carries the spend-approval reference, so
+  // there's nothing meaningful about linking both at once.
+  let selectedLinkedSpendRequestId = '';
   let sentBackPendingAttachments = {}; // { [requestId]: pendingAttachment[] } — see renderSentBack
   let paymentIsGoodsProcurement = false;
+
+  // Which Schedule A/B/C spend Category(ies) a Payment Type is paid
+  // against — see the SpendCategory column comment on PAYMENT_RULE_COLS.
+  function spendCategoriesForPaymentType(paymentType) {
+    const rule = paymentRuleFor(paymentType);
+    return (rule.SpendCategory || '').split(',').map(s => s.trim()).filter(Boolean);
+  }
+  // Approval-to-Spend requests eligible for the direct-link picker — any
+  // Schedule A/B/C request (never a PaymentRequest itself) that's fully
+  // Approved. Not narrowed to "not yet linked to a payment": an AMC or a
+  // CAPEX approval can legitimately back more than one payment over its
+  // life (installments, a multi-year AMC's several payment cycles), so
+  // the same Approval-to-Spend has to stay pickable more than once.
+  function eligibleSpendRequestsForLinking() {
+    return requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
+      .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
+  }
 
   function renderPaymentRequestForm(body, container) {
     if (!paymentRulesCache.length) {
@@ -1566,6 +1611,7 @@ const FinanceModule = (function () {
           </select>
         </label>
         <div id="pr-contract-wrap"></div>
+        <div id="pr-spend-wrap"></div>
         <label>Amount (₹)
           <input id="pr-amount" type="number" min="0" step="1" placeholder="0" style="-moz-appearance:textfield;" onwheel="this.blur()">
         </label>
@@ -1588,6 +1634,7 @@ const FinanceModule = (function () {
     `;
     paymentPendingAttachments = [];
     selectedContractId = '';
+    selectedLinkedSpendRequestId = '';
     paymentIsGoodsProcurement = false;
     renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, [], 3);
 
@@ -1595,18 +1642,30 @@ const FinanceModule = (function () {
     const amtEl = body.querySelector('#pr-amount');
     const vendorEl = body.querySelector('#pr-vendor');
     const contractWrap = body.querySelector('#pr-contract-wrap');
+    const spendWrap = body.querySelector('#pr-spend-wrap');
     const previewEl = body.querySelector('#pr-rule-preview');
     const labelEl = body.querySelector('#pr-attachments-label');
 
+    // Both pickers are filtered to the currently-selected Payment Type's
+    // mapped spend Category(ies) (see SpendCategory) — so a payment filed
+    // as "AMC Payments" simply can't be linked to a CAPEX-approved
+    // Contract or Approval-to-Spend by mistake; the option never appears.
+    // If SpendCategory hasn't been filled in yet for this Payment Type,
+    // both fall back to showing everything unfiltered rather than
+    // silently hiding the right option because of an incomplete mapping.
     function refreshContractPicker() {
       if (!contractsCache.length) { contractWrap.innerHTML = ''; return; }
+      const type = typeEl.value;
+      const mapped = type ? spendCategoriesForPaymentType(type) : [];
+      const pool = mapped.length ? contractsCache.filter(c => mapped.includes(c.Category)) : contractsCache;
       contractWrap.innerHTML = `
         <label>Link to an existing Contract (optional)
           <select id="pr-contract">
             <option value="">— None / enter vendor manually —</option>
-            ${contractsCache.slice().sort((a, b) => (a.Vendor || '').localeCompare(b.Vendor || '')).map(c => `<option value="${escapeHtml(c.ContractID)}">${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)}${c.EndDate ? ' (valid to ' + escapeHtml(c.EndDate) + ')' : ' (open-ended)'}</option>`).join('')}
+            ${pool.slice().sort((a, b) => (a.Vendor || '').localeCompare(b.Vendor || '')).map(c => `<option value="${escapeHtml(c.ContractID)}" ${c.ContractID===selectedContractId?'selected':''}>${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)}${c.EndDate ? ' (valid to ' + escapeHtml(c.EndDate) + ')' : ' (open-ended)'}</option>`).join('')}
           </select>
         </label>
+        ${type && !mapped.length ? `<p class="muted" style="margin:2px 0 6px;font-size:0.75rem;">Showing all contracts — no spend-category mapping set yet for "${escapeHtml(type)}" (FinancePaymentRules.SpendCategory).</p>` : ''}
         <div id="pr-contract-status"></div>`;
       const sel = contractWrap.querySelector('#pr-contract');
       const statusEl = contractWrap.querySelector('#pr-contract-status');
@@ -1614,6 +1673,11 @@ const FinanceModule = (function () {
         selectedContractId = sel.value;
         const c = contractsCache.find(x => x.ContractID === selectedContractId);
         if (!c) { statusEl.innerHTML = ''; return; }
+        // Mutually exclusive with the Approval-to-Spend picker below — a
+        // Contract's own ApprovedRequestID already carries the spend-
+        // approval reference, so linking both at once would be redundant.
+        selectedLinkedSpendRequestId = '';
+        refreshSpendRequestPicker();
         vendorEl.value = c.Vendor;
         const today = new Date(); today.setHours(0, 0, 0, 0);
         const expired = c.EndDate && new Date(c.EndDate) < today;
@@ -1621,6 +1685,37 @@ const FinanceModule = (function () {
         statusEl.innerHTML = (expired || terminated) ? `
           <p class="error-text" style="margin:4px 0;">⚠️ This contract ${terminated ? 'is marked Terminated' : `expired on ${escapeHtml(c.EndDate)}`}. Per Schedule D, payment requires an approved commitment — check with the Secretary/Treasurer before proceeding, or renew the contract via New Request first.</p>
         ` : `<p class="muted" style="margin:4px 0;color:green;">✓ Contract valid${c.EndDate ? ' until ' + escapeHtml(c.EndDate) : ' (open-ended)'}.</p>`;
+      });
+    }
+
+    // Direct counterpart to refreshContractPicker — for adhoc/one-off/
+    // CAPEX/Miscellaneous payments that have a real Approval-to-Spend
+    // behind them but never went through the Contracts registry (no
+    // Work Order/AMC/agreement to point to instead).
+    function refreshSpendRequestPicker() {
+      const eligible = eligibleSpendRequestsForLinking();
+      if (!eligible.length) { spendWrap.innerHTML = ''; return; }
+      const type = typeEl.value;
+      const mapped = type ? spendCategoriesForPaymentType(type) : [];
+      const pool = mapped.length ? eligible.filter(r => mapped.includes(r.Category)) : eligible;
+      spendWrap.innerHTML = `
+        <label>Link to an Approval to Spend (optional — for payments with no Contract/Work Order)
+          <select id="pr-spend-request">
+            <option value="">— None —</option>
+            ${pool.map(r => `<option value="${escapeHtml(r.RequestID)}" ${r.RequestID===selectedLinkedSpendRequestId?'selected':''}>${escapeHtml(r.RequestID)} — ${escapeHtml(r.Category)} — ${escapeHtml(r.Vendor || '')} — ${formatAmount(r.Amount)} (${formatDate(r.RequestedDate)})</option>`).join('')}
+          </select>
+        </label>
+        ${type && !mapped.length ? `<p class="muted" style="margin:2px 0 6px;font-size:0.75rem;">Showing all approved requests — no spend-category mapping set yet for "${escapeHtml(type)}" (FinancePaymentRules.SpendCategory).</p>` : ''}`;
+      const sel = spendWrap.querySelector('#pr-spend-request');
+      sel.addEventListener('change', () => {
+        selectedLinkedSpendRequestId = sel.value;
+        if (selectedLinkedSpendRequestId) {
+          // Mutually exclusive with the Contract picker above.
+          selectedContractId = '';
+          refreshContractPicker();
+          const r = requestsCache.find(x => x.RequestID === selectedLinkedSpendRequestId);
+          if (r && r.Vendor) vendorEl.value = r.Vendor;
+        }
       });
     }
 
@@ -1720,9 +1815,20 @@ const FinanceModule = (function () {
       renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, docs, 3);
     }
 
-    typeEl.addEventListener('change', () => { refreshPreview(); });
+    typeEl.addEventListener('change', () => {
+      // Changing Payment Type re-scopes both link pickers to a different
+      // spend category — whatever was previously selected may not even
+      // be in the new list, so clear both rather than leave a stale,
+      // now-invisible selection silently still attached to the request.
+      selectedContractId = '';
+      selectedLinkedSpendRequestId = '';
+      refreshPreview();
+      refreshContractPicker();
+      refreshSpendRequestPicker();
+    });
     amtEl.addEventListener('input', refreshPreview);
     refreshContractPicker();
+    refreshSpendRequestPicker();
 
     body.querySelector('#pr-submit-btn').addEventListener('click', () => submitPaymentRequest(body, container));
   }
@@ -1780,13 +1886,22 @@ const FinanceModule = (function () {
       errEl.textContent = `This payment type requires at least ${minAttachments} attachment(s): ${docs.join(', ')}.`;
       return;
     }
+    if (rule.RequiresContractLookup === 'Yes' && !selectedContractId && !selectedLinkedSpendRequestId) {
+      errEl.textContent = 'This payment type requires linking to a Contract or an Approval to Spend before it can be submitted.';
+      return;
+    }
 
     submitBtn.disabled = true;
     submitBtn.textContent = 'Submitting…';
 
     const user = MVOA.getUser();
     const existingIds = requestsCache.map(r => r.RequestID);
-    const requestId = MVOA.nextId('FIN', existingIds);
+    // ATP ("Approval To Pay") — distinct from spend approvals' ATS prefix,
+    // so an ID quoted on a document unambiguously says which kind of
+    // approval it is. Both draw from the same requestsCache id pool;
+    // MVOA.nextId only matches its own prefix so this doesn't collide
+    // with — or renumber — existing legacy "FIN-####" rows.
+    const requestId = MVOA.nextId('ATP', existingIds);
     const now = new Date().toISOString();
 
     const attachmentUrls = ['', '', ''];
@@ -1817,7 +1932,8 @@ const FinanceModule = (function () {
       Status: initialStatus, QuorumRequired: '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
-      StageEnteredAt: now, StageOpenedAt: '', PettyCashType: '', ContractID: selectedContractId
+      StageEnteredAt: now, StageOpenedAt: '', PettyCashType: '', ContractID: selectedContractId,
+      LinkedSpendRequestID: selectedLinkedSpendRequestId
     };
 
     try {
@@ -1850,6 +1966,7 @@ const FinanceModule = (function () {
 
     paymentPendingAttachments = [];
     selectedContractId = '';
+    selectedLinkedSpendRequestId = '';
     paymentIsGoodsProcurement = false;
     await loadAll(true);
     currentView = 'mine';
@@ -2428,7 +2545,12 @@ const FinanceModule = (function () {
 
     const user = MVOA.getUser();
     const existingIds = requestsCache.map(r => r.RequestID);
-    const requestId = MVOA.nextId('FIN', existingIds);
+    // ATS ("Approval To Spend") — distinct from payment requests' ATP
+    // prefix, so an ID quoted on a Work Order/AMC/agreement unambiguously
+    // says which kind of approval it is. See the ATP comment in
+    // doSubmitPaymentRequest for why this is safe against existing
+    // legacy "FIN-####" rows.
+    const requestId = MVOA.nextId('ATS', existingIds);
     const now = new Date().toISOString();
 
     const attachmentUrls = ['', '', ''];
@@ -2744,6 +2866,7 @@ const FinanceModule = (function () {
         </div>
         ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted ${formatDate(r.RequestedDate)}</p>
+        ${paymentReferenceLineHtml(r)}
         ${r.Status === 'Rejected' ? rejectionDetailHtml(r, approvals) : ''}
         ${hasUnreadNote(r, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
         <div style="display:flex;gap:8px;margin-top:6px;">
@@ -2890,7 +3013,7 @@ const FinanceModule = (function () {
     const newCards = cards.filter(c => isItemNew(c.req));
     const openCards = cards.filter(c => !isItemNew(c.req));
     cardsEl.innerHTML = newCards.map(({ req, state }) =>
-      newItemCardHtml(req, `<p class="muted" style="margin:4px 0;">${escapeHtml(state.stage)} approval${req.Vendor ? ' · To: ' + escapeHtml(req.Vendor) : ''}</p>`)
+      newItemCardHtml(req, `<p class="muted" style="margin:4px 0;">${escapeHtml(state.stage)} approval${req.Vendor ? ' · To: ' + escapeHtml(req.Vendor) : ''}</p>${paymentReferenceLineHtml(req)}`)
     ).join('');
     wireNewItemCards(cardsEl, () => render(container));
 
@@ -2906,6 +3029,7 @@ const FinanceModule = (function () {
         ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
         ${req.Description ? `<p class="muted" style="margin:4px 0;">${escapeHtml(req.Description)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
+        ${paymentReferenceLineHtml(req)}
         ${attachmentLinksHtml(req)}
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
         ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
@@ -2952,6 +3076,28 @@ const FinanceModule = (function () {
     const urls = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3];
     const links = urls.filter(Boolean).map((url, i) => `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>`).join(' · ');
     return links ? `<p class="muted" style="font-size:0.8rem;">${links}</p>` : '';
+  }
+
+  // The linked Contract or Approval-to-Spend reference for a Payment
+  // Request — shown wherever an approver or the requester reviews one, so
+  // "does this payment actually have an approval to spend behind it?" is
+  // visible instead of silently stored (ContractID/LinkedSpendRequestID
+  // used to be write-only). A payment with neither is flagged, not
+  // blocked — legacy agreements and Salaries/Utility/Petty Cash payments
+  // legitimately have no such reference.
+  function paymentReferenceLineHtml(req) {
+    if (req.RequestType !== 'PaymentRequest') return '';
+    if (req.ContractID) {
+      const c = contractsCache.find(x => x.ContractID === req.ContractID);
+      if (c) {
+        return `<p style="margin:4px 0;font-size:0.8rem;">🔗 Contract: <strong>${escapeHtml(c.Vendor)}</strong> — ${escapeHtml(c.Nature || c.Category)} (${escapeHtml(c.ContractID)})${c.ApprovedRequestID ? ` — Approval to Spend: <strong>${escapeHtml(c.ApprovedRequestID)}</strong>` : ` — <span style="color:#b8860b;">legacy agreement, no system Approval to Spend on file</span>`}</p>`;
+      }
+    }
+    if (req.LinkedSpendRequestID) {
+      const r = requestsCache.find(x => x.RequestID === req.LinkedSpendRequestID);
+      return `<p style="margin:4px 0;font-size:0.8rem;">🔗 Approval to Spend: <strong>${escapeHtml(req.LinkedSpendRequestID)}</strong>${r ? ` — ${escapeHtml(r.Category)} — ${escapeHtml(r.Vendor || '')} — ${formatAmount(r.Amount)} (approved ${formatDate(r.RequestedDate)})` : ''}</p>`;
+    }
+    return `<p style="margin:4px 0;font-size:0.8rem;color:#b3261e;">⚠️ No linked Contract or Approval to Spend on file.</p>`;
   }
 
   // Picks the right stage engine by RequestType — Schedule A/B/C spend
