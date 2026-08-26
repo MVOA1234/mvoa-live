@@ -1556,28 +1556,43 @@
     }
   }
 
-  // Check-in/out via 4-digit code + a single low-resolution photo snapshot
-  // — replaces the old QR-scan station. QR recognition required decoding
-  // every camera frame (even throttled, still tens of times a second)
-  // through jsQR, which stayed noticeably slow on mid-range phones because
-  // jsQR's cost scales with how many frames it has to examine before
-  // finding a code. A 4-digit code needs no image processing to identify
-  // staff at all — it's instant — and the camera is still used, but only
-  // to grab ONE frame right after the code is confirmed, purely for the
-  // same photo-evidence purpose the old flow's captureFrameAsFile served.
-  // If camera access fails or is denied, check-in/out still proceeds
-  // without a photo rather than blocking attendance over it (same
-  // fail-open reasoning processAttendanceScan already uses for a failed
-  // photo upload).
+  // Check-in/out via 4-digit code, with an optional single low-resolution
+  // photo snapshot — replaces the old QR-scan station. QR recognition
+  // required decoding every camera frame (even throttled, still tens of
+  // times a second) through jsQR, which stayed noticeably slow on
+  // mid-range phones because jsQR's cost scales with how many frames it
+  // has to examine before finding a code. A 4-digit code needs no image
+  // processing to identify staff at all — it's instant.
+  //
+  // Two modes, picked via tabs at the top of the modal:
+  //   'camera' (default) — camera runs live, ONE frame is grabbed right
+  //      after the code is confirmed, purely for photo-evidence purposes.
+  //   'code'  — camera is never started at all.
+  // Added because the main gate's wifi is weak enough that even a single
+  // low-res photo's background upload can bog down the connection and
+  // slow down getting a queue of staff checked in/out — Security can flip
+  // to Code-only on the spot without losing the ability to log
+  // attendance. lastCheckInOutMode remembers the choice for the rest of
+  // the session so it doesn't need reselecting on every scan.
+  //
+  // If camera access fails or is denied while in Code + Camera mode,
+  // check-in/out still proceeds without a photo rather than blocking
+  // attendance over it (same fail-open reasoning processAttendanceScan
+  // already uses for a failed photo upload).
+  let lastCheckInOutMode = 'camera'; // 'camera' | 'code' — remembered across modal opens this session
   function openCheckInOut(host, user) {
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
       <div class="ops-qr-box">
         <h3 style="margin-top:0;">Check In / Out</h3>
+        <div class="ops-tabs" style="margin-bottom:10px;">
+          <button id="att-mode-camera-btn" class="ops-tab-btn" data-mode="camera">📷 Code + Camera</button>
+          <button id="att-mode-code-btn" class="ops-tab-btn" data-mode="code">🔢 Code Only</button>
+        </div>
         <video id="att-code-video" autoplay playsinline muted style="display:none;width:100%;max-width:280px;border-radius:8px;margin:6px auto 10px;background:#000;"></video>
         <canvas id="att-code-canvas" style="display:none;"></canvas>
-        <p class="muted" id="att-code-camstatus" style="font-size:0.8rem;">Starting camera…</p>
+        <p class="muted" id="att-code-camstatus" style="font-size:0.8rem;"></p>
         <input type="text" id="att-code-input" inputmode="numeric" maxlength="4" placeholder="0000" style="width:100%;max-width:200px;font-size:28px;letter-spacing:10px;text-align:center;font-family:ui-monospace,Menlo,monospace;padding:10px;margin:10px 0;">
         <p class="muted" id="att-code-status">Staff types their code, then Submit.</p>
         <div class="mvoa-row">
@@ -1592,27 +1607,50 @@
     const camStatusEl = modal.querySelector('#att-code-camstatus');
     const video = modal.querySelector('#att-code-video');
     const canvas = modal.querySelector('#att-code-canvas');
+    const cameraBtn = modal.querySelector('#att-mode-camera-btn');
+    const codeBtn = modal.querySelector('#att-mode-code-btn');
     let stream = null;
+    let mode = lastCheckInOutMode;
     input.focus();
 
-    // Start the camera as soon as the modal opens (while the staff member
-    // is still typing their code) so it's warmed up and visibly live —
-    // capture just grabs a frame from the already-running feed instead of
-    // requesting access on submit, which is both faster and makes it clear
-    // a photo option is actually there, not just the code box.
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
-      .then(s => {
-        stream = s;
-        video.srcObject = s;
-        video.style.display = 'block';
-        camStatusEl.textContent = 'Camera ready — a photo is captured automatically on Submit.';
-      })
-      .catch(() => {
-        camStatusEl.textContent = 'Camera unavailable — check-in/out will proceed without a photo.';
-      });
+    // Start the camera as soon as Code + Camera mode is active (while the
+    // staff member is still typing their code) so it's warmed up and
+    // visibly live — capture just grabs a frame from the already-running
+    // feed instead of requesting access on submit, which is both faster
+    // and makes it clear a photo option is actually there, not just the
+    // code box. Never called at all in Code-only mode.
+    function startCamera() {
+      camStatusEl.textContent = 'Starting camera…';
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
+        .then(s => {
+          if (mode !== 'camera') { s.getTracks().forEach(t => t.stop()); return; } // switched to Code-only while permission was pending
+          stream = s;
+          video.srcObject = s;
+          video.style.display = 'block';
+          camStatusEl.textContent = 'Camera ready — a photo is captured automatically on Submit.';
+        })
+        .catch(() => {
+          camStatusEl.textContent = 'Camera unavailable — check-in/out will proceed without a photo.';
+        });
+    }
+    function stopCamera() {
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      video.style.display = 'none';
+      camStatusEl.textContent = '';
+    }
+    function setMode(m) {
+      mode = m;
+      lastCheckInOutMode = m;
+      cameraBtn.classList.toggle('active', m === 'camera');
+      codeBtn.classList.toggle('active', m === 'code');
+      if (m === 'camera') startCamera(); else stopCamera();
+    }
+    cameraBtn.addEventListener('click', () => setMode('camera'));
+    codeBtn.addEventListener('click', () => setMode('code'));
+    setMode(mode); // apply the remembered (or default) mode as soon as the modal opens
 
     async function stop() {
-      if (stream) stream.getTracks().forEach(t => t.stop());
+      stopCamera();
       modal.remove();
       // Writes go straight to the Sheet without touching allLogsCache —
       // reload it now so the register reflects what was just logged.
@@ -1624,9 +1662,11 @@
     // One low-res frame, same square-crop + JPEG compression the old QR
     // flow used — grabbed from the already-live stream, so this is
     // near-instant instead of waiting on a fresh getUserMedia() call.
+    // Resolves immediately with null in Code-only mode, or if the stream
+    // never came up (denied/unavailable) — both are fine, see header comment.
     function captureOnePhoto() {
       return new Promise((resolve) => {
-        if (!stream || !video.videoWidth) { resolve(null); return; }
+        if (mode !== 'camera' || !stream || !video.videoWidth) { resolve(null); return; }
         const side = Math.min(video.videoWidth, video.videoHeight);
         canvas.width = 320; canvas.height = 320;
         canvas.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
@@ -1652,7 +1692,7 @@
       if (!staff) { statusEl.textContent = 'No active staff member has that code.'; input.value = ''; return; }
       isSubmitting = true;
       submitBtn.disabled = true;
-      statusEl.textContent = 'Capturing photo…';
+      statusEl.textContent = mode === 'camera' ? 'Capturing photo…' : 'Processing…';
       try {
         const photoFile = await captureOnePhoto();
         statusEl.textContent = 'Processing…';
