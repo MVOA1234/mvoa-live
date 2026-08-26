@@ -1556,47 +1556,50 @@
     }
   }
 
-  // Check-in/out via 4-digit code, with an optional single low-resolution
-  // photo snapshot — replaces the old QR-scan station. QR recognition
-  // required decoding every camera frame (even throttled, still tens of
-  // times a second) through jsQR, which stayed noticeably slow on
-  // mid-range phones because jsQR's cost scales with how many frames it
-  // has to examine before finding a code. A 4-digit code needs no image
-  // processing to identify staff at all — it's instant.
+  // Check-in/out via 4-digit code — replaces the old QR-scan station. QR
+  // recognition required decoding every camera frame (even throttled,
+  // still tens of times a second) through jsQR, which stayed noticeably
+  // slow on mid-range phones because jsQR's cost scales with how many
+  // frames it has to examine before finding a code. A 4-digit code needs
+  // no image processing to identify staff at all — it's instant.
   //
-  // Two modes, picked via tabs at the top of the modal:
-  //   'camera' (default) — camera runs live, ONE frame is grabbed right
-  //      after the code is confirmed, purely for photo-evidence purposes.
-  //   'code'  — camera is never started at all.
-  // Added because the main gate's wifi is weak enough that even a single
-  // low-res photo's background upload can bog down the connection and
-  // slow down getting a queue of staff checked in/out — Security can flip
-  // to Code-only on the spot without losing the ability to log
-  // attendance. lastCheckInOutMode remembers the choice for the rest of
-  // the session so it doesn't need reselecting on every scan.
-  //
-  // If camera access fails or is denied while in Code + Camera mode,
-  // check-in/out still proceeds without a photo rather than blocking
-  // attendance over it (same fail-open reasoning processAttendanceScan
-  // already uses for a failed photo upload).
-  let lastCheckInOutMode = 'camera'; // 'camera' | 'code' — remembered across modal opens this session
+  // REVISED 27-Aug-2026 (per user): the earlier design offered a "Code +
+  // Camera" mode that snapped a photo of whoever was standing at the
+  // gate as evidence, alongside a "Code Only" mode for when the gate's
+  // weak wifi made even a low-res background photo upload bog things
+  // down. That's been replaced entirely with a look-up-and-confirm flow:
+  // typing the 4-digit code immediately looks up the staff member and
+  // shows their ENROLLED reference photo (from Staff.PhotoURL, the one
+  // captured when they were registered) on screen — Security compares
+  // that photo against the person actually standing there, and only
+  // taps "Confirm" to write the check-in/out once satisfied it's really
+  // them. This catches someone using a colleague's code (accidentally or
+  // not) BEFORE it's logged, which a snapshot-for-later-review photo
+  // never really did (nobody was reviewing those unless something had
+  // already gone wrong). No camera is used anywhere in this flow any
+  // more — nothing to request permission for, nothing to fail open on a
+  // weak connection.
   function openCheckInOut(host, user) {
     const modal = document.createElement('div');
     modal.className = 'ops-qr-modal';
     modal.innerHTML = `
       <div class="ops-qr-box">
         <h3 style="margin-top:0;">Check In / Out</h3>
-        <div class="ops-tabs" style="margin-bottom:10px;">
-          <button id="att-mode-camera-btn" class="ops-tab-btn" data-mode="camera">📷 Code + Camera</button>
-          <button id="att-mode-code-btn" class="ops-tab-btn" data-mode="code">🔢 Code Only</button>
-        </div>
-        <video id="att-code-video" autoplay playsinline muted style="display:none;width:100%;max-width:280px;border-radius:8px;margin:6px auto 10px;background:#000;"></video>
-        <canvas id="att-code-canvas" style="display:none;"></canvas>
-        <p class="muted" id="att-code-camstatus" style="font-size:0.8rem;"></p>
         <input type="text" id="att-code-input" inputmode="numeric" maxlength="4" placeholder="0000" style="width:100%;max-width:200px;font-size:28px;letter-spacing:10px;text-align:center;font-family:ui-monospace,Menlo,monospace;padding:10px;margin:10px 0;">
-        <p class="muted" id="att-code-status">Staff types their code, then Submit.</p>
+        <p class="muted" id="att-code-status">Staff types their code — their photo appears below to check.</p>
+        <div id="att-code-match" style="display:none;margin:6px 0 14px;padding:12px;border:1px solid #e0e0e0;border-radius:8px;background:#fafafa;">
+          <div style="display:flex;gap:12px;align-items:center;">
+            <div id="att-code-match-photo" style="width:84px;height:84px;border-radius:8px;overflow:hidden;flex:0 0 auto;background:#eee;display:flex;align-items:center;justify-content:center;"></div>
+            <div style="text-align:left;">
+              <div id="att-code-match-name" style="font-weight:700;font-size:1.05rem;"></div>
+              <div id="att-code-match-role" class="muted" style="font-size:0.85rem;"></div>
+            </div>
+          </div>
+          <p class="muted" style="font-size:0.78rem;margin:8px 0 0;">Check this photo against the person in front of you before confirming. If it doesn't match, tap Clear and do not check them in.</p>
+        </div>
         <div class="mvoa-row">
-          <button id="att-code-submit" class="btn-primary">Submit</button>
+          <button id="att-code-submit" class="btn-primary" disabled>Confirm &amp; Check In/Out</button>
+          <button id="att-code-clear" class="btn-secondary">Clear</button>
           <button id="att-code-cancel" class="btn-secondary">Close</button>
         </div>
       </div>
@@ -1604,53 +1607,15 @@
     document.body.appendChild(modal);
     const input = modal.querySelector('#att-code-input');
     const statusEl = modal.querySelector('#att-code-status');
-    const camStatusEl = modal.querySelector('#att-code-camstatus');
-    const video = modal.querySelector('#att-code-video');
-    const canvas = modal.querySelector('#att-code-canvas');
-    const cameraBtn = modal.querySelector('#att-mode-camera-btn');
-    const codeBtn = modal.querySelector('#att-mode-code-btn');
-    let stream = null;
-    let mode = lastCheckInOutMode;
+    const matchBox = modal.querySelector('#att-code-match');
+    const matchPhoto = modal.querySelector('#att-code-match-photo');
+    const matchName = modal.querySelector('#att-code-match-name');
+    const matchRole = modal.querySelector('#att-code-match-role');
+    const submitBtn = modal.querySelector('#att-code-submit');
+    let matchedStaff = null;
     input.focus();
 
-    // Start the camera as soon as Code + Camera mode is active (while the
-    // staff member is still typing their code) so it's warmed up and
-    // visibly live — capture just grabs a frame from the already-running
-    // feed instead of requesting access on submit, which is both faster
-    // and makes it clear a photo option is actually there, not just the
-    // code box. Never called at all in Code-only mode.
-    function startCamera() {
-      camStatusEl.textContent = 'Starting camera…';
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
-        .then(s => {
-          if (mode !== 'camera') { s.getTracks().forEach(t => t.stop()); return; } // switched to Code-only while permission was pending
-          stream = s;
-          video.srcObject = s;
-          video.style.display = 'block';
-          camStatusEl.textContent = 'Camera ready — a photo is captured automatically on Submit.';
-        })
-        .catch(() => {
-          camStatusEl.textContent = 'Camera unavailable — check-in/out will proceed without a photo.';
-        });
-    }
-    function stopCamera() {
-      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-      video.style.display = 'none';
-      camStatusEl.textContent = '';
-    }
-    function setMode(m) {
-      mode = m;
-      lastCheckInOutMode = m;
-      cameraBtn.classList.toggle('active', m === 'camera');
-      codeBtn.classList.toggle('active', m === 'code');
-      if (m === 'camera') startCamera(); else stopCamera();
-    }
-    cameraBtn.addEventListener('click', () => setMode('camera'));
-    codeBtn.addEventListener('click', () => setMode('code'));
-    setMode(mode); // apply the remembered (or default) mode as soon as the modal opens
-
     async function stop() {
-      stopCamera();
       modal.remove();
       // Writes go straight to the Sheet without touching allLogsCache —
       // reload it now so the register reflects what was just logged.
@@ -1659,52 +1624,76 @@
     }
     modal.querySelector('#att-code-cancel').addEventListener('click', stop);
 
-    // One low-res frame, same square-crop + JPEG compression the old QR
-    // flow used — grabbed from the already-live stream, so this is
-    // near-instant instead of waiting on a fresh getUserMedia() call.
-    // Resolves immediately with null in Code-only mode, or if the stream
-    // never came up (denied/unavailable) — both are fine, see header comment.
-    function captureOnePhoto() {
-      return new Promise((resolve) => {
-        if (mode !== 'camera' || !stream || !video.videoWidth) { resolve(null); return; }
-        const side = Math.min(video.videoWidth, video.videoHeight);
-        canvas.width = 320; canvas.height = 320;
-        canvas.getContext('2d').drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, 320, 320);
-        canvas.toBlob(blob => {
-          resolve(blob ? new File([blob], 'checkin.jpg', { type: 'image/jpeg' }) : null);
-        }, 'image/jpeg', 0.6);
-      });
+    // Resets back to a blank code entry — used after a Clear tap, after a
+    // successful confirm (ready for the next person), and whenever the
+    // code box no longer holds a valid 4-digit match.
+    function resetMatch() {
+      matchedStaff = null;
+      matchBox.style.display = 'none';
+      submitBtn.disabled = true;
     }
+    // preserveStatus=true keeps whatever's currently shown in statusEl
+    // (e.g. the "✅ Name — CHECK-IN at ..." result) instead of stomping
+    // it with the generic prompt — used right after a successful confirm,
+    // so the guard actually gets to read the result before the box goes
+    // blank and ready for the next person.
+    function clearAll(preserveStatus) {
+      input.value = '';
+      resetMatch();
+      if (!preserveStatus) statusEl.textContent = 'Staff types their code — their photo appears below to check.';
+      input.focus();
+    }
+    modal.querySelector('#att-code-clear').addEventListener('click', () => clearAll(false));
 
-    const submitBtn = modal.querySelector('#att-code-submit');
+    // Looks the code up and shows the enrolled photo the moment 4 digits
+    // are entered — no separate "look up" step, so the photo is on
+    // screen as fast as possible for Security to check against the
+    // person waiting at the gate.
+    function lookupFromInput() {
+      const code = input.value.trim();
+      if (!/^\d{4}$/.test(code)) { resetMatch(); statusEl.textContent = 'Staff types their code — their photo appears below to check.'; return; }
+      const staff = allStaffCache.find(s => s.Code === code && isActive(s.Active));
+      if (!staff) {
+        resetMatch();
+        statusEl.textContent = 'No active staff member has that code.';
+        return;
+      }
+      matchedStaff = staff;
+      const photoThumb = staff.PhotoURL ? drivePhotoThumbUrl(staff.PhotoURL, 200) : '';
+      matchPhoto.innerHTML = photoThumb
+        ? `<img src="${photoThumb}" alt="${escapeHtml(staff.Name)}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;color:#9ca3af;font-size:0.65rem;text-align:center;padding:4px;box-sizing:border-box;">No photo</div>`
+        : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:0.65rem;text-align:center;padding:4px;box-sizing:border-box;">No photo on file</div>`;
+      matchName.textContent = staff.Name;
+      matchRole.textContent = `${staff.Role} · ${agencyName(staff.AgencyID)}`;
+      matchBox.style.display = 'block';
+      submitBtn.disabled = false;
+      statusEl.textContent = 'Check the photo against the person, then confirm.';
+    }
+    input.addEventListener('input', lookupFromInput);
+
     // Guards against a fast double-tap/double-Enter firing two overlapping
     // submit() calls for the same in-progress scan — the button (and
     // Enter key, via the same isSubmitting flag) is locked out from the
-    // moment Submit is pressed until this one scan's result comes back,
+    // moment Confirm is pressed until this one scan's result comes back,
     // so a second physical press just does nothing instead of kicking
     // off a second, fully independent scan attempt.
     let isSubmitting = false;
     async function submit() {
-      if (isSubmitting) return;
-      const code = input.value.trim();
-      if (!/^\d{4}$/.test(code)) { statusEl.textContent = 'Enter exactly 4 digits.'; return; }
-      const staff = allStaffCache.find(s => s.Code === code && isActive(s.Active));
-      if (!staff) { statusEl.textContent = 'No active staff member has that code.'; input.value = ''; return; }
+      if (isSubmitting || !matchedStaff) return;
+      const staff = matchedStaff;
       isSubmitting = true;
       submitBtn.disabled = true;
-      statusEl.textContent = mode === 'camera' ? 'Capturing photo…' : 'Processing…';
+      statusEl.textContent = 'Processing…';
       try {
-        const photoFile = await captureOnePhoto();
-        statusEl.textContent = 'Processing…';
-        const result = await processAttendanceScan(staff.StaffID, photoFile, user);
+        const result = await processAttendanceScan(staff.StaffID, null, user);
         statusEl.innerHTML = result.type === 'error'
           ? `⚠️ ${escapeHtml(result.message)}` : `✅ ${escapeHtml(result.message)}`;
-        input.value = '';
+        clearAll(true); // keep the result on screen; box is cleared and ready for the next person
       } catch (e) {
         statusEl.textContent = 'Failed: ' + e.message;
       } finally {
         isSubmitting = false;
-        submitBtn.disabled = false;
+        submitBtn.disabled = !matchedStaff;
       }
     }
     submitBtn.addEventListener('click', submit);
