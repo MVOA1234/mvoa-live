@@ -1270,6 +1270,22 @@ const FinanceModule = (function () {
       .filter(a => a.RequestID === requestId);
   }
 
+  // Bug found in testing: every one of this file's three ApprovalID
+  // generation sites (FM auto-approval on Payment Request submit,
+  // decide(), resubmitRequest()) was calling MVOA.nextId('APR', [])
+  // with a hardcoded EMPTY array instead of the sheet's real existing
+  // IDs — meaning every single approval-log row ever written, across
+  // every request and every stage, got assigned the exact same
+  // ApprovalID. Harmless to read paths (nothing looks anything up by
+  // ApprovalID), but a real data-integrity defect in FinanceApprovals
+  // worth fixing outright. Centralized here so all three call the same
+  // correct logic.
+  async function nextApprovalId() {
+    const rows = await MVOA.sheetsRead(TAB_APPROVALS, true);
+    const existingIds = rows.slice(1).map(r => r[0]).filter(Boolean);
+    return MVOA.nextId('APR', existingIds);
+  }
+
   // ───────────────────────────────────────────────────────────
   // Generic stage-chain walker — replays every approval EVENT
   // (Approved / Rejected / SentBack) in chronological order against an
@@ -1962,7 +1978,7 @@ const FinanceModule = (function () {
       // who verified and when.
       if (rule.FMRequired === 'Yes') {
         const fmRow = {
-          ApprovalID: MVOA.nextId('APR', []), RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
+          ApprovalID: await nextApprovalId(), RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
           Stage: 'FM', Decision: 'Approved', Comment: 'Verified via attachment at submission', Timestamp: now
         };
         await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, fmRow));
@@ -3019,6 +3035,7 @@ const FinanceModule = (function () {
     } catch (e) { /* notes flag just won't show if this fails, non-critical */ }
 
     const cardsEl = body.querySelector('#fin-queue-cards');
+    const user = MVOA.getUser();
     const newCards = cards.filter(c => isItemNew(c.req));
     const openCards = cards.filter(c => !isItemNew(c.req));
     cardsEl.innerHTML = newCards.map(({ req, state }) =>
@@ -3026,8 +3043,20 @@ const FinanceModule = (function () {
     ).join('');
     wireNewItemCards(cardsEl, () => render(container));
 
-    openCards.forEach(({ req, state }) => {
+    openCards.forEach(({ req, state, approvals }) => {
       const noteCount = allNotes.filter(n => n.RequestID === req.RequestID).length;
+      // A stage can require MORE THAN ONE approver at once (e.g.
+      // Administrative = "Secretary & President" — an AND requirement,
+      // not either/or). Bug found in testing: after one of the two
+      // approves, the stage correctly stays put awaiting the other, but
+      // eligibility for the Approve button doesn't exclude someone who's
+      // already voted — so that person sees the exact same card again
+      // and clicking Approve a second time looks like nothing happened
+      // (it's actually just recording a redundant duplicate vote). Now
+      // shown as a clear "you already approved, waiting on X" notice
+      // instead of a live Approve button once this user has a recorded
+      // Approved decision at the CURRENT stage.
+      const alreadyVoted = !!(state.stage && approvals.some(a => a.Stage === state.stage && a.Decision === 'Approved' && a.ApproverName === user.name));
       const div = document.createElement('div');
       div.className = 'mvoa-list-item';
       div.innerHTML = `
@@ -3038,12 +3067,13 @@ const FinanceModule = (function () {
         ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
         ${req.Description ? `<p class="muted" style="margin:4px 0;">${escapeHtml(req.Description)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
+        ${alreadyVoted ? `<p style="margin:4px 0;color:green;font-size:0.85rem;">✅ You've already approved this stage — waiting on the other required approver before it moves on.</p>` : ''}
         ${paymentReferenceLineHtml(req)}
         ${attachmentLinksHtml(req)}
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
         ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>
+          ${alreadyVoted ? '' : `<button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>`}
           <button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>
           ${state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-queue-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}"`)}
@@ -3125,8 +3155,7 @@ const FinanceModule = (function () {
       const priorApprovals = await loadApprovalsFor(requestId, true); // BEFORE this decision is appended, for stage comparison below
       const priorState = computeAnyRequestState(req, priorApprovals);
 
-      const existingIds = [];
-      const approvalId = MVOA.nextId('APR', existingIds);
+      const approvalId = await nextApprovalId();
       const row = {
         ApprovalID: approvalId, RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
         Stage: stage, Decision: decision, Comment: comment || '', Timestamp: new Date().toISOString()
@@ -3220,8 +3249,7 @@ const FinanceModule = (function () {
         const att = uploads[i];
         attachmentUpdates[emptySlots[i]] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_resubmit${i+1}_${att.name}`);
       }
-      const existingIds = [];
-      const approvalId = MVOA.nextId('APR', existingIds);
+      const approvalId = await nextApprovalId();
       const row = {
         ApprovalID: approvalId, RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
         Stage: 'Initiator', Decision: 'Resubmitted', Comment: '', Timestamp: new Date().toISOString()
