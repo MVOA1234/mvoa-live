@@ -557,8 +557,14 @@ const FinanceModule = (function () {
   function render(container) {
     const user = MVOA.getUser();
     const myRequests = requestsCache.filter(r => r.RequestedBy === user.name);
-    const mineCountsSpend = countNewOpen(myRequests.filter(r => r.RequestType !== 'PaymentRequest'));
-    const mineCountsPayment = countNewOpen(myRequests.filter(r => r.RequestType === 'PaymentRequest'));
+    // Tab-count badge only reflects requests still actually in flight —
+    // a fully Paid/Rejected/settled one showing "(N open)" reads as if it
+    // still needs attention when it doesn't (see isRequestTerminal). The
+    // My Requests LIST itself is unaffected — it still shows every
+    // request, Paid ones included, same as before.
+    const myRequestsActive = myRequests.filter(r => !isRequestTerminal(r));
+    const mineCountsSpend = countNewOpen(myRequestsActive.filter(r => r.RequestType !== 'PaymentRequest'));
+    const mineCountsPayment = countNewOpen(myRequestsActive.filter(r => r.RequestType === 'PaymentRequest'));
     const queueCardsSpend = queueCardsCache.filter(c => c.req.RequestType !== 'PaymentRequest');
     const queueCardsPayment = queueCardsCache.filter(c => c.req.RequestType === 'PaymentRequest');
     const queueCountsSpend = countNewOpen(queueCardsSpend.map(c => c.req));
@@ -1251,6 +1257,36 @@ const FinanceModule = (function () {
   // Expense.)
   function isPettyCashExpense(r) {
     return r.Category === 'Petty Cash' && r.PettyCashType === 'Expense';
+  }
+  // A request is fully "done" — nothing further will ever happen to it —
+  // once it's Rejected, settled as a Petty Cash Expense, or has actually
+  // been paid out (PaymentStatus/DisbursementStage both get set to 'Paid'
+  // together, see releasePayment — checking either is belt-and-braces).
+  // Used to keep "done" items out of the "N open" tab-count badges (see
+  // countNewOpen) — being fully resolved is a different thing from being
+  // "not new", and conflating the two made completed/Paid requests read
+  // as if they still needed attention.
+  function isRequestTerminal(r) {
+    if (r.Status === 'Rejected') return true;
+    if (r.Status !== 'Approved') return false;
+    if (isPettyCashExpense(r)) return true;
+    return r.DisbursementStage === 'Paid' || r.PaymentStatus === 'Paid';
+  }
+  // An Approval-to-Spend (RequestType !== 'PaymentRequest') that has since
+  // had a Payment Request created against it (LinkedSpendRequestID) is
+  // superseded for disbursement purposes — the real expense-sheet entry
+  // happens off that Payment Request's own lifecycle (with its own,
+  // possibly different, actual amount) once THAT completes its approval
+  // chain, not off the original spend approval's estimated amount.
+  // Without this, the ATS itself — already Status:'Approved' the moment
+  // its own chain finished, same as any other request — would
+  // independently show up in the Accountant's "Log Expense Entry" queue
+  // too, pre-filled with the original approved-to-spend amount rather
+  // than the real payment amount, and easy to log against by mistake
+  // instead of the actual linked Payment Request.
+  function isSupersededByPaymentRequest(r) {
+    return r.RequestType !== 'PaymentRequest' &&
+      requestsCache.some(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === r.RequestID);
   }
   // Bug found in testing: nothing stopped a second Replenishment request
   // from being submitted while an earlier one was still in flight (not yet
@@ -3561,7 +3597,7 @@ const FinanceModule = (function () {
     const list = [];
     const add = (arr) => arr.forEach(r => { if (!seen.has(r.RequestID)) { seen.add(r.RequestID); list.push(r); } });
     if (isAcct || isAdminUser) {
-      add(requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r)));
+      add(requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r)));
       add(requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection'));
     }
     if (isTres || isAdminUser) add(requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer'));
@@ -3597,7 +3633,7 @@ const FinanceModule = (function () {
       return;
     }
 
-    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r));
+    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
     const needsCorrection = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
     const pendingTreasurer = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
     const pendingPayment = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
