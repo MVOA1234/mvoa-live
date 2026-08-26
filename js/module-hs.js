@@ -1032,7 +1032,14 @@ const HSModule = (function () {
   // session — functionally identical either way.
   // ───────────────────────────────────────────────────────────
   const TAB_HS_INOUT_LOG = 'HSInOutLog';
-  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy'];
+  // VehicleDetails — appended at the end (position-safe against the sheet,
+  // same convention as every other after-the-fact column in this app).
+  // Blank on every normal photo-backed entry; filled in only when the
+  // guard used the manual "Enter Vehicle Details" fallback because the
+  // network dropped mid-save (see logInOutEntry / openManualVehicleEntry)
+  // — its presence is also what tells the live list and Monthly Report
+  // this was a deliberate manual log, not a missing/failed photo.
+  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails'];
   // weeklyMin: null means "frequency not defined" per the spec — no
   // Fail concept at all for that type, logging only.
   const IN_OUT_TYPES = [
@@ -1113,7 +1120,7 @@ const HSModule = (function () {
           </div>
           ${currentlyIn ? `<p class="muted" style="margin:0 0 8px;font-size:0.8rem;">Currently IN — log OUT before logging IN again.</p>` : ''}
           <p class="muted" style="margin:0 0 4px;font-size:0.8rem;font-weight:600;">Today:</p>
-          ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
+          ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}${e.VehicleDetails ? ` · 🚚 ${escapeHtml(e.VehicleDetails)} (manual entry — no signal)` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
         </div>
       `;
     }).join('');
@@ -1177,15 +1184,95 @@ const HSModule = (function () {
       const user = MVOA.getUser();
       const row = INOUT_LOG_COLS.map(c => ({
         LogID: logId, Type: typeKey, Direction: direction, Timestamp: new Date().toISOString(),
-        PhotoURL: photoUrl, LoggedBy: user.name
+        PhotoURL: photoUrl, LoggedBy: user.name, VehicleDetails: ''
       })[c]);
       await MVOA.sheetsAppend(TAB_HS_INOUT_LOG, row);
       await renderInOutLog(container); // fresh render creates its own enabled buttons
     } catch (e) {
-      alert('Could not save entry: ' + e.message);
-      container.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = false); // no re-render on this path, so re-enable manually
+      // One attempt only — on a genuinely weak connection (the known
+      // issue at the main gate) the photo upload is usually the actual
+      // failure point, so rather than retry the same heavy request, fall
+      // straight back to a manual entry that skips the photo entirely
+      // and just records who/what/when as typed by the guard. The record
+      // still gets its timestamp — see openManualVehicleEntry.
+      openManualVehicleEntry(typeKey, direction, container);
     }
     isLoggingInOut = false;
+  }
+
+  // Fallback when the normal (photo-backed) save fails — see the catch
+  // above. Deliberately skips the photo step entirely rather than retrying
+  // it, since a photo upload is a much bigger request than a plain text
+  // append and is usually what actually failed on a marginal connection.
+  // Still writes to the same HSInOutLog sheet, with the same IN/OUT
+  // same-state guard as the normal path, and still gets a real timestamp
+  // at the moment it's saved — this is a manual record, not a backdated
+  // guess. VehicleDetails being non-blank is what marks it as a manual
+  // entry to the live list and Monthly Report (see those render spots).
+  function openManualVehicleEntry(typeKey, direction, container) {
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box">
+        <h3 style="margin-top:0;">Enter Vehicle Details</h3>
+        <p class="muted" style="font-size:0.85rem;margin:0 0 10px;">
+          Could not save automatically — likely a weak connection at the gate. Enter the vehicle details below to log <strong>${escapeHtml(typeKey)} — ${escapeHtml(direction)}</strong> manually; the time is recorded automatically the moment you save.
+        </p>
+        <label>Vehicle Details
+          <input type="text" id="hs-manual-vehicle" placeholder="e.g. vehicle number / description" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+        </label>
+        <p class="error-text" id="hs-manual-err" style="min-height:1.2em;margin:8px 0 0;"></p>
+        <div class="mvoa-row" style="margin-top:10px;">
+          <button id="hs-manual-submit" class="btn-primary">Save Entry</button>
+          <button id="hs-manual-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('#hs-manual-vehicle');
+    const errEl = modal.querySelector('#hs-manual-err');
+    input.focus();
+
+    function reEnableButtons() {
+      container.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = false);
+    }
+    modal.querySelector('#hs-manual-cancel').addEventListener('click', () => {
+      modal.remove();
+      reEnableButtons();
+    });
+
+    let isSaving = false;
+    modal.querySelector('#hs-manual-submit').addEventListener('click', async () => {
+      if (isSaving) return;
+      const details = input.value.trim();
+      if (!details) { errEl.textContent = 'Enter the vehicle details before saving.'; return; }
+      isSaving = true;
+      errEl.textContent = 'Saving…';
+      try {
+        // Same authoritative re-check as the normal path — a stale screen
+        // or a second guard logging the same gate shouldn't produce two
+        // IN entries in a row here either.
+        const existingRows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+        const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+        const allLogs = rowsToObjs(existingRows, INOUT_LOG_COLS);
+        const lastEntry = allLogs.filter(l => l.Type === typeKey).sort((a, b) => a.Timestamp.localeCompare(b.Timestamp)).pop();
+        const currentlyIn = lastEntry && lastEntry.Direction === 'IN';
+        if (direction === 'IN' && currentlyIn) { errEl.textContent = `Already logged IN for ${typeKey} — log OUT first.`; isSaving = false; return; }
+        if (direction === 'OUT' && !currentlyIn) { errEl.textContent = `${typeKey} isn't currently logged IN.`; isSaving = false; return; }
+        const logId = MVOA.nextId('IOLOG', existingIds);
+        const user = MVOA.getUser();
+        const row = INOUT_LOG_COLS.map(c => ({
+          LogID: logId, Type: typeKey, Direction: direction, Timestamp: new Date().toISOString(),
+          PhotoURL: '', LoggedBy: user.name, VehicleDetails: details
+        })[c]);
+        await MVOA.sheetsAppend(TAB_HS_INOUT_LOG, row);
+        modal.remove();
+        await renderInOutLog(container); // fresh render creates its own enabled buttons
+      } catch (e) {
+        errEl.textContent = 'Still could not save: ' + e.message + ' — try again once you have signal.';
+        isSaving = false;
+      }
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1738,8 +1825,15 @@ const HSModule = (function () {
           const timeStr = new Date(e.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
           // No photo icon at all for non-photo types — showing a ✕ would
           // wrongly read as a Fail when a photo was never required here.
+          // For photo-required types, a manual (no-signal) entry shows its
+          // own icon with the typed vehicle details on hover — a real ✕
+          // is now reserved for the case that actually shouldn't happen
+          // any more (neither a photo nor manually-entered details).
+          const photoMark = e.PhotoURL ? `<a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷</a>`
+            : e.VehicleDetails ? `<span title="Manual entry (no signal) — ${escapeHtml(e.VehicleDetails)}" style="cursor:help;">📝</span>`
+            : '<span style="color:#b3261e;">✕</span>';
           return t.needsPhoto
-            ? `<div>${e.PhotoURL ? `<a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷</a>` : '<span style="color:#b3261e;">✕</span>'} <span class="muted" style="font-size:0.7rem;">${timeStr}</span></div>`
+            ? `<div>${photoMark} <span class="muted" style="font-size:0.7rem;">${timeStr}</span></div>`
             : `<div class="muted" style="font-size:0.75rem;">${timeStr}</div>`;
         }).join('');
         return `<td style="padding:4px 6px;text-align:center;${divider}">${linesHtml}</td>`;
