@@ -2169,12 +2169,50 @@ const FinanceModule = (function () {
       // verification act — means the chain moves straight to Secretary
       // next, while still leaving a real entry in the trail showing
       // who verified and when.
+      let fmRow = null;
       if (rule.FMRequired === 'Yes') {
-        const fmRow = {
+        fmRow = {
           ApprovalID: await nextApprovalId(), RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
           Stage: 'FM', Decision: 'Approved', Comment: 'Verified via attachment at submission', Timestamp: now
         };
         await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, fmRow));
+      }
+
+      // Same principle, generalized to the remaining stages: if the
+      // submitter's own role matches a LATER required stage too (e.g. an
+      // Operations Head submitting a payment type that also requires
+      // OpsHead sign-off), don't make them separately log an Approve
+      // click on their own submission for that stage either — same
+      // rationale as the Spend Approval fix in doSubmitRequest. Stops at
+      // the first required stage the submitter's role does NOT satisfy;
+      // that one still needs someone else for real. Unlike FM (always
+      // auto-approved, see above — providing the evidence IS the
+      // verification act), these need a genuine role match: a Secretary
+      // submitting does not satisfy Operations Head's Technical
+      // Acceptance, for instance.
+      const person = rolesCache.find(p => p.Name === user.name) || { Name: user.name, Role: user.role };
+      const remainingAutoApprovals = [];
+      for (const key of ['OpsHead', 'Secretary', 'President']) {
+        if (rule[PAYMENT_STAGE_REQUIRED_COL[key]] !== 'Yes') continue; // not required for this payment type at all
+        if (!roleMatchesToken(person, PAYMENT_STAGE_ROLE_TOKEN[key])) break; // needs someone else — stop here
+        remainingAutoApprovals.push({
+          ApprovalID: await nextApprovalId(), RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
+          Stage: key, Decision: 'Approved', Comment: 'Auto-approved — submitter already holds this role', Timestamp: now
+        });
+      }
+      if (remainingAutoApprovals.length) {
+        for (const a of remainingAutoApprovals) await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, a));
+        await loadAll(true);
+        const freshRow = requestsCache.find(r => r.RequestID === requestId);
+        if (freshRow) {
+          const allNewApprovals = (fmRow ? [fmRow] : []).concat(remainingAutoApprovals);
+          const state = computePaymentRequestState(freshRow, allNewApprovals);
+          const now2 = new Date().toISOString();
+          const updated = state.fullyApproved
+            ? Object.assign({}, freshRow, { Status: 'Approved', StageEnteredAt: now2, StageOpenedAt: '' })
+            : Object.assign({}, freshRow, { StageEnteredAt: now2, StageOpenedAt: '' });
+          await MVOA.sheetsUpdateRow(TAB_REQUESTS, freshRow.rowNumber, objToRow(REQUEST_COLS, updated));
+        }
       }
     } catch (e) {
       errEl.textContent = 'Could not save request: ' + e.message;
