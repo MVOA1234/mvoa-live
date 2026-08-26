@@ -270,13 +270,13 @@ const HSModule = (function () {
   // shifts" shape as the End of Shift Report above, just updating one
   // specific item on that shift's log instead of its Notes field.
   //
-  // "Diesel Level Before Top Up" (the routine per-shift tank-level
-  // reading) is shown here read-only for context only — it's entered
-  // on the shift-start checklist, not here (see the force-include/
-  // force-exclude pair in renderChecklistForm's items filter and the
-  // header comment on loadDgOperationsData for the full math). The
-  // ONLY thing actually editable on this screen is the litres topped
-  // up, and it's optional — left blank on any shift with no top-up.
+  // "Fuel Level" (the routine per-shift tank-level reading) is shown
+  // here read-only for context only — it's entered on the shift-start
+  // checklist, not here (see the force-exclude in renderChecklistForm's
+  // items filter and the header comment on loadDgOperationsData for
+  // the full math). The ONLY thing actually editable on this screen is
+  // the litres topped up, and it's optional — left blank on any shift
+  // with no top-up.
   //
   // Once a value is saved for a shift it LOCKS (shown read-only, no
   // more Save button) for the rest of that shift — editing again only
@@ -284,20 +284,26 @@ const HSModule = (function () {
   // and its own window is active, same as every other reading here.
   // ───────────────────────────────────────────────────────────
   function renderDieselTopUpEntry(container) {
+    // "Diesel Level Before Top Up" is kept as a fallback display source
+    // only, for a site whose sheet somehow has no Fuel Level item —
+    // Fuel Level is what's actually filled in every shift now (see
+    // loadDgOperationsData's header comment), so it's preferred here.
+    const legacyLevelItem = itemsCache.find(i => /^fuel level$/i.test((i.CheckItem || '').trim()));
     const beforeItem = itemsCache.find(i => /diesel level before top up/i.test(i.CheckItem));
+    const levelItem = legacyLevelItem || beforeItem;
     const afterItem = itemsCache.find(i => /diesel level after top up/i.test(i.CheckItem));
-    if (!beforeItem || !afterItem) {
+    if (!levelItem || !afterItem) {
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
           <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
           <strong>⛽ Log Diesel Top-Up</strong>
         </div>
-        <p class="muted">Diesel Level Before Top Up / Diesel Topped Up items aren't configured yet.</p>
+        <p class="muted">Fuel Level / Diesel Topped Up items aren't configured yet.</p>
       `;
       container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
       return;
     }
-    const template = templatesCache.find(t => t.TemplateID === beforeItem.TemplateID);
+    const template = templatesCache.find(t => t.TemplateID === afterItem.TemplateID);
     const user = MVOA.getUser();
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -332,7 +338,7 @@ const HSModule = (function () {
       const results = await loadItemResults();
       return shiftRows.map(r => ({
         ...r,
-        beforeResult: results.find(rr => rr.LogID === r.log.LogID && rr.ItemID === beforeItem.ItemID) || null,
+        beforeResult: results.find(rr => rr.LogID === r.log.LogID && rr.ItemID === levelItem.ItemID) || null,
         afterResult: results.find(rr => rr.LogID === r.log.LogID && rr.ItemID === afterItem.ItemID) || null
       }));
     }
@@ -2082,25 +2088,34 @@ const HSModule = (function () {
   // Monthly views (same 5 rows, just a different date range).
   //
   // Diesel math (per DG_Set.docx, confirmed with user; simplified
-  // 17-Aug-2026 — see conversation): tank capacity 200L, so a level
-  // reading of X% = X/100 * 200 litres. "Diesel Level Before Top Up"
-  // is taken every shift at shift START regardless of whether a
-  // top-up happens that shift — despite its name it's really just
-  // "current tank level", used as a running measurement, not
-  // something that only matters when topping up (that's why it stays
-  // a required item on the shift-start checklist every shift — see
-  // the force-include in renderChecklistForm's items filter). "Diesel
-  // Topped Up" is a SEPARATE, directly-entered litres quantity (not a
-  // gauge reading) logged any time during the shift through the
-  // standalone "Log Diesel Top-Up" screen, independent of the
-  // checklist — a top-up can happen well after shift start, and the
-  // exact litres added is usually known directly (a delivery /
-  // dip-stick reading) rather than derivable from a second gauge
-  // reading.
+  // 17-Aug-2026, then REVISED again 26-Aug-2026 — see conversation):
+  // tank capacity 200L, so a level reading of X% = X/100 * 200 litres.
+  // The 17-Aug design tried making "Diesel Level Before Top Up" the
+  // primary shift-start reading (force-required every shift). In
+  // practice technicians kept entering 0% there and clicking through
+  // the "same as last reading" recheck-confirm warning without
+  // actually rechecking the gauge — a real, non-null 0 that silently
+  // overrode the correct "Fuel Level" reading and zeroed out Diesel
+  // Consumed for real shifts (see the 26-Aug-2026 3rd-shift log this
+  // was caught on). Per user direction that day, Before/After Top Up
+  // are no longer used for this measurement at all: "Fuel Level" (the
+  // plain %, filled every shift) is now the ONLY shift-start reading,
+  // and it's no longer force-included on the checklist form (see
+  // renderChecklistForm's items filter). "Diesel Topped Up" is still a
+  // SEPARATE, directly-entered litres quantity (not a gauge reading),
+  // logged any time during the shift through the standalone "Log
+  // Diesel Top-Up" screen (which, under the hood, still stores that
+  // figure on the "Diesel Level After Top Up" item — that item's own
+  // meaning was already repurposed to litres, not a % reading, and
+  // stays exactly as-is; only the Before item was dropped) —
+  // independent of the checklist, since a top-up can happen well after
+  // shift start, and the exact litres added is usually known directly
+  // (a delivery / dip-stick reading) rather than derivable from a
+  // second gauge reading.
   //
-  //   consumed (this shift) = (this shift's level − next shift's
-  //     level), litres, PLUS however many litres were topped up this
-  //     shift (0 if none logged).
+  //   consumed (this shift) = (this shift's Fuel Level − next shift's
+  //     Fuel Level), litres, PLUS however many litres were topped up
+  //     this shift (0 if none logged).
   //
   // Why adding the topped-up litres back in is correct: a top-up
   // partway through the shift pushes the tank level UP, which would
@@ -2108,24 +2123,13 @@ const HSModule = (function () {
   // really did (or even net-negative). Physically:
   //   level_next = level_this − consumed + toppedUp
   //   ⇒ consumed = (level_this − level_next) + toppedUp
-  // — exactly the formula above. This replaced an earlier two-leg
-  // Before/After-gauge-reading model (removed) that needed a live
-  // "after top-up" % reading; the litres-topped-up figure is simpler
-  // to log and just as correct.
+  // — exactly the formula above.
   //
-  // LEGACY "Fuel Level" fallback (ITM-0001, TPL-001) — before the
-  // Before Top-Up item existed, a single plain "Fuel Level" (%) item
-  // was filled in every shift instead. It's still Active (old rounds
-  // already reference it), just no longer what technicians fill in
-  // going forward. Its reading is the same "% of tank at shift start"
-  // meaning as the Before item, so for any shift whose log has no
-  // Before value we fall back to its Fuel Level value as dieselBefore,
-  // letting the SAME this-vs-next math above compute Diesel Consumed
-  // / litres and Fuel Efficiency for those historic dates too. There's
-  // never a matching top-up figure on those old shifts (no separate
-  // top-up entry existed back then), so Diesel Top Up correctly stays
-  // blank for them — that's the one figure that genuinely can't be
-  // reconstructed from old data.
+  // "Diesel Level Before Top Up" (ITM ref: beforeItem below) is kept
+  // around in code only as a last-resort fallback for a shift whose
+  // log somehow has no Fuel Level entry at all — it should never win
+  // over a real Fuel Level reading again. See the "Fuel Level wins
+  // whenever present" assignment below.
   // Numeric items WITH a FailThreshold auto-evaluate to a Pass/Fail
   // verdict — THAT goes in Result, while the technician's actual
   // entered number instead gets stashed in Remarks as "Entered: 87%
@@ -2210,15 +2214,25 @@ const HSModule = (function () {
       if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) setIfNewer('legacyLevel', '_legacyAt');
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    // Fall back to the legacy Fuel Level reading wherever a date+shift
-    // has no Before value of its own. Confirmed against real data: Fuel
-    // Level is still the field technicians actually fill in every
-    // shift (Before/After Top Up are rarely used), so this fallback is
-    // the NORMAL path going forward, not just a historic one — it must
-    // stay unconditional, not gated on whether Hours/kWh were also
-    // logged that shift.
+    // Fuel Level (legacy item) now WINS whenever it's present, rather
+    // than only being used as a fallback for a blank Before reading.
+    // Root-caused 26-Aug-2026 (see HSLOG for that date, 3rd shift):
+    // "Diesel Level Before Top Up" was still being force-required on
+    // every shift's checklist (see renderChecklistForm — since removed),
+    // and technicians were routinely entering 0% there and clicking
+    // through the "same as last reading" recheck-confirm warning
+    // without actually rechecking the gauge — a real, non-null 0 that
+    // silently WON over the correct Fuel Level reading under the old
+    // "only fall back when Before is null" rule, zeroing out that
+    // shift's Diesel Consumed even though Fuel Level itself was
+    // recorded correctly. Per user direction, Before/After Top Up are
+    // deliberately not used for this measurement any more — Fuel Level
+    // (this shift vs next shift) plus whatever's logged through "Log
+    // Diesel Top-Up" is the whole of the math now. Before is kept only
+    // as a last-resort fallback for a shift that somehow has no Fuel
+    // Level entry at all (e.g. very old data predating Fuel Level).
     rows.forEach(r => {
-      if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel;
+      if (r.legacyLevel != null) r.dieselBefore = r.legacyLevel;
     });
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
@@ -3970,30 +3984,32 @@ const HSModule = (function () {
     const items = itemsCache
       .filter(i => i.TemplateID === currentTemplate.TemplateID)
       .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
-        (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')) ||
-        // "Diesel Level Before Top Up" is really just "current tank
-        // level" (see loadDgOperationsData's header comment) — it
-        // reflects the tank's state at shift start same as Running
-        // Hours / Cumulated kWh, and without it the Diesel Consumed
-        // math for this shift can never be computed. So it's
-        // force-included and required right here, every shift,
-        // regardless of ShiftApplicability.
-        (isShiftBased && /diesel level before top up/i.test(i.CheckItem)))
-      // "Diesel Topped Up" (stored on the "Diesel Level After Top Up"
-      // item — see loadDgOperationsData's header comment) is force-
-      // EXCLUDED from this form regardless of its own ShiftApplicability
-      // setting in the sheet — it only ever gets entered through the
+        (i.ShiftApplicability === '2nd3rd' && (currentShift === '2nd' || currentShift === '3rd')))
+      // "Diesel Level Before Top Up" and "Diesel Topped Up" (stored on
+      // the "Diesel Level After Top Up" item — see loadDgOperationsData's
+      // header comment) are BOTH force-EXCLUDED from this form,
+      // regardless of ShiftApplicability. Before Top Up used to be
+      // force-included and required here instead (every shift, so the
+      // Diesel Consumed math would always have a shift-start reading)
+      // — removed 26-Aug-2026 after it was found technicians were
+      // routinely entering 0% and confirming past the recheck warning
+      // without actually checking the gauge, which silently zeroed out
+      // Diesel Consumed for real shifts (see loadDgOperationsData's
+      // header comment). "Fuel Level" is the sole shift-start reading
+      // now. "Diesel Topped Up" only ever gets entered through the
       // separate "Log Diesel Top-Up" screen, since a top-up can happen
       // any time during the shift (well after this form is submitted),
       // not necessarily at shift start.
-      .filter(i => !(isShiftBased && /diesel level after top up/i.test(i.CheckItem)))
+      .filter(i => !(isShiftBased && /diesel level (before|after) top up/i.test(i.CheckItem)))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
-    // Preload the last recorded reading for any running-hours meter or
-    // Diesel Level Before Top Up item on this template, so the live
-    // guards below have it ready the moment the technician starts
-    // typing.
-    await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem) || /diesel level before top up/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
+    // Preload the last recorded reading for any running-hours meter on
+    // this template, so the live backwards-reading guard below has it
+    // ready the moment the technician starts typing. (Diesel Level
+    // Before Top Up used to be preloaded here too, back when it was
+    // force-included on this form — no longer relevant now that it's
+    // excluded above.)
+    await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
 
     const showZone = currentTemplate.ShowZoneOfDay === 'TRUE' || currentTemplate.ShowZoneOfDay === 'true';
     container.innerHTML = `
@@ -4333,13 +4349,16 @@ const HSModule = (function () {
               return;
             }
           }
-          // Diesel Level Before Top Up drives the Diesel Consumed math
-          // downstream — an unchanged reading from last time usually
-          // means the gauge wasn't actually rechecked (just re-typed
-          // from memory), which silently zeroes out that shift's
-          // consumption figure. Flagged through the same outlier-
-          // confirm mechanism as everything else: not blocked, but
-          // needs an explicit "yes, I checked" before it's accepted.
+          // VESTIGIAL as of 26-Aug-2026: "Diesel Level Before Top Up" is
+          // now force-EXCLUDED from this form's items list (see
+          // renderChecklistForm), so this branch can't currently fire —
+          // left in place, harmlessly unreachable, in case that item is
+          // ever reintroduced under this same name. Originally: an
+          // unchanged reading from last time usually means the gauge
+          // wasn't actually rechecked (just re-typed from memory), which
+          // used to silently zero out that shift's Diesel Consumed
+          // figure — see loadDgOperationsData's header comment for the
+          // actual incident this caused.
           if (/diesel level before top up/i.test(item.CheckItem)) {
             const last = lastReadingCache[itemId];
             if (last && val === last.value) {
@@ -4451,14 +4470,13 @@ const HSModule = (function () {
     // Items marked Required=FALSE (e.g. Vacuum Cleaning / Back Wash —
     // shown every day but only actually done every other day) don't
     // block submission when left blank, and a blank answer never
-    // counts as a Fail for them. "Diesel Level Before Top Up" is the
-    // one exception: it's ALWAYS required on a shift-start submission
-    // (see the force-include above), regardless of whatever its own
-    // Required column says, since a blank reading here is exactly what
-    // breaks the Diesel Consumed math down the line.
+    // counts as a Fail for them. ("Diesel Level Before Top Up" used to
+    // be force-required here regardless of its own Required column —
+    // removed 26-Aug-2026 along with its force-include above, since it
+    // no longer appears on this form at all.)
     const missing = items.filter(i =>
       (i.InputType === 'PassFail' || i.InputType === 'Numeric') &&
-      (/diesel level before top up/i.test(i.CheckItem) || !(i.Required === 'FALSE' || i.Required === 'false')) &&
+      !(i.Required === 'FALSE' || i.Required === 'false') &&
       isItemDueToday(i) &&
       !pendingResults[i.ItemID]?.result
     );
@@ -4607,15 +4625,18 @@ const HSModule = (function () {
       // but still needs a second look. Always routed to Maintenance
       // regardless of the section's normal FailTaskCategory, since this
       // is "please recheck this reading," not a functional failure.
-      // "Diesel Level Before Top Up" is EXCLUDED from this auto-flag
-      // (Aug 2026, per user request) — the app now logs the actual
-      // top-up quantity directly, in litres, through the standalone
-      // "Log Diesel Top-Up" screen, so an outlier/confirmed reading on
-      // this item is just the routine shift-start tank-level entry, not
-      // something that needs a Facility Manager to go re-check a gauge.
-      // It still counts toward the Diesel Consumed math exactly as
-      // before (see loadDgOperationsData) — only the recheck-task
-      // auto-flag is turned off for it.
+      // The "Diesel Level Before Top Up" exclusion this comment used to
+      // describe (turning off just the recheck-task auto-flag for that
+      // one item, 19-Aug-2026) is now MOOT: as of 26-Aug-2026 that item
+      // is force-excluded from the form entirely (see
+      // renderChecklistForm), so it can never appear in `items` here or
+      // carry an outlierFlag in the first place — silencing the
+      // recheck task turned out to be exactly how technicians entering
+      // a stale 0% every shift went unnoticed until it zeroed out real
+      // Diesel Consumed figures (see loadDgOperationsData's header
+      // comment for the full incident). The regex below is left as a
+      // harmless no-op rather than removed, in case this item — or the
+      // recheck-suppression policy — ever comes back.
       const outlierItems = items.filter(i => pendingResults[i.ItemID]?.outlierFlag && pendingResults[i.ItemID]?.outlierConfirmed
         && !/diesel level before top up/i.test(i.CheckItem));
       for (const item of outlierItems) {
