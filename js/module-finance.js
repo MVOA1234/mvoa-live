@@ -1657,7 +1657,14 @@ const FinanceModule = (function () {
       if (!contractsCache.length) { contractWrap.innerHTML = ''; return; }
       const type = typeEl.value;
       const mapped = type ? spendCategoriesForPaymentType(type) : [];
-      const pool = mapped.length ? contractsCache.filter(c => mapped.includes(c.Category)) : contractsCache;
+      // Falls back to showing everything whenever the filtered result
+      // comes up EMPTY — not just when SpendCategory is blank. A typo'd
+      // or not-yet-registered category would otherwise filter down to
+      // zero options and silently look like "nothing to link" instead of
+      // the mapping being wrong — better to show more than to hide
+      // everything and let a real Contract go unlinked because of it.
+      const filtered = mapped.length ? contractsCache.filter(c => mapped.includes(c.Category)) : [];
+      const pool = filtered.length ? filtered : contractsCache;
       contractWrap.innerHTML = `
         <label>Link to an existing Contract (optional)
           <select id="pr-contract">
@@ -1665,7 +1672,7 @@ const FinanceModule = (function () {
             ${pool.slice().sort((a, b) => (a.Vendor || '').localeCompare(b.Vendor || '')).map(c => `<option value="${escapeHtml(c.ContractID)}" ${c.ContractID===selectedContractId?'selected':''}>${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)}${c.EndDate ? ' (valid to ' + escapeHtml(c.EndDate) + ')' : ' (open-ended)'}</option>`).join('')}
           </select>
         </label>
-        ${type && !mapped.length ? `<p class="muted" style="margin:2px 0 6px;font-size:0.75rem;">Showing all contracts — no spend-category mapping set yet for "${escapeHtml(type)}" (FinancePaymentRules.SpendCategory).</p>` : ''}
+        ${type && !filtered.length ? `<p class="muted" style="margin:2px 0 6px;font-size:0.75rem;">Showing all contracts — ${mapped.length ? `none are registered under "${escapeHtml(mapped.join(', '))}" yet` : `no spend-category mapping set yet for "${escapeHtml(type)}"`} (FinancePaymentRules.SpendCategory).</p>` : ''}
         <div id="pr-contract-status"></div>`;
       const sel = contractWrap.querySelector('#pr-contract');
       const statusEl = contractWrap.querySelector('#pr-contract-status');
@@ -1697,7 +1704,9 @@ const FinanceModule = (function () {
       if (!eligible.length) { spendWrap.innerHTML = ''; return; }
       const type = typeEl.value;
       const mapped = type ? spendCategoriesForPaymentType(type) : [];
-      const pool = mapped.length ? eligible.filter(r => mapped.includes(r.Category)) : eligible;
+      // Same "never filter down to zero" fallback as refreshContractPicker.
+      const filtered = mapped.length ? eligible.filter(r => mapped.includes(r.Category)) : [];
+      const pool = filtered.length ? filtered : eligible;
       spendWrap.innerHTML = `
         <label>Link to an Approval to Spend (optional — for payments with no Contract/Work Order)
           <select id="pr-spend-request">
@@ -1705,7 +1714,7 @@ const FinanceModule = (function () {
             ${pool.map(r => `<option value="${escapeHtml(r.RequestID)}" ${r.RequestID===selectedLinkedSpendRequestId?'selected':''}>${escapeHtml(r.RequestID)} — ${escapeHtml(r.Category)} — ${escapeHtml(r.Vendor || '')} — ${formatAmount(r.Amount)} (${formatDate(r.RequestedDate)})</option>`).join('')}
           </select>
         </label>
-        ${type && !mapped.length ? `<p class="muted" style="margin:2px 0 6px;font-size:0.75rem;">Showing all approved requests — no spend-category mapping set yet for "${escapeHtml(type)}" (FinancePaymentRules.SpendCategory).</p>` : ''}`;
+        ${type && !filtered.length ? `<p class="muted" style="margin:2px 0 6px;font-size:0.75rem;">Showing all approved requests — ${mapped.length ? `none are approved under "${escapeHtml(mapped.join(', '))}" yet` : `no spend-category mapping set yet for "${escapeHtml(type)}"`} (FinancePaymentRules.SpendCategory).</p>` : ''}`;
       const sel = spendWrap.querySelector('#pr-spend-request');
       sel.addEventListener('change', () => {
         selectedLinkedSpendRequestId = sel.value;
