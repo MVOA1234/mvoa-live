@@ -101,6 +101,13 @@ const DashboardModule = (function () {
     'ComplianceAttachmentURL_2', 'ComplianceAttachmentURL_3',
     'NoteCount', 'LastNoteAt', 'LastNoteAuthor', 'CreatorLastSeenNotesAt', 'AssigneeLastSeenNotesAt',
     'AssigneeSeenAt', 'DelegatedTo'];
+  // Copied from module-attendance.js's own AGENCY_COLS/STAFF_COLS/
+  // LOG_COLS (prefixed ATT_ here since this file already has its own
+  // unrelated LOG_COLS for HSChecklistLog) — same "modules don't share
+  // internals" duplication as everything else above.
+  const ATT_AGENCY_COLS = ['AgencyID', 'Name', 'Type', 'Active', 'CreatedDate', 'CreatedBy'];
+  const ATT_STAFF_COLS = ['StaffID', 'AgencyID', 'Name', 'Role', 'Phone', 'AadhaarNumber', 'AadhaarPhotoURL', 'Code', 'PhotoURL', 'Active', 'CreatedDate', 'CreatedBy', 'BloodGroup'];
+  const ATT_LOG_COLS = ['LogID', 'StaffID', 'Date', 'CheckInTime', 'CheckInPhotoURL', 'CheckOutTime', 'CheckOutPhotoURL', 'Status', 'LoggedBy'];
 
   let currentPeriod = 'day'; // 'day' | 'week' | 'month'
 
@@ -454,6 +461,68 @@ const DashboardModule = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
+  // STAFF ATTENDANCE — "Currently checked in" snapshot (added
+  // 27-Aug-2026, per user request: this same panel already lives at
+  // the top of Staff Attendance's own Attendance Log — see
+  // module-attendance.js's renderAttendanceLogs — and is now mirrored
+  // here too so it's visible from the Dashboard as well, without
+  // removing it from Staff Attendance). This is a live "who's on site
+  // right now" snapshot, not a period total, so — like Current Shift
+  // Readings above — it's NOT scoped by the Day/Week/Month dropdown;
+  // it always reflects every open session (CheckInTime set, no
+  // CheckOutTime yet), regardless of what date that session started on
+  // or which period is selected.
+  async function loadCurrentlyCheckedIn() {
+    const [agencyRows, staffRows, logRows] = await Promise.all([
+      MVOA.sheetsRead(MVOA.TABS.attAgencies),
+      MVOA.sheetsRead(MVOA.TABS.attStaff),
+      MVOA.sheetsRead(MVOA.TABS.attLog)
+    ]);
+    const agencies = rowsToObjs(agencyRows, ATT_AGENCY_COLS);
+    const staff = rowsToObjs(staffRows, ATT_STAFF_COLS);
+    const logs = rowsToObjs(logRows, ATT_LOG_COLS);
+    const staffById = (id) => staff.find(s => s.StaffID === id);
+    const agencyName = (id) => { const a = agencies.find(x => x.AgencyID === id); return a ? a.Name : id; };
+
+    // Same "open session" definition as module-attendance.js's own
+    // openNow: CheckInTime set, CheckOutTime blank — no isActive filter,
+    // matching that panel's behavior of still showing someone with a
+    // genuinely open session even if they were deactivated afterward.
+    const openNow = logs.filter(l => l.CheckInTime && !l.CheckOutTime)
+      .map(l => ({ l, s: staffById(l.StaffID) }))
+      .filter(r => r.s)
+      .sort((a, b) => a.l.CheckInTime.localeCompare(b.l.CheckInTime));
+    const byAgency = new Map();
+    openNow.forEach(r => {
+      const agency = agencyName(r.s.AgencyID);
+      if (!byAgency.has(agency)) byAgency.set(agency, []);
+      byAgency.get(agency).push(r);
+    });
+    const agencyOrder = [...byAgency.keys()].sort((a, b) => a.localeCompare(b));
+    return { count: openNow.length, byAgency, agencyOrder };
+  }
+
+  function currentlyCheckedInHtml(checkedIn) {
+    if (!checkedIn.count) return '<p class="muted" style="margin:0;">Nobody currently checked in.</p>';
+    return checkedIn.agencyOrder.map(agency => `
+      <div style="margin-top:8px;">
+        <strong style="font-size:0.8rem;color:var(--mvoa-blue);">${escapeHtml(agency)} (${checkedIn.byAgency.get(agency).length})</strong>
+        <div class="muted" style="font-size:0.82rem;margin-top:2px;">
+          ${checkedIn.byAgency.get(agency).map(({ l, s }) => `${escapeHtml(s.Name)}${s.Role ? ' (' + escapeHtml(s.Role) + ')' : ''} — since ${new Date(l.CheckInTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${l.Date !== isoDateLocal_local(new Date()) ? ' on ' + escapeHtml(l.Date) : ''}`).join('<br>')}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Local copy of module-attendance.js's isoDateLocal (YYYY-MM-DD in the
+  // browser's own timezone, not UTC) — needed only to compare a log's
+  // Date against "today" for the "(since <date>)" carried-over note above.
+  function isoDateLocal_local(d) {
+    const yyyy = d.getFullYear(), mm = String(d.getMonth() + 1).padStart(2, '0'), dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // ───────────────────────────────────────────────────────────
   // IN/OUT LOG — Sewage/Garbage/Water Tanker/Garden Waste. Grouped
   // by category; a category with nothing logged this period is left
   // out entirely (per the app's convention elsewhere of not showing
@@ -519,13 +588,14 @@ const DashboardModule = (function () {
     const range = periodRange(currentPeriod);
     labelEl.textContent = range.label;
 
-    let tasks, assigneeOptions, dg, inOut;
+    let tasks, assigneeOptions, dg, inOut, checkedIn;
     try {
-      [tasks, assigneeOptions, dg, inOut] = await Promise.all([
+      [tasks, assigneeOptions, dg, inOut, checkedIn] = await Promise.all([
         loadOpsTasks(),
         MVOA.loadAssigneeOptions(),
         loadDgPeriodMetrics(range),
-        loadInOutForPeriod(range)
+        loadInOutForPeriod(range),
+        loadCurrentlyCheckedIn()
       ]);
     } catch (e) {
       bodyEl.innerHTML = `<p class="error-text">Could not load dashboard: ${escapeHtml(e.message)}</p>`;
@@ -540,6 +610,12 @@ const DashboardModule = (function () {
     lastLoaded = { tasks, range, assigneeOptions, dgRows: dg.rows || [] };
 
     bodyEl.innerHTML = `
+      <div class="card" style="max-width:900px;margin:0 0 18px 0;background:#e3f1eb;">
+        <h3 style="margin:0 0 4px;color:var(--mvoa-blue);">🟢 Currently Checked In (${checkedIn.count})</h3>
+        <p class="muted" style="margin:0 0 4px;font-size:0.78rem;">Live snapshot from Staff Attendance — not scoped to the Day/Week/Month selector above.</p>
+        ${currentlyCheckedInHtml(checkedIn)}
+      </div>
+
       <div class="card" style="max-width:900px;margin:0 0 18px 0;">
         <h3 style="margin:0 0 12px;color:var(--mvoa-blue);">Daily Operations</h3>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
