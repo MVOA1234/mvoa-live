@@ -3090,7 +3090,7 @@ const FinanceModule = (function () {
         <div class="mvoa-list-item">
           <div class="mvoa-row fin-myapproval-trail-toggle" data-idx="${i}" style="cursor:pointer;">
             <strong>${req ? escapeHtml(req.Category) + ' — ' + formatAmount(req.Amount) : escapeHtml(a.RequestID)}</strong>
-            <span class="mvoa-badge" style="color:${ok ? '#0f6e56' : '#a32d2d'};background:${ok ? '#eaf5ef' : '#fbeaea'};">${ok ? '✅' : '❌'} ${escapeHtml(a.Stage)} — ${escapeHtml(a.Decision)}</span>
+            <span class="mvoa-badge" style="color:${ok ? '#0f6e56' : '#a32d2d'};background:${ok ? '#eaf5ef' : '#fbeaea'};" title="This is the specific decision YOU made — not necessarily the request's current stage, which may have moved on since.">${ok ? '✅' : '❌'} You ${a.Decision === 'Approved' ? 'approved' : a.Decision.toLowerCase()}: ${escapeHtml(a.Stage)}</span>
           </div>
           ${req && req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
@@ -4074,6 +4074,15 @@ const FinanceModule = (function () {
     if (!req) return;
     const user = MVOA.getUser();
     const errEl = document.querySelector(`.fin-treasurer-error[data-request-id="${requestId}"]`);
+    // Bug found in testing: a failed attempt (e.g. a network timeout)
+    // left its error text sitting in this element — clicking the button
+    // again to retry ran a genuinely new attempt, but with no visible
+    // change until it either succeeded (full re-render replaces
+    // everything, including this text) or failed again with the exact
+    // same message, it looked indistinguishable from "nothing happened."
+    // Clearing it here, right before the retry actually starts, makes a
+    // fresh attempt visibly distinct from a stale leftover error.
+    if (errEl) errEl.textContent = 'Sending…';
     try {
       const existingNoteIds = [];
       const noteId = MVOA.nextId('FNOTE', existingNoteIds);
