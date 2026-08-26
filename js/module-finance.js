@@ -179,7 +179,15 @@ const FinanceModule = (function () {
     // by more than one Payment Request over time (CAPEX installments, an
     // AMC's multiple payment cycles), so this is never "consumed" by a
     // link — just referenced.
-    'LinkedSpendRequestID'];
+    'LinkedSpendRequestID',
+    // Only populated when this Payment Request's Amount exceeds its
+    // linked Approval-to-Spend's own approved Amount (see the red flag
+    // on New Payment Request) — a required, freeform explanation of why,
+    // typed by the requester at submit time. Surfaced to approvers via
+    // paymentReferenceLineHtml so whoever approves the payment sees the
+    // reason for the overage right alongside the linked ATS reference,
+    // not just a bare number mismatch.
+    'OverageJustification'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -280,12 +288,35 @@ const FinanceModule = (function () {
     const { start, end } = fyDateRange(fy);
     // "Consumed" = Approved requests against this category that are
     // Budgeted (Unbudgeted spend, by definition, doesn't draw against a
-    // budget line) and fall within this FY, regardless of payment stage —
-    // approval is the moment the commitment is made against the budget.
+    // budget line) and fall within this FY. Each one starts out counted
+    // at its own approved Amount — that's the reservation made the
+    // moment the spend is approved, before any payment exists yet.
+    //
+    // For a one-time expense that later gets a Payment Request directly
+    // linked to it (LinkedSpendRequestID) and that payment is itself
+    // Approved, the reservation is replaced by the SUM of its linked,
+    // Approved payment(s) — the actual committed amount, which can be
+    // less (a cheaper final invoice), more (see the over-amount flag on
+    // New Payment Request), or split across more than one payment (a
+    // multi-installment CAPEX/AMC) than the original spend-approval
+    // estimate. A linked payment still PendingApproval or Rejected
+    // doesn't replace anything yet — the original estimate keeps
+    // reserving the budget until a real payment amount is actually
+    // locked in. Recurring/standing categories (linked via ContractID,
+    // or not linked to a Payment Request at all) are untouched by this —
+    // this only ever fires for requests something actually links back to
+    // via LinkedSpendRequestID.
     const consumed = requestsCache
       .filter(r => r.Category === category && r.BudgetStatus === 'Budgeted' && r.Status === 'Approved')
       .filter(r => { const d = new Date(r.RequestedDate); return d >= start && d <= end; })
-      .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
+      .reduce((sum, r) => {
+        const linkedApprovedPayments = requestsCache.filter(p =>
+          p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === r.RequestID && p.Status === 'Approved');
+        const actual = linkedApprovedPayments.length
+          ? linkedApprovedPayments.reduce((s, p) => s + (Number(p.Amount) || 0), 0)
+          : (Number(r.Amount) || 0);
+        return sum + actual;
+      }, 0);
     return { total, consumed, available: total - consumed, fy };
   }
 
@@ -1081,6 +1112,28 @@ const FinanceModule = (function () {
     return real.length > 1 ? real.sort((a, b) => a.localeCompare(b)) : null; // null = no selector needed, rule doesn't branch on budget status
   }
 
+  // Bug found in testing: a category whose rule never branches into
+  // Budgeted/Unbudgeted tiers (budgetStatusOptionsFor returns null, so no
+  // selector is shown — true of most categories: AMCs, utilities,
+  // Security Services, Garbage/Sewage/Pool, Water Tanker Supply,
+  // Miscellaneous, etc.) was having its submitted requests saved with
+  // BudgetStatus '' (blank) rather than 'Budgeted'. Since budgetInfoFor's
+  // Consumed sum only counts rows tagged exactly 'Budgeted', this meant
+  // every one of those categories silently never accumulated consumption
+  // against their real FinanceBudgets line, and the New Request form's
+  // "Budget Available" preview never showed at all for them (it gates on
+  // the same 'Budgeted' tag) — even though a budget line genuinely
+  // exists for almost all of them. A blank BudgetStatus on a single-tier
+  // rule was never meant to mean "don't track this against budget" — it
+  // just means the category never needed a Budgeted/Unbudgeted CHOICE.
+  // Only a rule explicitly tagged 'Unbudgeted' (no matching 'Budgeted'
+  // tier at all — rare, but keeps a true one-off Unbudgeted-only category
+  // correctly excluded) opts out; anything else defaults to 'Budgeted'.
+  function effectiveBudgetStatus(selectorValue, rule) {
+    if (selectorValue) return selectorValue; // an explicit dual-tier choice always wins
+    return (rule && rule.BudgetStatus === 'Unbudgeted') ? '' : 'Budgeted';
+  }
+
   function resolveRule(category, budgetStatus, amount, pettyCashType) {
     const amt = Number(amount) || 0;
     const candidates = rulesCache.filter(r =>
@@ -1631,6 +1684,8 @@ const FinanceModule = (function () {
         <label>Amount (₹)
           <input id="pr-amount" type="number" min="0" step="1" placeholder="0" style="-moz-appearance:textfield;" onwheel="this.blur()">
         </label>
+        <div id="pr-spend-amount-note"></div>
+        <div id="pr-overage-justification-wrap"></div>
         <label id="pr-vendor-label">Vendor / Payee
           <input id="pr-vendor" type="text" placeholder="e.g. ABC Electricals">
         </label>
@@ -1652,11 +1707,19 @@ const FinanceModule = (function () {
     selectedContractId = '';
     selectedLinkedSpendRequestId = '';
     paymentIsGoodsProcurement = false;
+    // Tracks whether the overage-justification textarea is currently on
+    // screen — refreshPreview() only rebuilds it when this actually
+    // changes (over → not-over or vice versa), never on every amount
+    // keystroke, so whatever the requester has already typed into it
+    // isn't wiped out mid-sentence by the next digit they type into
+    // Amount. Reset fresh each time this form is (re)rendered.
+    let overageJustificationVisible = false;
     renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, [], 3);
 
     const typeEl = body.querySelector('#pr-type');
     const amtEl = body.querySelector('#pr-amount');
     const vendorEl = body.querySelector('#pr-vendor');
+    const descEl = body.querySelector('#pr-desc');
     const contractWrap = body.querySelector('#pr-contract-wrap');
     const spendWrap = body.querySelector('#pr-spend-wrap');
     const previewEl = body.querySelector('#pr-rule-preview');
@@ -1740,7 +1803,13 @@ const FinanceModule = (function () {
           refreshContractPicker();
           const r = requestsCache.find(x => x.RequestID === selectedLinkedSpendRequestId);
           if (r && r.Vendor) vendorEl.value = r.Vendor;
+          // Carries over the original spend approval's own Description as
+          // a starting point — the requester can edit or overwrite it,
+          // same as Vendor above, rather than retyping the same context
+          // that's already sitting right there on the linked request.
+          if (r && r.Description) descEl.value = r.Description;
         }
+        refreshPreview(); // updates the Approved-to-Spend amount note / over-amount flag right away
       });
     }
 
@@ -1805,6 +1874,46 @@ const FinanceModule = (function () {
         } else {
           wccWrap.innerHTML = '';
           paymentIsGoodsProcurement = false;
+        }
+      }
+      // Shows the linked Approval-to-Spend's own approved amount right
+      // next to the Amount field, and flags it plainly when this payment
+      // is asking for more than that — the requester (and whoever
+      // approves it) should see the mismatch before submitting, not
+      // discover it later reconciling budget consumption against actual
+      // spend. Only meaningful for the direct Approval-to-Spend link —
+      // a Contract is an ongoing agreement, not a single fixed amount to
+      // compare against.
+      const spendNoteEl = body.querySelector('#pr-spend-amount-note');
+      const justWrap = body.querySelector('#pr-overage-justification-wrap');
+      if (spendNoteEl) {
+        const linkedAts = selectedLinkedSpendRequestId ? requestsCache.find(r => r.RequestID === selectedLinkedSpendRequestId) : null;
+        if (linkedAts) {
+          const atsAmount = Number(linkedAts.Amount) || 0;
+          const over = amount > 0 && amount > atsAmount;
+          spendNoteEl.innerHTML = `
+            <p class="muted" style="margin:4px 0;">Approved to Spend (${escapeHtml(linkedAts.RequestID)}): <strong>${formatAmount(atsAmount)}</strong></p>
+            ${over ? `<p class="error-text" style="margin:4px 0;">⚠️ This payment request (${formatAmount(amount)}) is higher than the approved spend (${formatAmount(atsAmount)} — ${escapeHtml(linkedAts.RequestID)}).</p>` : ''}
+          `;
+          // Only (re)built the moment "over" actually changes — see the
+          // overageJustificationVisible comment above. Rebuilding this on
+          // every keystroke of Amount would wipe out whatever the
+          // requester has already typed here.
+          if (justWrap) {
+            if (over && !overageJustificationVisible) {
+              justWrap.innerHTML = `
+                <label>Justification for exceeding approved spend
+                  <textarea id="pr-overage-justification" rows="2" placeholder="Why is this payment more than the approved spend amount?"></textarea>
+                </label>`;
+              overageJustificationVisible = true;
+            } else if (!over && overageJustificationVisible) {
+              justWrap.innerHTML = '';
+              overageJustificationVisible = false;
+            }
+          }
+        } else {
+          spendNoteEl.innerHTML = '';
+          if (justWrap && overageJustificationVisible) { justWrap.innerHTML = ''; overageJustificationVisible = false; }
         }
       }
       const docs = effectiveDocsForPayment(type, amount, paymentIsGoodsProcurement);
@@ -1915,6 +2024,18 @@ const FinanceModule = (function () {
       errEl.textContent = 'This payment type requires linking to a Contract or an Approval to Spend before it can be submitted.';
       return;
     }
+    // Mirrors the red flag shown live on this form (see refreshPreview) —
+    // re-checked here at submit time too, since the linked request or
+    // amount could have changed since the flag last redrew. Required,
+    // not optional: a payment that knowingly exceeds what was approved
+    // needs an explanation on record, not just a number in a cell.
+    const linkedAtsForSubmit = selectedLinkedSpendRequestId ? requestsCache.find(r => r.RequestID === selectedLinkedSpendRequestId) : null;
+    const isOverApprovedSpend = !!(linkedAtsForSubmit && amount > (Number(linkedAtsForSubmit.Amount) || 0));
+    const overageJustification = isOverApprovedSpend ? (body.querySelector('#pr-overage-justification')?.value || '').trim() : '';
+    if (isOverApprovedSpend && !overageJustification) {
+      errEl.textContent = 'This payment is higher than the approved spend — please enter a justification before submitting.';
+      return;
+    }
 
     submitBtn.disabled = true;
     submitBtn.textContent = 'Submitting…';
@@ -1958,7 +2079,7 @@ const FinanceModule = (function () {
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
       StageEnteredAt: now, StageOpenedAt: '', PettyCashType: '', ContractID: selectedContractId,
-      LinkedSpendRequestID: selectedLinkedSpendRequestId
+      LinkedSpendRequestID: selectedLinkedSpendRequestId, OverageJustification: overageJustification
     };
 
     try {
@@ -2155,7 +2276,7 @@ const FinanceModule = (function () {
       }
       const rule = result.rule;
       const docs = requiredDocsList(rule);
-      const budgetStatus = currentBudgetStatus();
+      const budgetStatus = effectiveBudgetStatus(currentBudgetStatus(), rule);
       const fy = currentFY();
       const info = (budgetStatus === 'Budgeted' && category !== 'Petty Cash') ? budgetInfoFor(category, fy) : null;
       previewEl.innerHTML = `
@@ -2483,6 +2604,11 @@ const FinanceModule = (function () {
     if (result.blocked) { errEl.textContent = result.message; return; }
     if (!result.rule) { errEl.textContent = 'No approval rule matches this category/amount combination — contact your Developer.'; return; }
     const rule = result.rule;
+    // See effectiveBudgetStatus's comment — a single-tier category (no
+    // Budgeted/Unbudgeted selector shown) must still be saved as
+    // 'Budgeted' by default, or its FinanceBudgets line never accrues
+    // any Consumed amount at all.
+    const savedBudgetStatus = effectiveBudgetStatus(budgetStatus, rule);
     const docs = requiredDocsList(rule);
     const justificationOnly = isJustificationOnly(docs);
     const docsConfirmationOnly = isDocsConfirmationOnly(docs);
@@ -2606,7 +2732,7 @@ const FinanceModule = (function () {
     const initialStatus = hasNoApprovalStages ? 'Approved' : 'PendingApproval';
 
     const row = Object.assign({
-      RequestID: requestId, RuleID: rule.RuleID, Category: category, BudgetStatus: budgetStatus,
+      RequestID: requestId, RuleID: rule.RuleID, Category: category, BudgetStatus: savedBudgetStatus,
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
       RequestType: requestType, AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
       AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
@@ -3134,7 +3260,10 @@ const FinanceModule = (function () {
     }
     if (req.LinkedSpendRequestID) {
       const r = requestsCache.find(x => x.RequestID === req.LinkedSpendRequestID);
-      return `<p style="margin:4px 0;font-size:0.8rem;">🔗 Approval to Spend: <strong>${escapeHtml(req.LinkedSpendRequestID)}</strong>${r ? ` — ${escapeHtml(r.Category)} — ${escapeHtml(r.Vendor || '')} — ${formatAmount(r.Amount)} (approved ${formatDate(r.RequestedDate)})` : ''}</p>`;
+      const overAmount = r && Number(req.Amount) > (Number(r.Amount) || 0);
+      return `<p style="margin:4px 0;font-size:0.8rem;">🔗 Approval to Spend: <strong>${escapeHtml(req.LinkedSpendRequestID)}</strong>${r ? ` — ${escapeHtml(r.Category)} — ${escapeHtml(r.Vendor || '')} — ${formatAmount(r.Amount)} (approved ${formatDate(r.RequestedDate)})` : ''}</p>${
+        overAmount ? `<p style="margin:4px 0;font-size:0.8rem;color:#b3261e;">⚠️ This payment (${formatAmount(req.Amount)}) exceeds the approved spend (${formatAmount(r.Amount)})${req.OverageJustification ? ` — <strong>Justification:</strong> ${escapeHtml(req.OverageJustification)}` : ' — no justification on file.'}</p>` : ''
+      }`;
     }
     return `<p style="margin:4px 0;font-size:0.8rem;color:#b3261e;">⚠️ No linked Contract or Approval to Spend on file.</p>`;
   }
