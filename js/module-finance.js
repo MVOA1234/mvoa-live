@@ -1583,6 +1583,21 @@ const FinanceModule = (function () {
     // Petty Cash Expense is fully settled the moment it's Approved — no
     // Payments/Disbursement chain follows (already paid from the float).
     if (isPettyCashExpense(request)) return { text: 'Approved — adjusted against Petty Cash Float', cls: 'paid' };
+    // An Approval-to-Spend that's been superseded by a linked Payment
+    // Request (see isSupersededByPaymentRequest) never gets its OWN
+    // DisbursementStage set — the actual expense-sheet entry and payout
+    // happen off the Payment Request instead. Without this, the ATS's own
+    // badge would sit at "awaiting Expense Sheet entry" forever, even
+    // after the linked payment was fully disbursed — bug found in
+    // testing (the ATS's detail view showed a stale "awaiting" badge
+    // while its own Payment Release checklist correctly stayed all-
+    // pending, since neither had actually moved for THIS record).
+    if (isSupersededByPaymentRequest(request)) {
+      const linked = requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === request.RequestID);
+      const paid = linked.find(p => p.DisbursementStage === 'Paid');
+      if (paid) return { text: `Paid via linked Payment Request ${paid.RequestID}${paid.PaymentRef ? ' (Ref: ' + paid.PaymentRef + ')' : ''}`, cls: 'paid' };
+      return { text: `Payment in progress — see linked Payment Request ${linked[0].RequestID}`, cls: 'approved' };
+    }
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
       case 'PendingTreasurer': return { text: `Awaiting Treasurer review (payment release)${sinceText(request)}`, cls: 'approved' };
@@ -2901,7 +2916,16 @@ const FinanceModule = (function () {
     // Once Approved, the request moves into the Payments pipeline —
     // show that half of the journey too, same trail-style formatting.
     let paymentsTrailHtml = '';
-    if (request.Status === 'Approved' && !isPettyCashExpense(request)) {
+    if (request.Status === 'Approved' && isSupersededByPaymentRequest(request)) {
+      // See stageDescription's matching branch — this ATS's own checklist
+      // never moves; the real disbursement happened off the linked
+      // Payment Request instead.
+      const linked = requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === request.RequestID);
+      const paid = linked.find(p => p.DisbursementStage === 'Paid');
+      paymentsTrailHtml = paid
+        ? `<p style="margin:10px 0 3px;color:green;">✅ Paid via linked Payment Request ${escapeHtml(paid.RequestID)}${paid.PaymentRef ? ' — Ref: ' + escapeHtml(paid.PaymentRef) : ''}</p>`
+        : `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Payment in progress — see linked Payment Request ${escapeHtml(linked[0].RequestID)}</p>`;
+    } else if (request.Status === 'Approved' && !isPettyCashExpense(request)) {
       const stage = request.DisbursementStage;
       const steps = [
         { done: !!stage, label: 'Expense Sheet entry logged (Accountant)' },
