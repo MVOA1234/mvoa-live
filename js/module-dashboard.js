@@ -356,28 +356,34 @@ const DashboardModule = (function () {
       if (legacyLevelItem && r.ItemID === legacyLevelItem.ItemID) setIfNewer('legacyLevel', '_legacyAt');
     });
     const rows = Object.values(byDateShift).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    // Fall back to the legacy Fuel Level reading wherever a date+shift
-    // has no Before value of its own. Confirmed against real data: Fuel
-    // Level is still the field technicians actually fill in every
-    // shift (Before/After Top Up are rarely used), so this fallback is
-    // the NORMAL path going forward, not just a historic one — it must
-    // stay unconditional, not gated on whether Hours/kWh were also
-    // logged that shift.
-    rows.forEach(r => { if (r.dieselBefore == null && r.legacyLevel != null) r.dieselBefore = r.legacyLevel; });
+    // REVISED 27-Aug-2026 to mirror module-hs.js's loadDgOperationsData
+    // after that file's own diesel-math fix — this dashboard copy had
+    // drifted out of sync (see that file's header comment for the full
+    // incident: "Diesel Level Before Top Up" was still force-required on
+    // every shift and technicians were routinely entering a stray 0%
+    // there, which used to silently override the correct Fuel Level
+    // reading and zero out Diesel Consumed). Two changes from the
+    // previous version of this function:
+    //   1. Fuel Level (legacy item) now WINS whenever it's present,
+    //      instead of only being used when Before is blank — Before is
+    //      no longer even shown on the checklist form, so this is the
+    //      only reading that matters going forward.
+    //   2. "Diesel Topped Up" is a directly-entered LITRES figure (from
+    //      the standalone "Log Diesel Top-Up" screen, stored on the
+    //      "Diesel Level After Top Up" item — its name is legacy, its
+    //      meaning was already repurposed to litres), not a second %
+    //      gauge reading to subtract — so the old two-leg
+    //      before-the-top-up / after-the-top-up split is gone. The
+    //      formula is just: consumed = (this shift's Fuel Level − next
+    //      shift's Fuel Level), litres, plus however many litres were
+    //      topped up this shift (0 if none logged).
+    rows.forEach(r => { if (r.legacyLevel != null) r.dieselBefore = r.legacyLevel; });
 
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
     const round2 = (n) => Math.round(n * 100) / 100;
-    // The tank level carried into the START of a shift is whatever the
-    // PRECEDING shift's reading ended on — its After Top-Up level if it
-    // had one, otherwise its own single Before/legacy level. Needed to
-    // compute the "before the top-up" consumption leg below.
-    function endingLevel(row) {
-      if (!row) return null;
-      return row.dieselAfter != null ? row.dieselAfter : row.dieselBefore;
-    }
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i], next = rows[i + 1], prev = rows[i - 1];
+      const r = rows[i], next = rows[i + 1];
       r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
       // Sanity guard: an hours meter can never advance more than the
@@ -392,33 +398,21 @@ const DashboardModule = (function () {
         if (r.hoursRun < 0 || (elapsedHrs > 0 && r.hoursRun > elapsedHrs + 0.25)) r.hoursRun = null;
       }
       if (typeof r.kwhGenerated === 'number' && r.kwhGenerated < 0) r.kwhGenerated = null;
-      r.dieselTopUpLitres = (r.dieselBefore != null && r.dieselAfter != null) ? round2(pctToLitres(r.dieselAfter - r.dieselBefore)) : null;
-      if (r.dieselAfter != null) {
-        // Top-up happened this shift — per the documented formula this
-        // is TWO consumption legs added together, not just one:
-        //   (a) from the PRECEDING shift's ending level down to this
-        //       shift's own Before Top-Up reading — consumption before
-        //       the top-up actually happened (can be well into the
-        //       shift, not necessarily right at its start);
-        //   (b) from this shift's After Top-Up reading down to the
-        //       NEXT shift's own starting reading — consumption after
-        //       the top-up.
-        // Previously only leg (b) was computed, silently treating leg
-        // (a) as zero — which is why a shift with real DG runtime
-        // before its top-up was showing 0 consumed instead of a real
-        // number. If either leg is unknown, the total is genuinely
-        // unknown too (not just whichever leg happens to be available).
-        const beforeLevel = endingLevel(prev);
-        let legA = (beforeLevel != null && r.dieselBefore != null) ? pctToLitres(beforeLevel - r.dieselBefore) : null;
-        let legB = (next && next.dieselBefore != null) ? pctToLitres(r.dieselAfter - next.dieselBefore) : null;
-        if (typeof legA === 'number' && legA < 0) legA = null; // level can't have risen without a logged top-up — treat as unknown, not negative
-        if (typeof legB === 'number' && legB < 0) legB = null;
-        r.dieselConsumedLitres = (legA != null && legB != null) ? round2(legA + legB) : null;
-      } else if (next && r.dieselBefore != null && next.dieselBefore != null) {
-        r.dieselConsumedLitres = round2(pctToLitres(r.dieselBefore - next.dieselBefore));
-      } else {
-        r.dieselConsumedLitres = null;
-      }
+      // dieselAfter holds a directly-entered LITRES-topped-up figure —
+      // no pctToLitres conversion needed, just round it.
+      r.dieselTopUpLitres = (r.dieselAfter != null) ? round2(r.dieselAfter) : null;
+      // Base consumption from the level delta alone — deliberately NOT
+      // clamped to non-negative here, since a real top-up can
+      // legitimately make this go negative; only the FINAL total below
+      // gets the "can't be negative" guard.
+      const baseConsumption = (next && r.dieselBefore != null && next.dieselBefore != null)
+        ? pctToLitres(r.dieselBefore - next.dieselBefore) : null;
+      r.dieselConsumedLitres = (baseConsumption != null) ? round2(baseConsumption + (r.dieselTopUpLitres || 0)) : null;
+      // Consumption can never be negative — a negative result here (even
+      // after adding back any logged top-up) means the level rose by
+      // MORE than the logged top-up accounts for, i.e. an additional
+      // top-up happened that wasn't logged. Reported as unknown rather
+      // than a misleading negative figure, and left out of totals below.
       if (typeof r.dieselConsumedLitres === 'number' && r.dieselConsumedLitres < 0) r.dieselConsumedLitres = null;
       if (typeof r.dieselTopUpLitres === 'number' && r.dieselTopUpLitres < 0) r.dieselTopUpLitres = null;
     }
@@ -447,12 +441,19 @@ const DashboardModule = (function () {
     // Current-shift gauge snapshot — the most recent reading logged for
     // each, all-time (not scoped to `range`), since "current level" only
     // ever means "as of the last time someone checked," not a total over
-    // a selected period. Diesel level falls back to the legacy Fuel
-    // Level item wherever that's the more recent of the two, same as
-    // the period math above.
-    const dieselIds = [beforeItem, legacyLevelItem].filter(Boolean).map(i => i.ItemID);
+    // a selected period. Diesel level reads from Fuel Level ONLY —
+    // deliberately not falling back to (or blending with, via "most
+    // recent of either") "Diesel Level Before Top Up" any more, same
+    // reasoning as the period math above: that item can carry a stray,
+    // un-rechecked value with a recent timestamp, which used to win here
+    // via latestNumericReading's plain "most recent wins" rule even
+    // though it wasn't the real reading. If a site's data somehow has no
+    // Fuel Level entry at all, fall back to Before rather than showing
+    // nothing.
+    const legacyGauge = latestNumericReading(results, logs, legacyLevelItem ? [legacyLevelItem.ItemID] : []);
+    const beforeGauge = latestNumericReading(results, logs, beforeItem ? [beforeItem.ItemID] : []);
     const currentGauges = {
-      diesel: latestNumericReading(results, logs, dieselIds),
+      diesel: legacyGauge || beforeGauge,
       sump1: latestNumericReading(results, logs, sump1Item ? [sump1Item.ItemID] : []),
       sump2: latestNumericReading(results, logs, sump2Item ? [sump2Item.ItemID] : [])
     };
