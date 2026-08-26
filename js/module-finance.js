@@ -2823,6 +2823,52 @@ const FinanceModule = (function () {
       return;
     }
 
+    // Bug found in testing: if the person submitting is ALSO the sole
+    // required approver for the Administrative (and/or Financial) stage
+    // — e.g. a Secretary raising a request whose matrix lists "Secretary"
+    // as the Administrative approver, because the normal initiator
+    // wasn't available to do it themselves — the request came back to
+    // that SAME person as a fresh pending approval, asking them to
+    // approve their own submission. That's a no-op click, not a genuine
+    // second opinion, same rationale as the FM auto-approval below in
+    // doSubmitPaymentRequest. Auto-credit the submitter for each LEADING
+    // stage they single-handedly satisfy, stopping at the first stage
+    // that still genuinely needs someone else (e.g. a "Secretary &
+    // President" AND-group where only Secretary submitted — President
+    // still has to approve for real). EC/AGM are never auto-approved
+    // this way — those need a genuine quorum/vote, not one person's say.
+    if (!hasNoApprovalStages) {
+      const person = rolesCache.find(p => p.Name === user.name) || { Name: user.name, Role: user.role };
+      const leadingStages = [
+        { key: 'Administrative', groups: parseApproverGroups(rule.AdministrativeApprover) },
+        { key: 'Financial', groups: parseApproverGroups(rule.FinancialApprover) }
+      ];
+      const autoApprovals = [];
+      for (const s of leadingStages) {
+        if (!s.groups.length) continue; // stage doesn't apply to this rule at all
+        if (!s.groups.every(g => personMatchesAndGroup(person, g))) break; // needs someone else too — stop here
+        autoApprovals.push({
+          ApprovalID: await nextApprovalId(), RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
+          Stage: s.key, Decision: 'Approved', Comment: 'Auto-approved — submitter already holds this role', Timestamp: now
+        });
+      }
+      if (autoApprovals.length) {
+        try {
+          for (const a of autoApprovals) await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, a));
+          await loadAll(true);
+          const freshRow = requestsCache.find(r => r.RequestID === requestId);
+          if (freshRow) {
+            const state = computeRequestState(freshRow, autoApprovals);
+            const now2 = new Date().toISOString();
+            const updated = state.fullyApproved
+              ? Object.assign({}, freshRow, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now2, StageOpenedAt: '' })
+              : Object.assign({}, freshRow, { StageEnteredAt: now2, StageOpenedAt: '' });
+            await MVOA.sheetsUpdateRow(TAB_REQUESTS, freshRow.rowNumber, objToRow(REQUEST_COLS, updated));
+          }
+        } catch (e) { /* best-effort — the request itself is already safely saved either way */ }
+      }
+    }
+
     pendingAttachments = [];
     fillPrInApp = false;
     fillCsInApp = false;
