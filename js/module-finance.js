@@ -1466,6 +1466,20 @@ const FinanceModule = (function () {
   const PAYMENT_STAGE_ROLE_TOKEN = { FM: 'fm', OpsHead: 'operations head', Secretary: 'secretary', Treasurer: 'treasurer', President: 'president' };
   const PAYMENT_STAGE_REQUIRED_COL = { FM: 'FMRequired', OpsHead: 'OpsHeadRequired', Secretary: 'SecretaryRequired', Treasurer: 'TreasurerRequired', President: 'PresidentRequired' };
   const PAYMENT_STAGE_LABEL = { FM: 'FM Verification', OpsHead: 'Operations Head — Technical Acceptance', Secretary: 'Secretary — Admin Approval', Treasurer: 'Treasurer — Financial Approval', President: 'President Approval' };
+  // Bug found in testing: virtually every FinancePaymentRules row has
+  // TreasurerRequired = Yes (it's the near-universal default, not a
+  // deliberate per-category signal), but the pre-approval walk below
+  // treated it as a genuine Approval Queue stage a Treasurer had to click
+  // through BEFORE the Accountant ever saw the request — on top of the
+  // Treasurer ALSO reviewing/passing the actual expense sheet entry once
+  // the Accountant logs it (that second step happens for every payment
+  // type, unconditionally, via the disbursement pipeline). Net effect:
+  // the Treasurer had to approve the same payment twice. Confirmed with
+  // the user that the intended flow has exactly one Treasurer touchpoint
+  // — the expense sheet review — so 'Treasurer' is excluded here
+  // entirely; FinancePaymentRules' other four columns (FM/OpsHead/
+  // Secretary/President) still gate the initial approval as before.
+  const PAYMENT_PRE_APPROVAL_STAGES = ['FM', 'OpsHead', 'Secretary', 'President'];
   function paymentRuleFor(paymentType) {
     return paymentRulesCache.find(r => r.PaymentType === paymentType) || {};
   }
@@ -1490,7 +1504,13 @@ const FinanceModule = (function () {
   }
   function computePaymentRequestState(request, approvals) {
     const rule = paymentRuleFor(request.Category);
-    const order = ['FM', 'OpsHead', 'Secretary', 'Treasurer', 'President'];
+    // 'Treasurer' deliberately excluded from this pre-approval walk — see
+    // PAYMENT_PRE_APPROVAL_STAGES comment below for why. TreasurerRequired
+    // is still read everywhere else (paymentHasNoApprovalStages, the
+    // onlyFmRequired check) with the same exclusion, so a payment type
+    // whose only "Yes" is TreasurerRequired now has zero pre-approval
+    // stages, same as one with everything blank.
+    const order = PAYMENT_PRE_APPROVAL_STAGES;
     const stageDefs = order.filter(k => rule[PAYMENT_STAGE_REQUIRED_COL[k]] === 'Yes')
       .map(k => ({ key: k, isDone: (visit) => visit.length > 0 }));
     const result = walkStageChain(stageDefs, approvals);
@@ -1516,7 +1536,8 @@ const FinanceModule = (function () {
   // guards the same way the Schedule A/B/C zero-approver case does)
   function paymentHasNoApprovalStages(paymentType) {
     const rule = paymentRuleFor(paymentType);
-    return ['FMRequired', 'OpsHeadRequired', 'SecretaryRequired', 'TreasurerRequired', 'PresidentRequired']
+    // TreasurerRequired intentionally omitted — see PAYMENT_PRE_APPROVAL_STAGES.
+    return PAYMENT_PRE_APPROVAL_STAGES.map(k => PAYMENT_STAGE_REQUIRED_COL[k])
       .every(col => rule[col] !== 'Yes');
   }
 
@@ -1959,8 +1980,8 @@ const FinanceModule = (function () {
           ${rule.FMRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">FM Verification (Receipt / Service Verification)</p>' : ''}
           ${rule.OpsHeadRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Operations Head — Technical Acceptance</p>' : ''}
           ${rule.SecretaryRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Secretary — Admin Approval</p>' : ''}
-          ${rule.TreasurerRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">Treasurer — Financial Approval</p>' : ''}
           ${rule.PresidentRequired === 'Yes' ? '<p class="muted" style="margin:2px 0;">President Approval</p>' : ''}
+          <p class="muted" style="margin:2px 0;">Treasurer — reviews and signs off the Expense Sheet entry once the Accountant logs it</p>
           ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isWccPaymentType(type) && !paymentIsGoodsProcurement ? (amount > WCC_THRESHOLD ? ' (WCC required — over ₹50,000)' : ' (WCC not required — ₹50,000 or under)') : ''}${isDocsConfirmationOnly(docs) ? ' — confirm with the checkbox below, no attachment needed.' : ''}</p>` : ''}
           ${isDocsConfirmationOnly(docs) ? `
             <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
@@ -2104,7 +2125,7 @@ const FinanceModule = (function () {
     // it above (see below) means there's genuinely nothing left pending
     // — settle straight to Approved. No current Payment Type is FM-only,
     // but this keeps the logic correct if one ever is.
-    const onlyFmRequired = rule.FMRequired === 'Yes' && ['OpsHeadRequired', 'SecretaryRequired', 'TreasurerRequired', 'PresidentRequired'].every(c => rule[c] !== 'Yes');
+    const onlyFmRequired = rule.FMRequired === 'Yes' && ['OpsHeadRequired', 'SecretaryRequired', 'PresidentRequired'].every(c => rule[c] !== 'Yes');
     const initialStatus = (paymentHasNoApprovalStages(paymentType) || onlyFmRequired) ? 'Approved' : 'PendingApproval';
     const row = {
       RequestID: requestId, RuleID: '', Category: paymentType, BudgetStatus: '',
