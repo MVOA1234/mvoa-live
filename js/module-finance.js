@@ -1,4 +1,3 @@
-
 // ═══════════════════════════════════════════════════════════════
 // MODULE: Finance Application
 // Sheet tabs used: FinanceApprovalRules | FinanceRequests |
@@ -3080,8 +3079,13 @@ const FinanceModule = (function () {
     // other view uses — guarantees this always matches reality rather
     // than being independently (and now correctly) re-derived here.
     const state = request.RequestType === 'PaymentRequest' ? computePaymentRequestState(request, approvals) : computeRequestState(request, approvals);
+    // Bug found in testing: EC's running "X of Y" count is computed
+    // (state.ecCount / state.quorum) but wasn't actually shown here — so
+    // an EC-stage request just read as a flat "pending" no matter how
+    // many of the required votes were already in, making it look stuck
+    // even when it was correctly waiting on just one or two more people.
     const pendingHtml = (!state.rejected && !state.fullyApproved && state.stage)
-      ? `<p class="muted" style="margin:3px 0;">⏳ ${escapeHtml(stageLabels[state.stage] || state.stage)} — pending</p>` : '';
+      ? `<p class="muted" style="margin:3px 0;">⏳ ${escapeHtml(stageLabels[state.stage] || state.stage)}${state.stage === 'EC' ? ` (${state.ecCount} of ${state.quorum})` : ''} — pending</p>` : '';
 
     const stageRowsHtml = (eventRowsHtml || pendingHtml) ? (eventRowsHtml + pendingHtml) : '<p class="muted" style="margin:3px 0;">No approval stages required for this request.</p>';
 
