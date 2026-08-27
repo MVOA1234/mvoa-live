@@ -661,6 +661,45 @@ const MVOA = (function () {
     return sheetsUpdateRow(TABS.roles, u.rowNumber, row);
   }
 
+  // FIXED 27-Aug-2026 — found while adding the Accountant/Disbursement
+  // Officer roles: MVOA_Live.html's "Add New User" form built its own
+  // Roles row by hand, in the OLD wrong 9-column order (the exact same
+  // bug writeRolesRow had — Active hardcoded 'TRUE' into what's actually
+  // the EC_Member column, the EC_Member checkbox value landing in Active,
+  // and Title landing in AdminAccess). Every user ever created through
+  // that form — including any test accounts — may have corrupted
+  // EC_Member/Active/AdminAccess values. This is the CREATE-path
+  // counterpart to writeRolesRow: same header-matched column placement,
+  // so a new row goes into the sheet correctly no matter how its columns
+  // are ordered, and MVOA_Live.html now calls this instead of writing its
+  // own array. New users default to Active unless told otherwise.
+  async function addRolesRow(u) {
+    await loadRoles(); // ensures rolesColIndex/rolesHeaderLen reflect the CURRENT header row
+    if (!rolesColIndex) {
+      throw new Error('Roles sheet column layout is not loaded — cannot add a new row.');
+    }
+    const row = [];
+    while (row.length < rolesHeaderLen) row.push('');
+
+    const set = (field, value) => {
+      const i = rolesColIndex[field];
+      if (i != null && i >= 0) row[i] = value;
+    };
+    set('name', u.name || '');
+    set('role', u.role || '');
+    set('pinHash', u.pinHash || '');
+    set('phone', u.phone || '');
+    set('email', u.email || '');
+    set('ecMember', u.ecMember ? 'TRUE' : 'FALSE');
+    set('active', u.active === false ? 'FALSE' : 'TRUE');
+    set('adminAccess', u.adminAccess ? 'TRUE' : 'FALSE');
+    if (rolesColIndex.title >= 0) set('title', u.title || '');
+
+    const result = await sheetsAppend(TABS.roles, row);
+    rolesCache = null; // force the next loadRoles() to re-read, so the new user shows up immediately
+    return result;
+  }
+
   // Resets someone else's PIN back to the standard default. The Developer's
   // own row can ONLY be reset by the Developer themselves — mirrors the
   // "Developer's PIN can only be reset by the Developer" rule from the
@@ -730,7 +769,17 @@ const MVOA = (function () {
     OPS: 'Operations Staff',
     SEC: 'Security',
     TRES: 'Treasurer',
-    EC: 'Executive Committee'
+    EC: 'Executive Committee',
+    // ADDED 27-Aug-2026 — these role codes were already recognized by
+    // module-finance.js's access checks (isAccountantPerson,
+    // isDisbursementOfficerPerson, roleMatchesToken's secretary/president
+    // fallbacks) but had no label here, so anyone with one of these roles
+    // and no Title override showed their raw code ("ACCT", "DISB", "SECY",
+    // "PRES") on the login screen instead of a real name.
+    ACCT: 'Accountant',
+    DISB: 'Disbursement Officer',
+    SECY: 'Secretary',
+    PRES: 'President'
   };
   function roleLabel(code) {
     return ROLE_LABELS[code] || code || '';
@@ -1487,7 +1536,7 @@ const MVOA = (function () {
     loadConfig, saveConfig,
     sheetsRead, sheetsRowCount, SHEET_RECENT_ROW_LIMITS, sheetsWrite, sheetsAppend, sheetsAppendMany, sheetsUpdateRow, sheetsEnsureTab, sheetsDeleteRows,
     hashPin, verifyPin, loadRoles, login, restoreSession, logout, getUser, roleLabel, displayTitle, changePin,
-    isAdmin, resetUserPin, setUserActive, renameUser,
+    isAdmin, resetUserPin, setUserActive, renameUser, addRolesRow,
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
     loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection, getPlantRoundsPermissionsMatrixRows,
     loadAttendancePermissionsMatrix, canEditAttendanceSection, canViewAttendanceSection, getAttendancePermissionsMatrixRows,
