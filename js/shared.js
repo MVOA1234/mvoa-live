@@ -475,15 +475,27 @@ const MVOA = (function () {
     if (rolesCache && !force) return rolesCache;
     const rows = await sheetsRead(TABS.roles);
     if (!rows.length) { rolesCache = []; return rolesCache; }
-    // Expected columns: Name | Role | PIN_Hash | Phone | Email | Active | EC_Member
+    // FIXED 27-Aug-2026: this used to assume Active came before EC_Member,
+    // followed by a "Title" column, then AdminAccess — Name | Role |
+    // PIN_Hash | Phone | Email | Active | EC_Member | Title | AdminAccess.
+    // The real, live Roles sheet has never had a Title column at all, and
+    // has EC_Member BEFORE Active, not after: Name | Role | PIN_Hash |
+    // Phone | Email | EC_Member | Active | AdminAccess (8 columns, not 9).
+    // Reading by the old fixed positions meant "active" was silently
+    // reading the EC_Member column instead (so only EC members ever
+    // passed the login screen's active-user filter — see
+    // populateLoginNames in MVOA_Live.html — everyone else vanished from
+    // the dropdown) and "title" was reading the AdminAccess column,
+    // showing literal "TRUE"/"FALSE" next to people's names instead of a
+    // role title. Corrected to match the sheet as it actually exists.
     rolesCache = rows.slice(1).map((r, i) => ({
       rowNumber: i + 2,
       name: r[0] || '', role: r[1] || '', pinHash: r[2] || '',
       phone: r[3] || '', email: r[4] || '',
-      active: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
-      ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
-      title: r[7] || '', // optional per-person display title, e.g. "Secretary" — overrides roleLabel() on screen only
-      adminAccess: ['true', 'TRUE', '1', 'yes'].includes(String(r[8])) // grants unmasked connection settings + PIN Management, independent of Title
+      ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
+      active: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
+      title: '', // no Title column exists in the sheet today — displayTitle() falls back to roleLabel(role) for everyone. Re-add a column read here if a real per-person Title column is ever added.
+      adminAccess: ['true', 'TRUE', '1', 'yes'].includes(String(r[7])) // grants unmasked connection settings + PIN Management, independent of Title
     })).filter(u => u.name);
     return rolesCache;
   }
@@ -557,10 +569,19 @@ const MVOA = (function () {
 
   const DEFAULT_RESET_PIN = '1111';
 
+  // FIXED 27-Aug-2026 alongside loadRoles — this was writing the same
+  // wrong 9-column order (Active before EC_Member, then a Title column,
+  // then AdminAccess) that loadRoles used to read. Every PIN reset,
+  // suspend/activate, or self-service PIN change was silently rewriting
+  // EC_Member's value into the Active column and vice versa, and pushing
+  // AdminAccess's real value one column further right than the sheet
+  // actually has — re-corrupting the row on every single save. Matches
+  // the real 8-column layout now: Name | Role | PIN_Hash | Phone | Email
+  // | EC_Member | Active | AdminAccess.
   function writeRolesRow(u) {
     return sheetsUpdateRow(TABS.roles, u.rowNumber, [
       u.name, u.role, u.pinHash, u.phone, u.email,
-      u.active ? 'TRUE' : 'FALSE', u.ecMember ? 'TRUE' : 'FALSE', u.title || '',
+      u.ecMember ? 'TRUE' : 'FALSE', u.active ? 'TRUE' : 'FALSE',
       u.adminAccess ? 'TRUE' : 'FALSE'
     ]);
   }
