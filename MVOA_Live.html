@@ -186,6 +186,10 @@
             <option value="SEC">Security</option>
             <option value="TRES">Treasurer</option>
             <option value="EC">Executive Committee</option>
+            <option value="ACCT">Accountant</option>
+            <option value="DISB">Disbursement Officer</option>
+            <option value="SECY">Secretary</option>
+            <option value="PRES">President</option>
           </select>
         </label>
         <label>PIN (4&ndash;8 digits)
@@ -1127,8 +1131,13 @@
       addBtn.disabled = true;
       try {
         const pinHash = await MVOA.hashPin(pin);
-        const row = [name, role, pinHash, phone, email, 'TRUE', ecMember ? 'TRUE' : 'FALSE', title, adminAccess ? 'TRUE' : 'FALSE'];
-        await MVOA.sheetsAppend(MVOA.TABS.roles, row);
+        // FIXED 27-Aug-2026: this used to build the row by hand in a fixed
+        // 9-column order (Active hardcoded 'TRUE' into what's actually the
+        // EC_Member column, the EC_Member checkbox landing in Active, Title
+        // landing in AdminAccess) — the exact same bug writeRolesRow had,
+        // just on the create path. addRolesRow() places each field by the
+        // Roles sheet's actual header text instead, same as writeRolesRow.
+        await MVOA.addRolesRow({ name, role, pinHash, phone, email, ecMember, active: true, title, adminAccess });
         await MVOA.logAudit({ module: 'Settings', requestId: name, eventType: 'UserCreated', comment: 'Role: ' + role, statusAfter: 'Active' });
 
         // Write Daily Ops category access, tied to this person's Title —
