@@ -470,32 +470,90 @@ const MVOA = (function () {
   }
   async function verifyPin(pin, hash) { return (await hashPin(pin)) === hash; }
 
+  // REWRITTEN 27-Aug-2026: loadRoles()/writeRolesRow() used to read and
+  // write the Roles sheet by fixed column POSITION (r[5], r[6], r[7]...).
+  // That already broke once — a stray reorder made "active" silently read
+  // the EC_Member column and "title" read AdminAccess, so only EC members
+  // could log in and everyone else's role showed as literal TRUE/FALSE.
+  // Now both functions match columns by the HEADER ROW'S TEXT (row 1)
+  // instead, so reordering, inserting, or deleting a column in the Roles
+  // sheet can no longer silently corrupt login or approvals — it will
+  // either keep working (if the header text is unchanged) or throw a
+  // clear "missing column" error (if a required header is renamed/removed)
+  // rather than quietly misreading the wrong column.
+  //
+  // ROLES_FIELD_HEADERS lists, per field, the header text(s) we'll accept
+  // (matched case- and whitespace/underscore-insensitively). "title" is
+  // listed but optional — the live sheet has never had a Title column, and
+  // displayTitle() falls back to roleLabel(role) when title is blank.
+  const ROLES_FIELD_HEADERS = {
+    name: ['name'],
+    role: ['role'],
+    pinHash: ['pin_hash', 'pinhash', 'pin hash'],
+    phone: ['phone'],
+    email: ['email'],
+    ecMember: ['ec_member', 'ecmember', 'ec member'],
+    active: ['active'],
+    adminAccess: ['adminaccess', 'admin_access', 'admin access'],
+    title: ['title']
+  };
+  const ROLES_OPTIONAL_FIELDS = ['title'];
+
+  function normalizeRolesHeader(h) {
+    return String(h || '').trim().toLowerCase().replace(/[\s_]+/g, '');
+  }
+
+  // Builds { field: columnIndex } from the sheet's actual header row.
+  // Throws if a REQUIRED field's header can't be found, naming exactly
+  // which one — so a renamed/removed header fails loudly at load time
+  // instead of silently misreading data at login time.
+  function buildRolesColIndex(headerRow) {
+    const normalized = (headerRow || []).map(normalizeRolesHeader);
+    const idx = {};
+    const missing = [];
+    Object.keys(ROLES_FIELD_HEADERS).forEach(field => {
+      const candidates = ROLES_FIELD_HEADERS[field].map(normalizeRolesHeader);
+      const pos = normalized.findIndex(h => candidates.includes(h));
+      idx[field] = pos; // -1 if not found
+      if (pos === -1 && !ROLES_OPTIONAL_FIELDS.includes(field)) missing.push(field);
+    });
+    if (missing.length) {
+      throw new Error('Roles sheet header row is missing expected column(s): ' + missing.join(', ') +
+        '. Login and approvals cannot work correctly until these headers exist — check row 1 of the Roles sheet.');
+    }
+    return idx;
+  }
+
   let rolesCache = null;
+  let rolesColIndex = null; // column index for each known field, from the CURRENT header row — rebuilt every loadRoles() call
+  let rolesHeaderLen = 0;   // total column count in the header row, so writeRolesRow() knows how wide a row to write
   async function loadRoles(force) {
     if (rolesCache && !force) return rolesCache;
     const rows = await sheetsRead(TABS.roles);
-    if (!rows.length) { rolesCache = []; return rolesCache; }
-    // FIXED 27-Aug-2026: this used to assume Active came before EC_Member,
-    // followed by a "Title" column, then AdminAccess — Name | Role |
-    // PIN_Hash | Phone | Email | Active | EC_Member | Title | AdminAccess.
-    // The real, live Roles sheet has never had a Title column at all, and
-    // has EC_Member BEFORE Active, not after: Name | Role | PIN_Hash |
-    // Phone | Email | EC_Member | Active | AdminAccess (8 columns, not 9).
-    // Reading by the old fixed positions meant "active" was silently
-    // reading the EC_Member column instead (so only EC members ever
-    // passed the login screen's active-user filter — see
-    // populateLoginNames in MVOA_Live.html — everyone else vanished from
-    // the dropdown) and "title" was reading the AdminAccess column,
-    // showing literal "TRUE"/"FALSE" next to people's names instead of a
-    // role title. Corrected to match the sheet as it actually exists.
+    if (!rows.length) { rolesCache = []; rolesColIndex = null; rolesHeaderLen = 0; return rolesCache; }
+
+    const headerRow = rows[0];
+    rolesColIndex = buildRolesColIndex(headerRow);
+    rolesHeaderLen = headerRow.length;
+
+    const truthy = v => ['true', 'TRUE', '1', 'yes'].includes(String(v));
+    const at = (r, field) => {
+      const i = rolesColIndex[field];
+      return (i == null || i < 0) ? undefined : r[i];
+    };
+
     rolesCache = rows.slice(1).map((r, i) => ({
       rowNumber: i + 2,
-      name: r[0] || '', role: r[1] || '', pinHash: r[2] || '',
-      phone: r[3] || '', email: r[4] || '',
-      ecMember: ['true', 'TRUE', '1', 'yes'].includes(String(r[5])),
-      active: ['true', 'TRUE', '1', 'yes'].includes(String(r[6])),
-      title: '', // no Title column exists in the sheet today — displayTitle() falls back to roleLabel(role) for everyone. Re-add a column read here if a real per-person Title column is ever added.
-      adminAccess: ['true', 'TRUE', '1', 'yes'].includes(String(r[7])) // grants unmasked connection settings + PIN Management, independent of Title
+      name: at(r, 'name') || '',
+      role: at(r, 'role') || '',
+      pinHash: at(r, 'pinHash') || '',
+      phone: at(r, 'phone') || '',
+      email: at(r, 'email') || '',
+      ecMember: truthy(at(r, 'ecMember')),
+      active: truthy(at(r, 'active')),
+      title: at(r, 'title') || '',
+      adminAccess: truthy(at(r, 'adminAccess')), // grants unmasked connection settings + PIN Management, independent of Title
+      _rawRow: r.slice() // preserves any column we don't otherwise recognize, so writeRolesRow() below never clobbers it
     })).filter(u => u.name);
     return rolesCache;
   }
@@ -569,21 +627,38 @@ const MVOA = (function () {
 
   const DEFAULT_RESET_PIN = '1111';
 
-  // FIXED 27-Aug-2026 alongside loadRoles — this was writing the same
-  // wrong 9-column order (Active before EC_Member, then a Title column,
-  // then AdminAccess) that loadRoles used to read. Every PIN reset,
-  // suspend/activate, or self-service PIN change was silently rewriting
-  // EC_Member's value into the Active column and vice versa, and pushing
-  // AdminAccess's real value one column further right than the sheet
-  // actually has — re-corrupting the row on every single save. Matches
-  // the real 8-column layout now: Name | Role | PIN_Hash | Phone | Email
-  // | EC_Member | Active | AdminAccess.
+  // REWRITTEN 27-Aug-2026 alongside loadRoles() — this used to write a
+  // fixed 8-column order that once drifted out of sync with the sheet's
+  // real layout and silently corrupted EC_Member/Active/AdminAccess on
+  // every PIN reset, suspend/activate, or self-service PIN change. Now it
+  // places each field into whatever column rolesColIndex (built from the
+  // CURRENT header row by loadRoles()) says that header lives at, so a
+  // future reorder/insert/delete of a column stays correct without needing
+  // another code fix. Any column we don't recognize is preserved exactly
+  // as last read (via u._rawRow) rather than being blanked out, so a
+  // future added column survives writes made before code knows about it.
   function writeRolesRow(u) {
-    return sheetsUpdateRow(TABS.roles, u.rowNumber, [
-      u.name, u.role, u.pinHash, u.phone, u.email,
-      u.ecMember ? 'TRUE' : 'FALSE', u.active ? 'TRUE' : 'FALSE',
-      u.adminAccess ? 'TRUE' : 'FALSE'
-    ]);
+    if (!rolesColIndex) {
+      throw new Error('Roles sheet column layout is not loaded — call loadRoles() before writing to it.');
+    }
+    const row = (u._rawRow ? u._rawRow.slice() : []);
+    while (row.length < rolesHeaderLen) row.push('');
+
+    const set = (field, value) => {
+      const i = rolesColIndex[field];
+      if (i != null && i >= 0) row[i] = value;
+    };
+    set('name', u.name);
+    set('role', u.role);
+    set('pinHash', u.pinHash);
+    set('phone', u.phone);
+    set('email', u.email);
+    set('ecMember', u.ecMember ? 'TRUE' : 'FALSE');
+    set('active', u.active ? 'TRUE' : 'FALSE');
+    set('adminAccess', u.adminAccess ? 'TRUE' : 'FALSE');
+    if (rolesColIndex.title >= 0) set('title', u.title || '');
+
+    return sheetsUpdateRow(TABS.roles, u.rowNumber, row);
   }
 
   // Resets someone else's PIN back to the standard default. The Developer's
