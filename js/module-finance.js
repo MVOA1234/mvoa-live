@@ -193,7 +193,19 @@ const FinanceModule = (function () {
 
   const NOTE_COLS = ['NoteID','RequestID','Author','Timestamp','Note'];
 
-  const ROLE_COLS = ['Name','Role','PIN_Hash','Phone','Email','Active','EC_Member','Title','AdminAccess'];
+  // FIXED 27-Aug-2026: this assumed Active before EC_Member, then a
+  // "Title" column, then AdminAccess. The real, live Roles sheet has
+  // never had a Title column, and has EC_Member BEFORE Active, not
+  // after — Name | Role | PIN_Hash | Phone | Email | EC_Member | Active
+  // | AdminAccess (8 columns, not 9). Under the old mapping, every
+  // person's .Active here was silently reading their EC_Member value
+  // instead, and .Title was reading their AdminAccess value ("TRUE"/
+  // "FALSE") — which in turn meant roleMatchesToken's 'secretary' and
+  // 'president' checks (title.indexOf(...) only, no role-code fallback)
+  // could never match ANYONE, ever, regardless of who was logged in.
+  // See shared.js's loadRoles for the same fix and the login-screen bug
+  // this was first caught from.
+  const ROLE_COLS = ['Name','Role','PIN_Hash','Phone','Email','EC_Member','Active','AdminAccess'];
 
   // Mirrors the Association's existing month-by-month Excel Payments
   // sheet column-for-column — see header comment for the workflow this
