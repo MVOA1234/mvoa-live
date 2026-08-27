@@ -1329,8 +1329,14 @@ const FinanceModule = (function () {
     const role = (person.Role || '').toLowerCase();
     const title = (person.Title || '').toLowerCase();
     if (t === 'treasurer') return role === 'tres' || title.indexOf('treasurer') !== -1;
-    if (t === 'secretary') return title.indexOf('secretary') !== -1;
-    if (t === 'president') return title.indexOf('president') !== -1;
+    // ADDED 27-Aug-2026: 'secretary'/'president' only ever matched via a
+    // Title column that has never existed in the live Roles sheet, so
+    // these two stages could never auto-skip self-approval. Now also
+    // match the SECY/PRES role codes the user added to Shweta's and
+    // Varsha's rows, mirroring the existing role-code fallback pattern
+    // already used for 'treasurer' (tres) and 'operations head' (ops).
+    if (t === 'secretary') return role === 'secy' || title.indexOf('secretary') !== -1;
+    if (t === 'president') return role === 'pres' || title.indexOf('president') !== -1;
     if (t === 'operations head') return title.indexOf('operations head') !== -1 || role.indexOf('ops') !== -1;
     if (t === 'fm') return role === 'fm';
     return title.indexOf(t) !== -1 || role === t;
