@@ -540,6 +540,30 @@ const FinanceModule = (function () {
   // One bulk Approvals read (instead of one read per pending request) to
   // work out which PendingApproval requests the CURRENT user can act on
   // right now — same eligibility rules as the Approval Queue view itself.
+  // Persists Status:'Approved' for a request whose live-computed state is
+  // fullyApproved but whose stored Status hasn't caught up yet. Normally
+  // decide() is the only thing that writes Status:'Approved', and it only
+  // runs in direct response to a fresh approval action on THAT request —
+  // so a request that becomes fully approved WITHOUT a new triggering
+  // event (e.g. the 27-Aug-2026 EC-carryover fix made several
+  // already-fully-voted requests satisfy quorum retroactively, with no
+  // new click to fire decide()) would otherwise sit permanently stuck at
+  // PendingApproval: its own trail computes and displays as approved
+  // (everything's re-derived live), but every OTHER view keying off the
+  // stored Status — My Requests, the Payments/Accountant queue — would
+  // never see it, since nothing would ever trigger the write. Called from
+  // computeQueueCards on every loadAll() so this can't happen silently.
+  async function settleFullyApproved(req, extraFields) {
+    if (req.Status !== 'PendingApproval') return; // already settled, or something else — nothing to do
+    const now = new Date().toISOString();
+    const updated = Object.assign({}, req, extraFields, { Status: 'Approved', StageEnteredAt: now, StageOpenedAt: '' });
+    try {
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+      Object.assign(req, updated); // keep requestsCache consistent for the rest of THIS render pass too
+      await MVOA.logAudit({ module: 'Finance', requestId: req.RequestID, eventType: 'Auto-settled (already fully approved)', comment: '', statusAfter: 'Approved' });
+    } catch (e) { /* best-effort — will retry on the next loadAll() */ }
+  }
+
   async function computeQueueCards(force) {
     const user = MVOA.getUser();
     const person = rolesCache.find(p => p.Name === user.name) || {};
@@ -556,13 +580,15 @@ const FinanceModule = (function () {
       // computePaymentRequestState().
       if (req.RequestType === 'PaymentRequest') {
         const pState = computePaymentRequestState(req, approvals);
-        if (pState.rejected || pState.fullyApproved) continue;
+        if (pState.fullyApproved) { await settleFullyApproved(req, {}); continue; }
+        if (pState.rejected) continue;
         const eligible = pState.stage && pState.stage !== 'Initiator' && roleMatchesToken(person, PAYMENT_STAGE_ROLE_TOKEN[pState.stage]);
         if (eligible) cards.push({ req, state: pState, approvals });
         continue;
       }
       const state = computeRequestState(req, approvals);
-      if (state.rejected || state.fullyApproved) continue; // will settle on next refresh
+      if (state.fullyApproved) { await settleFullyApproved(req, { ECApprovalCount: state.ecCount }); continue; }
+      if (state.rejected) continue;
       let eligible = false;
       if (state.stage === 'Administrative' || state.stage === 'Financial') {
         eligible = (state.groups || []).some(g => personMatchesAndGroup(person, g));
