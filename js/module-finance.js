@@ -567,7 +567,13 @@ const FinanceModule = (function () {
       if (state.stage === 'Administrative' || state.stage === 'Financial') {
         eligible = (state.groups || []).some(g => personMatchesAndGroup(person, g));
       } else if (state.stage === 'EC') {
-        eligible = isEcMember(person) && !approvals.some(a => a.Stage === 'EC' && a.ApproverName === user.name);
+        // Excludes anyone whose Administrative/Financial/EC approval
+        // ALREADY counts toward EC quorum (see ecQualifyingApproverCount)
+        // — without this, an EC member who approved earlier at
+        // Administrative or Financial would still see a redundant
+        // "Approve" card here even though their vote is already counted.
+        eligible = isEcMember(person) && !approvals.some(a =>
+          ['Administrative', 'Financial', 'EC'].includes(a.Stage) && a.Decision === 'Approved' && a.ApproverName === user.name);
       } else if (state.stage === 'AGM') {
         eligible = isAdmin(person);
       }
@@ -1501,6 +1507,100 @@ const FinanceModule = (function () {
     const person = rolesCache.find(p => p.Name === a.ApproverName) || { Role: a.ApproverRole, Title: a.ApproverRole };
     return personMatchesAndGroup(person, orGroup);
   }
+  // Same lookup-with-fallback pattern as approvalMatchesGroup, for
+  // membership checks (EC quorum) rather than role/title token matching.
+  function personForApproval(a) {
+    return rolesCache.find(p => p.Name === a.ApproverName) || { Role: a.ApproverRole, Title: a.ApproverRole, EC_Member: '' };
+  }
+
+  // REWRITTEN 27-Aug-2026 per explicit user instruction: "if those who
+  // approve are already EC members then their approval should count in
+  // quorum." Previously EC quorum only counted approvals cast SPECIFICALLY
+  // while the request was already sitting at the EC stage — an EC
+  // member's earlier Administrative or Financial approval (which happens
+  // chronologically BEFORE the request ever reaches EC) didn't count at
+  // all, so the same person effectively had to approve twice: once for
+  // their real stage, once again for EC. Now ANY 'Approved' decision at
+  // Administrative, Financial, OR EC, cast by someone who IS a CURRENT EC
+  // member (checked live against rolesCache, same as everywhere else —
+  // if their EC_Member flag changes later, this recomputes accordingly,
+  // consistent with this module's "always re-derive from the log, never
+  // snapshot" philosophy), counts as one of the distinct votes toward
+  // quorum. This can't be expressed with the generic walkStageChain used
+  // for every other chain in this file (Payment Request, Budget Revision)
+  // — that walker only ever recognizes a stage's OWN Stage-tagged events,
+  // and by the time the pointer reaches EC, earlier Administrative/
+  // Financial events have already been consumed and are invisible to it.
+  // So this keeps its own combined replay instead of delegating, but
+  // preserves the exact same SentBack-cascades-one-level-at-a-time and
+  // Reject-ends-it-immediately semantics walkStageChain has everywhere
+  // else. walkStageChain itself is untouched — Payment Request and Budget
+  // Revision chains still use it exactly as before.
+  function ecQualifyingApproverCount(approvalsSoFar) {
+    return new Set(
+      approvalsSoFar
+        .filter(a => a.Decision === 'Approved' && ['Administrative', 'Financial', 'EC'].includes(a.Stage))
+        .filter(a => isEcMember(personForApproval(a)))
+        .map(a => a.ApproverName)
+    ).size;
+  }
+  function walkAtsStageChain(adminGroups, finGroups, ecRequired, agmRequired, quorum, approvals) {
+    const stageKeys = [];
+    if (adminGroups.length) stageKeys.push('Administrative');
+    if (finGroups.length) stageKeys.push('Financial');
+    if (ecRequired) stageKeys.push('EC');
+    if (agmRequired) stageKeys.push('AGM');
+    if (!stageKeys.length) return { position: null, rejected: false, fullyApproved: true, sentBackAt: null, ecCount: 0 };
+
+    const sorted = approvals.slice().sort((a, b) => (a.Timestamp || '').localeCompare(b.Timestamp || ''));
+    let idx = 0;
+    let rejected = false;
+    let approvalsSinceEntry = [];
+    let sentBackAt = null;
+    const approvalsSoFar = [];
+
+    function isDoneAt(i, visit) {
+      const key = stageKeys[i];
+      if (key === 'Administrative') return adminGroups.every(g => visit.some(a => approvalMatchesGroup(a, g)));
+      if (key === 'Financial') return finGroups.every(g => visit.some(a => approvalMatchesGroup(a, g)));
+      if (key === 'EC') return ecQualifyingApproverCount(approvalsSoFar) >= quorum;
+      if (key === 'AGM') return visit.length > 0;
+      return false;
+    }
+    // Re-checked after EVERY processed event (not only ones matching the
+    // current stage) — because EC's completion depends on the FULL
+    // history so far, not just events tagged 'EC', a stage can already be
+    // satisfied purely by carry-over the moment we arrive, with no
+    // dedicated same-stage event required to trigger it. Harmless no-op
+    // for Administrative/Financial/AGM, whose isDone only ever looks at
+    // `visit` (the same as before this change).
+    function tryAutoAdvance() {
+      while (idx >= 0 && idx < stageKeys.length && isDoneAt(idx, approvalsSinceEntry)) {
+        idx += 1; approvalsSinceEntry = [];
+      }
+    }
+    tryAutoAdvance();
+
+    for (const a of sorted) {
+      if (rejected || idx >= stageKeys.length) continue;
+      approvalsSoFar.push(a);
+      if (idx < 0) {
+        if (a.Stage === 'Initiator' && a.Decision === 'Resubmitted') { idx = 0; approvalsSinceEntry = []; tryAutoAdvance(); }
+        continue;
+      }
+      const key = stageKeys[idx];
+      if (a.Stage !== key) { tryAutoAdvance(); continue; }
+      if (a.Decision === 'Rejected') { rejected = true; continue; }
+      if (a.Decision === 'SentBack') { sentBackAt = a; idx -= 1; approvalsSinceEntry = []; tryAutoAdvance(); continue; }
+      if (a.Decision === 'Approved') { approvalsSinceEntry.push(a); tryAutoAdvance(); }
+    }
+
+    const ecCount = ecQualifyingApproverCount(approvalsSoFar);
+    if (rejected) return { position: null, rejected: true, fullyApproved: false, sentBackAt, ecCount };
+    if (idx >= stageKeys.length) return { position: null, rejected: false, fullyApproved: true, sentBackAt, ecCount };
+    if (idx < 0) return { position: 'Initiator', rejected: false, fullyApproved: false, sentBackAt, ecCount };
+    return { position: stageKeys[idx], rejected: false, fullyApproved: false, sentBackAt, ecCount };
+  }
 
   // Computes the current status of a request from its rule + approvals log.
   // Returns { stage, groups, ecCount, quorum, rejected, fullyApproved, sentBackAt }
@@ -1513,20 +1613,11 @@ const FinanceModule = (function () {
     const agmRequired = rule.AGMApprovalRequired === 'Yes';
     const quorum = Number(request.QuorumRequired) || Number(rule.QuorumOverride) || DEFAULT_QUORUM;
 
-    const stageDefs = [];
-    if (adminGroups.length) stageDefs.push({ key: 'Administrative',
-      isDone: (visit) => adminGroups.every(g => visit.some(a => approvalMatchesGroup(a, g))) });
-    if (finGroups.length) stageDefs.push({ key: 'Financial',
-      isDone: (visit) => finGroups.every(g => visit.some(a => approvalMatchesGroup(a, g))) });
-    if (ecRequired) stageDefs.push({ key: 'EC',
-      isDone: (visit) => new Set(visit.map(a => a.ApproverName)).size >= quorum });
-    if (agmRequired) stageDefs.push({ key: 'AGM', isDone: () => true });
-
-    const result = walkStageChain(stageDefs, approvals);
-    const ecCount = result.position === 'EC' ? new Set(result.approvalsAtPosition.map(a => a.ApproverName)).size : 0;
+    const result = walkAtsStageChain(adminGroups, finGroups, ecRequired, agmRequired, quorum, approvals);
     return {
       stage: result.position, groups: result.position === 'Administrative' ? adminGroups : result.position === 'Financial' ? finGroups : undefined,
-      rejected: result.rejected, fullyApproved: result.fullyApproved, ecCount, quorum, sentBackAt: result.sentBackAt
+      rejected: result.rejected, fullyApproved: result.fullyApproved,
+      ecCount: result.position === 'EC' ? result.ecCount : 0, quorum, sentBackAt: result.sentBackAt
     };
   }
 
