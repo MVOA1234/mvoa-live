@@ -1,3 +1,4 @@
+
 // ═══════════════════════════════════════════════════════════════
 // MODULE: Finance Application
 // Sheet tabs used: FinanceApprovalRules | FinanceRequests |
@@ -104,7 +105,8 @@ const FinanceModule = (function () {
   const CONTRACT_EXPIRY_LEAD_DAYS = 30;
   const TAB_PAYMENT_RULES = 'FinancePaymentRules';
   const EXPENSE_TAB_PREFIX = 'ExpenseSheet_';
-  const DEFAULT_QUORUM = 7;
+  // CORRECTED 27-Aug-2026 per explicit user instruction — was 7.
+  const DEFAULT_QUORUM = 6;
 
   const RULE_COLS = ['RuleID','ExpenseCategory','BudgetStatus','MinAmount','MaxAmount',
     'InitiatedByRole','TechnicalVerificationRole','AdministrativeApprover','FinancialApprover',
