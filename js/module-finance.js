@@ -16,12 +16,19 @@
 //   ClosedDate | ClosedBy | PaymentStatus | PaymentDate | PaymentRef |
 //   NotifiedAt | ReminderSentAt | DisbursementStage | ExpenseTab | ExpenseRow
 //
-// DisbursementStage (new — models the real Schedule D payment-release
-// workflow: Accountant logs the Expense Sheet entry → Treasurer reviews,
-// possibly kicking it back for correction over more than one round →
-// Treasurer's approval of that entry IS the formal Treasurer approval →
-// Disbursement Officer releases payment → Accountant's entry is updated
-// with the Cheque/UTR reference):
+// DisbursementStage (models the real Schedule D payment-release workflow,
+// which only STARTS once Status is already 'Approved' — see
+// PAYMENT_PRE_APPROVAL_STAGES for the pre-approval walk that gets it
+// there, which as of 27-Aug-2026 itself ends with a Treasurer stage. So a
+// Payment Request now sees the Treasurer TWICE: once here in the pre-
+// approval chain — before the Accountant ever sees the request — and
+// again below, reviewing the Accountant's actual Expense Sheet entry.
+// This second, disbursement-pipeline touchpoint works as before: Accountant
+// logs the Expense Sheet entry → Treasurer reviews, possibly kicking it
+// back for correction over more than one round → Treasurer's approval of
+// that entry IS the formal expense-sheet sign-off → Disbursement Officer
+// releases payment → Accountant's entry is updated with the Cheque/UTR
+// reference):
 //   '' → not yet logged as an expense (Status must be 'Approved' first)
 //   'PendingTreasurer' → Accountant has logged the entry, awaiting Treasurer
 //   'NeedsCorrection' → Treasurer sent it back with a query (see notes thread)
@@ -1525,27 +1532,32 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   // Schedule D — Payment Request stage engine. Separate from
   // computeRequestState() above on purpose (see PAYMENT_RULE_COLS
-  // comment) — walks a FIXED FM→OpsHead→Secretary→Treasurer→President
+  // comment) — walks a FIXED FM→OpsHead→Secretary→President→Treasurer
   // chain, skipping any stage this PaymentType doesn't require. No
   // amount tiers, no EC/AGM — Schedule D doesn't use either.
   // ───────────────────────────────────────────────────────────
   const PAYMENT_STAGE_ROLE_TOKEN = { FM: 'fm', OpsHead: 'operations head', Secretary: 'secretary', Treasurer: 'treasurer', President: 'president' };
   const PAYMENT_STAGE_REQUIRED_COL = { FM: 'FMRequired', OpsHead: 'OpsHeadRequired', Secretary: 'SecretaryRequired', Treasurer: 'TreasurerRequired', President: 'PresidentRequired' };
   const PAYMENT_STAGE_LABEL = { FM: 'FM Verification', OpsHead: 'Operations Head — Technical Acceptance', Secretary: 'Secretary — Admin Approval', Treasurer: 'Treasurer — Financial Approval', President: 'President Approval' };
-  // Bug found in testing: virtually every FinancePaymentRules row has
-  // TreasurerRequired = Yes (it's the near-universal default, not a
-  // deliberate per-category signal), but the pre-approval walk below
-  // treated it as a genuine Approval Queue stage a Treasurer had to click
-  // through BEFORE the Accountant ever saw the request — on top of the
-  // Treasurer ALSO reviewing/passing the actual expense sheet entry once
-  // the Accountant logs it (that second step happens for every payment
-  // type, unconditionally, via the disbursement pipeline). Net effect:
-  // the Treasurer had to approve the same payment twice. Confirmed with
-  // the user that the intended flow has exactly one Treasurer touchpoint
-  // — the expense sheet review — so 'Treasurer' is excluded here
-  // entirely; FinancePaymentRules' other four columns (FM/OpsHead/
-  // Secretary/President) still gate the initial approval as before.
-  const PAYMENT_PRE_APPROVAL_STAGES = ['FM', 'OpsHead', 'Secretary', 'President'];
+  // REVISED 27-Aug-2026, per explicit user instruction: the workflow now
+  // has TWO distinct Treasurer touchpoints, not one. After admin approval
+  // (Secretary and/or President, whichever this PaymentType requires),
+  // the request now goes to the Treasurer for approval HERE — a genuine
+  // Approval Queue stage, same as FM/OpsHead/Secretary/President — before
+  // the Accountant ever sees it. Only once that's approved does Status
+  // become 'Approved' and the Accountant's "needs an Expense Sheet entry"
+  // queue picks it up. The Accountant logs the entry → Treasurer reviews
+  // and passes THAT expense sheet entry (the existing, separate
+  // disbursement-pipeline touchpoint — see treasurerApprove()) → only
+  // then does it move to the Disbursement Officer. So: admin approval →
+  // Treasurer → Accountant → Treasurer → Disbursement Officer, exactly as
+  // requested. (This reverses an earlier fix — see git history — that had
+  // deliberately excluded Treasurer from this pre-approval walk to avoid
+  // a double-approval; the user has now confirmed two touchpoints are
+  // actually what's wanted.) 'Treasurer' is placed LAST in the order below
+  // so it always follows Secretary/President rather than sitting between
+  // them.
+  const PAYMENT_PRE_APPROVAL_STAGES = ['FM', 'OpsHead', 'Secretary', 'President', 'Treasurer'];
   function paymentRuleFor(paymentType) {
     return paymentRulesCache.find(r => r.PaymentType === paymentType) || {};
   }
@@ -1570,12 +1582,11 @@ const FinanceModule = (function () {
   }
   function computePaymentRequestState(request, approvals) {
     const rule = paymentRuleFor(request.Category);
-    // 'Treasurer' deliberately excluded from this pre-approval walk — see
-    // PAYMENT_PRE_APPROVAL_STAGES comment below for why. TreasurerRequired
-    // is still read everywhere else (paymentHasNoApprovalStages, the
-    // onlyFmRequired check) with the same exclusion, so a payment type
-    // whose only "Yes" is TreasurerRequired now has zero pre-approval
-    // stages, same as one with everything blank.
+    // 'Treasurer' is included in this pre-approval walk (as of 27-Aug-2026
+    // — see PAYMENT_PRE_APPROVAL_STAGES comment above) as a genuine stage
+    // this request must clear before Status becomes 'Approved', separate
+    // from the Treasurer's later expense-sheet review in the disbursement
+    // pipeline.
     const order = PAYMENT_PRE_APPROVAL_STAGES;
     const stageDefs = order.filter(k => rule[PAYMENT_STAGE_REQUIRED_COL[k]] === 'Yes')
       .map(k => ({ key: k, isDone: (visit) => visit.length > 0 }));
@@ -1602,7 +1613,8 @@ const FinanceModule = (function () {
   // guards the same way the Schedule A/B/C zero-approver case does)
   function paymentHasNoApprovalStages(paymentType) {
     const rule = paymentRuleFor(paymentType);
-    // TreasurerRequired intentionally omitted — see PAYMENT_PRE_APPROVAL_STAGES.
+    // TreasurerRequired is now included in this check (27-Aug-2026) — see
+    // PAYMENT_PRE_APPROVAL_STAGES.
     return PAYMENT_PRE_APPROVAL_STAGES.map(k => PAYMENT_STAGE_REQUIRED_COL[k])
       .every(col => rule[col] !== 'Yes');
   }
@@ -2205,8 +2217,11 @@ const FinanceModule = (function () {
     // If FM is the only thing this PaymentType requires, auto-approving
     // it above (see below) means there's genuinely nothing left pending
     // — settle straight to Approved. No current Payment Type is FM-only,
-    // but this keeps the logic correct if one ever is.
-    const onlyFmRequired = rule.FMRequired === 'Yes' && ['OpsHeadRequired', 'SecretaryRequired', 'PresidentRequired'].every(c => rule[c] !== 'Yes');
+    // but this keeps the logic correct if one ever is. TreasurerRequired
+    // is included here (27-Aug-2026) now that Treasurer is a real
+    // pre-approval gate — otherwise a request could wrongly settle to
+    // Approved while Treasurer sign-off was still outstanding.
+    const onlyFmRequired = rule.FMRequired === 'Yes' && ['OpsHeadRequired', 'SecretaryRequired', 'PresidentRequired', 'TreasurerRequired'].every(c => rule[c] !== 'Yes');
     const initialStatus = (paymentHasNoApprovalStages(paymentType) || onlyFmRequired) ? 'Approved' : 'PendingApproval';
     const row = {
       RequestID: requestId, RuleID: '', Category: paymentType, BudgetStatus: '',
@@ -2258,7 +2273,12 @@ const FinanceModule = (function () {
       // Acceptance, for instance.
       const person = rolesCache.find(p => p.Name === user.name) || { Name: user.name, Role: user.role };
       const remainingAutoApprovals = [];
-      for (const key of ['OpsHead', 'Secretary', 'President']) {
+      // 'Treasurer' added 27-Aug-2026, now that it's a real pre-approval
+      // stage again (see PAYMENT_PRE_APPROVAL_STAGES) — a Treasurer
+      // submitting a payment type that also requires Treasurer sign-off
+      // shouldn't have to separately approve their own submission here
+      // either, same as the other roles below.
+      for (const key of ['OpsHead', 'Secretary', 'President', 'Treasurer']) {
         if (rule[PAYMENT_STAGE_REQUIRED_COL[key]] !== 'Yes') continue; // not required for this payment type at all
         if (!roleMatchesToken(person, PAYMENT_STAGE_ROLE_TOKEN[key])) break; // needs someone else — stop here
         remainingAutoApprovals.push({
