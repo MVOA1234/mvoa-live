@@ -193,19 +193,62 @@ const FinanceModule = (function () {
 
   const NOTE_COLS = ['NoteID','RequestID','Author','Timestamp','Note'];
 
-  // FIXED 27-Aug-2026: this assumed Active before EC_Member, then a
-  // "Title" column, then AdminAccess. The real, live Roles sheet has
-  // never had a Title column, and has EC_Member BEFORE Active, not
-  // after — Name | Role | PIN_Hash | Phone | Email | EC_Member | Active
-  // | AdminAccess (8 columns, not 9). Under the old mapping, every
-  // person's .Active here was silently reading their EC_Member value
-  // instead, and .Title was reading their AdminAccess value ("TRUE"/
-  // "FALSE") — which in turn meant roleMatchesToken's 'secretary' and
-  // 'president' checks (title.indexOf(...) only, no role-code fallback)
-  // could never match ANYONE, ever, regardless of who was logged in.
-  // See shared.js's loadRoles for the same fix and the login-screen bug
-  // this was first caught from.
-  const ROLE_COLS = ['Name','Role','PIN_Hash','Phone','Email','EC_Member','Active','AdminAccess'];
+  // REWRITTEN 27-Aug-2026: this used to assume a fixed 8-column position
+  // order (Name | Role | PIN_Hash | Phone | Email | EC_Member | Active |
+  // AdminAccess) — already wrong once already (see git history / the
+  // 27-Aug-2026 login-screen bug), and still fragile the same way: any
+  // future reorder/insert/delete of a Roles column would silently
+  // misread .Active/.Title/etc again with no error, breaking approval
+  // routing. Now matches columns by the HEADER ROW'S TEXT (row 1) instead
+  // — mirrors the same header-matching rewrite done in shared.js's
+  // loadRoles()/writeRolesRow(). This module only ever READS Roles (all
+  // writes go through shared.js), so only a read-side mapping is needed.
+  //
+  // ROLES_FIELD_HEADERS lists, per field, the header text(s) accepted
+  // (matched case- and whitespace/underscore-insensitively). "Title" is
+  // optional — the live sheet has never had a Title column.
+  const ROLES_FIELD_HEADERS = {
+    Name: ['name'],
+    Role: ['role'],
+    PIN_Hash: ['pin_hash', 'pinhash', 'pin hash'],
+    Phone: ['phone'],
+    Email: ['email'],
+    EC_Member: ['ec_member', 'ecmember', 'ec member'],
+    Active: ['active'],
+    AdminAccess: ['adminaccess', 'admin_access', 'admin access'],
+    Title: ['title']
+  };
+  const ROLES_OPTIONAL_FIELDS = ['Title'];
+
+  function normalizeRolesHeader(h) {
+    return String(h || '').trim().toLowerCase().replace(/[\s_]+/g, '');
+  }
+
+  // Builds a rowToObj-compatible cols array positioned to match the
+  // ACTUAL header row — cols[realIndex] = fieldName, leaving every other
+  // index a hole that rowToObj's forEach naturally skips — so rowToObj
+  // below keeps working unchanged but now keys off real column positions
+  // instead of assumed ones. Throws if a REQUIRED header can't be found,
+  // naming exactly which one, instead of silently misreading data.
+  function buildRolesCols(headerRow) {
+    const normalized = (headerRow || []).map(normalizeRolesHeader);
+    const cols = [];
+    const missing = [];
+    Object.keys(ROLES_FIELD_HEADERS).forEach(field => {
+      const candidates = ROLES_FIELD_HEADERS[field].map(normalizeRolesHeader);
+      const pos = normalized.findIndex(h => candidates.includes(h));
+      if (pos === -1) {
+        if (!ROLES_OPTIONAL_FIELDS.includes(field)) missing.push(field);
+        return;
+      }
+      cols[pos] = field;
+    });
+    if (missing.length) {
+      throw new Error('Roles sheet header row is missing expected column(s): ' + missing.join(', ') +
+        '. Approval routing cannot work correctly until these headers exist — check row 1 of the Roles sheet.');
+    }
+    return cols;
+  }
 
   // Mirrors the Association's existing month-by-month Excel Payments
   // sheet column-for-column — see header comment for the workflow this
@@ -371,7 +414,12 @@ const FinanceModule = (function () {
     ]);
     rulesCache = ruleRows.slice(1).map((r, i) => rowToObj(RULE_COLS, r, i + 2)).filter(r => r.RuleID);
     requestsCache = reqRows.slice(1).map((r, i) => rowToObj(REQUEST_COLS, r, i + 2)).filter(r => r.RequestID);
-    rolesCache = roleRows.slice(1).map((r, i) => rowToObj(ROLE_COLS, r, i + 2)).filter(r => r.Name);
+    if (roleRows.length) {
+      const rolesCols = buildRolesCols(roleRows[0]);
+      rolesCache = roleRows.slice(1).map((r, i) => rowToObj(rolesCols, r, i + 2)).filter(r => r.Name);
+    } else {
+      rolesCache = [];
+    }
     // Optional tab — Budget Available/Consumed only shows once this exists;
     // fails open so a fresh install without it yet doesn't break anything else.
     try {
