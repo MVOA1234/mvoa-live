@@ -3461,19 +3461,45 @@ const FinanceModule = (function () {
       cardsEl.appendChild(div);
     });
 
+    // Bug found in testing: an AND-group stage (e.g. "Secretary &
+    // President") stays put after only one of the two approves, so the
+    // card can still be showing a live Approve button at the exact moment
+    // the click is registered — a fast double-click (or a second click
+    // fired before the first one's async round-trip finishes and
+    // re-renders the queue) posted the SAME person's approval twice.
+    // Harmless to the final outcome (the stage engine only needs one
+    // qualifying approval per group — a duplicate for an already-satisfied
+    // group changes nothing) but it's a confusing duplicate log entry and
+    // pure waste. runOnce() disables the clicked button immediately, before
+    // the async decide() call even starts, and only re-enables it if decide()
+    // left the DOM alone — which is exactly what happens on failure (the
+    // catch block in decide() never calls render()); on success, decide()
+    // calls render(container), which rebuilds this whole card from fresh
+    // data and detaches this exact button node, so there's nothing to
+    // re-enable — a genuinely new button (or none, per the fresh
+    // "alreadyVoted" state) takes its place.
+    function runOnce(btn, busyText, action) {
+      if (btn.disabled) return; // already in flight — ignore a redundant click
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = busyText;
+      Promise.resolve(action()).then(() => {
+        if (document.body.contains(btn) && btn.disabled) { btn.disabled = false; btn.textContent = original; }
+      });
+    }
     cardsEl.querySelectorAll('.fin-approve-btn').forEach(btn => {
-      btn.addEventListener('click', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Approved', container));
+      btn.addEventListener('click', () => runOnce(btn, 'Approving…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Approved', container)));
     });
     cardsEl.querySelectorAll('.fin-sendback-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const comment = prompt('Reason for sending this back one level (required) — e.g. "need one more quotation", "please clarify the invoice date":');
-        if (comment && comment.trim()) decide(btn.dataset.requestId, btn.dataset.stage, 'SentBack', container, comment.trim());
+        if (comment && comment.trim()) runOnce(btn, 'Sending…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'SentBack', container, comment.trim()));
       });
     });
     cardsEl.querySelectorAll('.fin-reject-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const comment = prompt('Reason for rejecting (required):');
-        if (comment && comment.trim()) decide(btn.dataset.requestId, btn.dataset.stage, 'Rejected', container, comment.trim());
+        if (comment && comment.trim()) runOnce(btn, 'Rejecting…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Rejected', container, comment.trim()));
       });
     });
     cardsEl.querySelectorAll('.fin-queue-notes-toggle').forEach(btn => {
