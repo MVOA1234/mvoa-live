@@ -937,28 +937,6 @@
     const date = dateStr || isoDateLocal(new Date());
     const dayLogs = logsForDate(date);
     const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
-
-    // Weekly Off compliance flag — surfaced right here (not just buried in
-    // the Monthly Report) so it's visible the moment this screen opens.
-    // "Last week" (the most recently fully-completed Mon-Sun week) is a
-    // hard violation if a staff member had zero days off in it — that's
-    // already happened and needs correcting going forward. "This week"
-    // (in progress) is an early warning: every day so far had a login, but
-    // there's still time, up to and including Sunday itself, to give them
-    // a day off, so it's shown separately and less alarmingly than a
-    // completed-week flag.
-    const woToday = new Date(); woToday.setHours(0, 0, 0, 0);
-    const woThisMonday = mondayOf(woToday);
-    const woThisSunday = sundayOf(woThisMonday);
-    const woLastMonday = new Date(woThisMonday); woLastMonday.setDate(woLastMonday.getDate() - 7);
-    const woLastSunday = sundayOf(woLastMonday);
-    const lastWeekViolations = [];
-    const thisWeekAtRisk = [];
-    rows.forEach(s => {
-      const datesPresent = new Set(allLogsCache.filter(l => l.StaffID === s.StaffID).map(l => l.Date));
-      if (weekOffStatus(datesPresent, woLastMonday, woLastSunday, woToday) === 'noOff') lastWeekViolations.push(s);
-      if (weekOffStatus(datesPresent, woThisMonday, woThisSunday, woToday) === 'inprogress') thisWeekAtRisk.push(s);
-    });
     // One row per SESSION, not per staff member — a staff member can have
     // more than one session on the same Date (shifts crossing midnight, or
     // two separate shifts in one day), and every one of them stays visible
@@ -1023,18 +1001,6 @@
                 </div>
               </div>
             `).join('')}
-          </div>
-        ` : ''}
-        ${lastWeekViolations.length ? `
-          <div style="margin-bottom:14px;padding:10px 12px;background:#fbeaea;border-radius:8px;">
-            <strong style="font-size:0.85rem;color:#a32d2d;">🚩 No day off last week (${escapeHtml(weekLabel(woLastMonday, woLastSunday))}) — ${lastWeekViolations.length}</strong>
-            <div class="muted" style="font-size:0.82rem;margin-top:4px;">${lastWeekViolations.map(s => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))})`).join(', ')}</div>
-          </div>
-        ` : ''}
-        ${thisWeekAtRisk.length ? `
-          <div style="margin-bottom:14px;padding:10px 12px;background:#fdf1cf;border-radius:8px;">
-            <strong style="font-size:0.85rem;color:#8a6d00;">⚠️ No day off yet this week (${escapeHtml(weekLabel(woThisMonday, woThisSunday))}) — ${thisWeekAtRisk.length}</strong>
-            <div class="muted" style="font-size:0.82rem;margin-top:4px;">${thisWeekAtRisk.map(s => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))})`).join(', ')} — still time to schedule one by Sunday.</div>
           </div>
         ` : ''}
         <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:flex-end;">
@@ -1220,6 +1186,7 @@
     const [y, m] = month.split('-').map(Number);
     const dayHeaders = [];
     for (let d = 1; d <= daysInMonth; d++) dayHeaders.push(ordinalDay(d));
+    const today = new Date(); today.setHours(0, 0, 0, 0);
 
     let lastAgency = null;
     const bodyRows = staffPool.map(s => {
@@ -1228,12 +1195,31 @@
       lastAgency = ag;
       const sessions = monthLogs.filter(l => l.StaffID === s.StaffID);
       const datesPresent = new Set(sessions.map(l => l.Date));
+      // Separate full-history presence set (reads allLogsCache directly,
+      // not just this month's sessions) — needed to correctly judge a
+      // Monday near month-end whose week's Sunday falls in the FOLLOWING
+      // month; monthLogs alone would silently look like a day off there.
+      const datesPresentFull = new Set(allLogsCache.filter(l => l.StaffID === s.StaffID).map(l => l.Date));
       const cells = [];
       for (let d = 1; d <= daysInMonth; d++) {
         if (d > capDay) { cells.push('<td style="width:36px;"></td>'); continue; }
         const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const present = datesPresent.has(iso);
-        cells.push(`<td style="width:36px;color:${present ? '#1e6b33' : '#b3261e'};font-weight:700;text-align:center;">${present ? 'P' : 'A'}</td>`);
+        // Weekly Off compliance flag — per local law, every staff member
+        // needs at least one day off every Mon-Sun week. Rather than a
+        // separate report, this flags it right on that week's MONDAY
+        // column: 🚩 appears only once the full week has elapsed AND
+        // every single day in it (Mon-Sun) had a login, individually per
+        // staff member. A week still in progress is never flagged.
+        let flagged = false;
+        const cellDate = new Date(y, m - 1, d);
+        if (cellDate.getDay() === 1) {
+          flagged = weekOffStatus(datesPresentFull, cellDate, sundayOf(cellDate), today) === 'noOff';
+        }
+        const label = present ? (flagged ? 'P 🚩' : 'P') : 'A';
+        const color = flagged ? '#b3261e' : (present ? '#1e6b33' : '#b3261e');
+        const titleAttr = flagged ? ' title="No day off at all Mon–Sun this week"' : '';
+        cells.push(`<td style="width:36px;color:${color};font-weight:700;text-align:center;"${titleAttr}>${label}</td>`);
       }
       return `<tr><td style="position:sticky;left:0;z-index:1;background:#fff;width:80px;">${showAgency ? escapeHtml(ag) : ''}</td><td style="position:sticky;left:80px;z-index:1;background:#fff;width:140px;">${escapeHtml(s.Name)}</td>${cells.join('')}</tr>`;
     });
@@ -1264,7 +1250,8 @@
         <tfoot>
           <tr><td colspan="${2 + daysInMonth}" style="font-weight:400;font-size:0.78rem;">
             <span style="color:#1e6b33;font-weight:700;">P</span> = Present (logged in that day) &nbsp;&nbsp;
-            <span style="color:#b3261e;font-weight:700;">A</span> = Absent (no login that day)
+            <span style="color:#b3261e;font-weight:700;">A</span> = Absent (no login that day) &nbsp;&nbsp;
+            <span style="color:#b3261e;font-weight:700;">🚩</span> (on a Monday) = no day off at all that Mon–Sun week
           </td></tr>
         </tfoot>
       </table>
