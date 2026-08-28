@@ -937,6 +937,27 @@
     const date = dateStr || isoDateLocal(new Date());
     const dayLogs = logsForDate(date);
     const rows = staffCache.slice().sort((a, b) => agencyName(a.AgencyID).localeCompare(agencyName(b.AgencyID)) || a.Name.localeCompare(b.Name));
+
+    // Weekly Off compliance flag — surfaced right here (not just buried in
+    // the Monthly Report) so it's visible the moment this screen opens.
+    // "Last week" (the most recently fully-completed Mon-Sun week) is a
+    // hard violation if a staff member had zero days off in it — that's
+    // already happened and needs correcting going forward. "This week"
+    // (in progress) is an early warning: every day so far had a login, but
+    // there's still time before Sunday to give them a day off, so it's
+    // shown separately and less alarmingly than a completed-week flag.
+    const woToday = new Date(); woToday.setHours(0, 0, 0, 0);
+    const woThisMonday = mondayOf(woToday);
+    const woThisSunday = sundayOf(woThisMonday);
+    const woLastMonday = new Date(woThisMonday); woLastMonday.setDate(woLastMonday.getDate() - 7);
+    const woLastSunday = sundayOf(woLastMonday);
+    const lastWeekViolations = [];
+    const thisWeekAtRisk = [];
+    rows.forEach(s => {
+      const datesPresent = new Set(allLogsCache.filter(l => l.StaffID === s.StaffID).map(l => l.Date));
+      if (weekOffStatus(datesPresent, woLastMonday, woLastSunday, woToday) === 'noOff') lastWeekViolations.push(s);
+      if (weekOffStatus(datesPresent, woThisMonday, woThisSunday, woToday) === 'inprogress') thisWeekAtRisk.push(s);
+    });
     // One row per SESSION, not per staff member — a staff member can have
     // more than one session on the same Date (shifts crossing midnight, or
     // two separate shifts in one day), and every one of them stays visible
@@ -1001,6 +1022,18 @@
                 </div>
               </div>
             `).join('')}
+          </div>
+        ` : ''}
+        ${lastWeekViolations.length ? `
+          <div style="margin-bottom:14px;padding:10px 12px;background:#fbeaea;border-radius:8px;">
+            <strong style="font-size:0.85rem;color:#a32d2d;">🚩 No day off last week (${escapeHtml(weekLabel(woLastMonday, woLastSunday))}) — ${lastWeekViolations.length}</strong>
+            <div class="muted" style="font-size:0.82rem;margin-top:4px;">${lastWeekViolations.map(s => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))})`).join(', ')}</div>
+          </div>
+        ` : ''}
+        ${thisWeekAtRisk.length ? `
+          <div style="margin-bottom:14px;padding:10px 12px;background:#fdf1cf;border-radius:8px;">
+            <strong style="font-size:0.85rem;color:#8a6d00;">⚠️ No day off yet this week (${escapeHtml(weekLabel(woThisMonday, woThisSunday))}) — ${thisWeekAtRisk.length}</strong>
+            <div class="muted" style="font-size:0.82rem;margin-top:4px;">${thisWeekAtRisk.map(s => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))})`).join(', ')} — still time to schedule one before Sunday.</div>
           </div>
         ` : ''}
         <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:flex-end;">
@@ -1082,6 +1115,66 @@
     if (y === today.getFullYear() && m === today.getMonth() + 1) return today.getDate();
     if (y > today.getFullYear() || (y === today.getFullYear() && m > today.getMonth() + 1)) return 0;
     return daysInMonthFor(month);
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // WEEKLY OFF COMPLIANCE — per local governing law, every staff member
+  // must get at least one day off (no login at all) in every Monday-Sunday
+  // week, tracked individually. There's no separate "leave"/"day off"
+  // record anywhere in this app — a day off is simply a calendar day with
+  // zero check-in sessions, the same Present/Absent proxy the Attendance
+  // Record report above already uses. A week is only ever FLAGGED once it
+  // has fully elapsed (Sunday has passed) — a week still in progress shows
+  // as "in progress" instead, since there's still time left in it to give
+  // that day off.
+  // ───────────────────────────────────────────────────────────
+  function mondayOf(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    const day = d.getDay(); // 0=Sun..6=Sat
+    d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
+    return d;
+  }
+  function sundayOf(monday) {
+    const d = new Date(monday);
+    d.setDate(d.getDate() + 6);
+    return d;
+  }
+  function weekLabel(monday, sunday) {
+    const sameMonth = monday.getMonth() === sunday.getMonth();
+    const fmt = (d, withMonth) => ordinalDay(d.getDate()) + (withMonth ? ' ' + d.toLocaleDateString([], { month: 'short' }) : '');
+    return sameMonth ? `${fmt(monday, false)}–${fmt(sunday, true)}` : `${fmt(monday, true)}–${fmt(sunday, true)}`;
+  }
+  // Weeks (Mon-Sun) whose MONDAY falls within the given YYYY-MM month — a
+  // week straddling a month boundary is attributed to whichever month its
+  // Monday is in, so it's shown in exactly one month's report, never two
+  // and never zero.
+  function weeksForMonth(month) {
+    const [y, m] = month.split('-').map(Number);
+    const firstOfMonth = new Date(y, m - 1, 1);
+    const lastOfMonth = new Date(y, m, 0);
+    let monday = mondayOf(firstOfMonth);
+    if (monday < firstOfMonth) monday.setDate(monday.getDate() + 7);
+    const weeks = [];
+    while (monday <= lastOfMonth) {
+      weeks.push({ monday: new Date(monday), sunday: sundayOf(monday) });
+      monday.setDate(monday.getDate() + 7);
+    }
+    return weeks;
+  }
+  // 'future' = week hasn't started yet; 'inprogress' = started, not yet
+  // complete, and every day so far had a login (still time to fix);
+  // 'off' = at least one day so far had no login (day off already given,
+  // whether or not the week is complete yet); 'noOff' = the week is fully
+  // complete and EVERY single day had a login — the actual violation.
+  function weekOffStatus(datesPresentSet, monday, sunday, today) {
+    if (monday > today) return 'future';
+    const complete = sunday <= today;
+    const lastDay = complete ? sunday : today;
+    for (let d = new Date(monday); d <= lastDay; d.setDate(d.getDate() + 1)) {
+      if (!datesPresentSet.has(isoDateLocal(d))) return 'off';
+    }
+    return complete ? 'noOff' : 'inprogress';
   }
 
   // Summary view (original report): one row per staff member with totals
@@ -1171,6 +1264,67 @@
           <tr><td colspan="${2 + daysInMonth}" style="font-weight:400;font-size:0.78rem;">
             <span style="color:#1e6b33;font-weight:700;">P</span> = Present (logged in that day) &nbsp;&nbsp;
             <span style="color:#b3261e;font-weight:700;">A</span> = Absent (no login that day)
+          </td></tr>
+        </tfoot>
+      </table>
+    `;
+  }
+
+  // "Weekly Off" — one column per Monday-Sunday week that starts within the
+  // selected month, one row per staff member. Deliberately reads from the
+  // FULL log history (allLogs, not the month-filtered monthLogs the other
+  // two grids use) — a week can straddle two calendar months, so checking
+  // just this month's logs would silently miss a login/off-day that fell
+  // on the other side of the boundary.
+  function buildWeeklyOffReportHtml(month, monthLabel, staffPool, allLogs) {
+    const weeks = weeksForMonth(month);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+
+    const presenceByStaff = new Map();
+    staffPool.forEach(s => {
+      presenceByStaff.set(s.StaffID, new Set(allLogs.filter(l => l.StaffID === s.StaffID).map(l => l.Date)));
+    });
+
+    const weekHeaders = weeks.map(w => weekLabel(w.monday, w.sunday));
+    const colCount = 3 + weeks.length;
+
+    let lastAgency = null;
+    const bodyRows = staffPool.map(s => {
+      const ag = agencyName(s.AgencyID);
+      const showAgency = ag !== lastAgency;
+      lastAgency = ag;
+      const datesPresent = presenceByStaff.get(s.StaffID);
+      let flaggedCount = 0;
+      const cells = weeks.map(w => {
+        const status = weekOffStatus(datesPresent, w.monday, w.sunday, today);
+        if (status === 'future') return '<td style="width:90px;"></td>';
+        if (status === 'inprogress') return '<td style="width:90px;text-align:center;color:#8a6d00;">…</td>';
+        if (status === 'off') return '<td style="width:90px;text-align:center;color:#1e6b33;font-weight:700;">✓</td>';
+        flaggedCount++;
+        return '<td style="width:90px;text-align:center;color:#b3261e;font-weight:700;">🚩</td>';
+      });
+      return `<tr><td style="position:sticky;left:0;z-index:1;background:#fff;width:80px;">${showAgency ? escapeHtml(ag) : ''}</td><td style="position:sticky;left:80px;z-index:1;background:#fff;width:140px;">${escapeHtml(s.Name)}</td>${cells.join('')}<td style="text-align:center;font-weight:700;color:${flaggedCount ? '#b3261e' : '#1e6b33'};">${flaggedCount || ''}</td></tr>`;
+    });
+
+    return `
+      <table class="mvoa-table att-weeklyoff-grid">
+        <thead>
+          <tr><th colspan="${colCount}" style="text-align:center;">Weekly Off Compliance — Weeks Starting in ${escapeHtml(monthLabel)}</th></tr>
+          <tr>
+            <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:80px;">Agency</th>
+            <th style="position:sticky;top:0;left:80px;z-index:3;background:#eef2f6;width:140px;">Staff Name</th>
+            ${weekHeaders.map(h => `<th style="position:sticky;top:0;z-index:2;background:#eef2f6;width:90px;text-align:center;">${h}</th>`).join('')}
+            <th style="position:sticky;top:0;z-index:2;background:#eef2f6;text-align:center;">Flagged</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${bodyRows.length ? bodyRows.join('') : `<tr><td colspan="${colCount}" class="muted">No staff.</td></tr>`}
+        </tbody>
+        <tfoot>
+          <tr><td colspan="${colCount}" style="font-weight:400;font-size:0.78rem;">
+            <span style="color:#1e6b33;font-weight:700;">✓</span> = Had at least one day off that week &nbsp;&nbsp;
+            <span style="color:#b3261e;font-weight:700;">🚩</span> = No day off that entire week (flag) &nbsp;&nbsp;
+            <span style="color:#8a6d00;">…</span> = Week still in progress
           </td></tr>
         </tfoot>
       </table>
@@ -1279,9 +1433,10 @@
     let tableHtml;
     if (type === 'summary') tableHtml = buildSummaryReportHtml(monthLabel, staffPoolAll, monthLogs);
     else if (type === 'times') tableHtml = buildCheckInOutGridHtml(month, monthLabel, staffPool, monthLogs);
+    else if (type === 'weeklyoff') tableHtml = buildWeeklyOffReportHtml(month, monthLabel, staffPoolAll, allLogsCache);
     else tableHtml = buildAttendancePAGridHtml(month, monthLabel, staffPoolAll, monthLogs);
 
-    const typeLabel = { summary: 'Summary', pa: 'Attendance Record', times: 'Check-in/Check-out Times' }[type];
+    const typeLabel = { summary: 'Summary', pa: 'Attendance Record', times: 'Check-in/Check-out Times', weeklyoff: 'Weekly Off Compliance' }[type];
 
     host.innerHTML = `
       <div class="card">
@@ -1291,6 +1446,7 @@
           <button class="${type === 'summary' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="summary" style="font-size:0.8rem;padding:6px 12px;">Summary</button>
           <button class="${type === 'pa' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="pa" style="font-size:0.8rem;padding:6px 12px;">Attendance Record</button>
           <button class="${type === 'times' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="times" style="font-size:0.8rem;padding:6px 12px;">Check-in/Check-out Times</button>
+          <button class="${type === 'weeklyoff' ? 'btn-primary' : 'btn-secondary'} att-report-type-btn" data-type="weeklyoff" style="font-size:0.8rem;padding:6px 12px;">🚩 Weekly Off</button>
         </div>
         <div class="mvoa-row" style="margin-bottom:14px;gap:14px;flex-wrap:wrap;align-items:flex-start;">
           <label style="margin:0;">Month
@@ -1402,6 +1558,11 @@
                the remaining width across them. */
             .att-pa-grid th:first-child, .att-pa-grid td:first-child { width: 34px; }
             .att-pa-grid th:nth-child(2), .att-pa-grid td:nth-child(2) { width: 92px; }
+            /* Weekly Off Compliance: same narrow-Agency/wider-Name split as
+               the Attendance Record grid above — only a handful of week
+               columns per month, so they don't need shrinking. */
+            .att-weeklyoff-grid th:first-child, .att-weeklyoff-grid td:first-child { width: 34px; }
+            .att-weeklyoff-grid th:nth-child(2), .att-weeklyoff-grid td:nth-child(2) { width: 92px; }
             @page { size: landscape; margin: 8mm; }
           }
         </style>
