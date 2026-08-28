@@ -62,6 +62,7 @@ const MVOA = (function () {
     permissionsMatrixDailyOps: 'PermissionsMatrix_DailyOps',
     permissionsMatrixPlantRounds: 'PermissionsMatrix_PlantRounds',
     permissionsMatrixAttendance: 'PermissionsMatrix_Attendance',
+    permissionsMatrixFinance: 'PermissionsMatrix_Finance',
     attAgencies: 'AttAgencies',
     attStaff: 'AttStaff',
     attLog: 'AttLog',
@@ -1030,6 +1031,66 @@ const MVOA = (function () {
     return !!sectionMatrix[displayTitle(user)];
   }
 
+  // ───────────────────────────────────────────────────────────
+  // FINANCE APPLICATION — same Section|Title|AccessLevel matrix shape as
+  // Plant Rounds/Attendance, distinct sheet tab. "Section" here is one of
+  // Finance's four TOP-LEVEL tabs — 'Spend Approval', 'Payment Approval',
+  // 'Budget', 'Contracts' — not a finer sub-screen; a Title with 'No
+  // access' on one of these never sees that tab at all, 'Read Only' sees
+  // it but every action that writes something (submitting a request,
+  // approving/rejecting/sending back, resubmitting, logging an Expense
+  // Sheet entry, releasing payment, setting/revising a budget, adding a
+  // contract) is unavailable, and 'Edit' works exactly as the app
+  // currently does for everyone. This is layered ON TOP of, not instead
+  // of, Finance's existing role-driven approval-chain logic (who must
+  // approve a given category, who's the Accountant/Treasurer/Disbursement
+  // Officer) — that stays governed by Role codes and the
+  // FinanceApprovalRules/FinancePaymentRules sheets exactly as before;
+  // this matrix only gates whether a Title can get into a top-level tab
+  // at all, and whether they can act once inside it. No legacy fallback
+  // existed for Finance tabs (they were simply open to everyone), so —
+  // same as Plant Rounds/Attendance — a tab with NO matrix rows yet stays
+  // fully open (Edit) until an admin populates its first row.
+  // ───────────────────────────────────────────────────────────
+  let financePermMatrixCache = null;
+  let financePermMatrixRowsCache = null;
+  async function loadFinancePermissionsMatrix(force) {
+    if (financePermMatrixCache && !force) return financePermMatrixCache;
+    const rows = await sheetsRead(TABS.permissionsMatrixFinance);
+    const map = {};
+    const rawRows = [];
+    rows.slice(1).forEach((r, i) => {
+      const section = (r[0] || '').trim();
+      const title = (r[1] || '').trim();
+      const level = (r[2] || '').trim();
+      if (!section || !title) return;
+      rawRows.push({ rowNumber: i + 2, Section: section, Title: title, AccessLevel: level });
+      if (!level) return;
+      if (!map[section]) map[section] = {};
+      map[section][title] = level;
+    });
+    financePermMatrixCache = map;
+    financePermMatrixRowsCache = rawRows;
+    return financePermMatrixCache;
+  }
+  function getFinancePermissionsMatrixRows() {
+    return financePermMatrixRowsCache || [];
+  }
+  function canEditFinanceSection(sectionName, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = financePermMatrixCache && financePermMatrixCache[sectionName];
+    if (!sectionMatrix) return true; // no rows for this section yet — stays open until populated
+    return sectionMatrix[displayTitle(user)] === 'Edit';
+  }
+  function canViewFinanceSection(sectionName, user) {
+    if (!user) return false;
+    if (user.role === 'DEV') return true;
+    const sectionMatrix = financePermMatrixCache && financePermMatrixCache[sectionName];
+    if (!sectionMatrix) return true;
+    return !!sectionMatrix[displayTitle(user)];
+  }
+
   // Checks whether a given AssignedTo value ("user:Name", "tech:ID", or
   // "role:Title") — not necessarily the currently logged-in user — would
   // have Edit rights on a category. Used to warn at assignment time (New
@@ -1540,6 +1601,7 @@ const MVOA = (function () {
     loadCategories, loadTechnicians, canEditCategory, canViewCategory, assigneeEditAccess, loadDailyOpsPermissionsMatrix, getDailyOpsPermissionsMatrixRows, loadAssigneeOptions, assigneeLabel,
     loadPlantRoundsPermissionsMatrix, canEditPlantRoundsSection, canViewPlantRoundsSection, getPlantRoundsPermissionsMatrixRows,
     loadAttendancePermissionsMatrix, canEditAttendanceSection, canViewAttendanceSection, getAttendancePermissionsMatrixRows,
+    loadFinancePermissionsMatrix, canEditFinanceSection, canViewFinanceSection, getFinancePermissionsMatrixRows,
     loadNotesForTask, appendNote,
     logAudit, nextId, createOpsTask, autoCloseOpsTasks,
     capturePhoto, pickAttachment, uploadPhotoToDrive, deletePhotoFromDrive,
