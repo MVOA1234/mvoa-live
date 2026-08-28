@@ -4122,7 +4122,7 @@ const FinanceModule = (function () {
     // content only (uniform across cards, since the button text is
     // identical every time), and the left text — now the only flexible
     // side — gets first claim on the row's width.
-    function baseCard(req, extraRight) {
+    function baseCard(req, extraRight, extraBody) {
       return `
         <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
           <div class="mvoa-row" style="display:flex;align-items:center;gap:10px;">
@@ -4131,6 +4131,7 @@ const FinanceModule = (function () {
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested by ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
+          ${extraBody || ''}
         </div>`;
     }
     const refreshPayments = () => render(container);
@@ -4150,7 +4151,8 @@ const FinanceModule = (function () {
       const [newOnes, openOnes] = [needsExpenseEntry.filter(isItemNew), needsExpenseEntry.filter(r => !isItemNew(r))];
       el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : '')).join('')
         + openOnes.map(req => baseCard(req,
-          `<button class="btn-primary fin-log-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Log Expense Entry</button>`
+          `<button class="btn-primary fin-log-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Log Expense Entry</button>`,
+          attachmentLinksHtml(req)
         )).join('');
       wireNewItemCards(el, refreshPayments);
       el.querySelectorAll('.fin-log-entry-btn').forEach(btn => {
@@ -4169,6 +4171,7 @@ const FinanceModule = (function () {
             <span class="mvoa-badge" style="color:#a32d2d;background:#fbeaea;">Needs correction</span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          ${attachmentLinksHtml(req)}
           ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-corr-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}" style="margin:6px 6px 0 0;"`)}
           <button class="btn-primary fin-edit-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 0 0 0;">Edit &amp; Resubmit</button>
@@ -4217,6 +4220,7 @@ const FinanceModule = (function () {
             ${entry ? `
               <p class="muted" style="margin:4px 0;font-size:0.85rem;">Invoice ${escapeHtml(entry.row.InvoiceNumber || '—')} · Gross ${formatAmount(entry.row.GrossAmount)} · GST ${escapeHtml(entry.row.GST || '0')} · TDS ${escapeHtml(entry.row.TDS || '0')} · Net ${formatAmount(entry.row.NetAmount)}</p>
             ` : '<p class="error-text" style="font-size:0.85rem;">Could not load the Expense Sheet entry.</p>'}
+            ${attachmentLinksHtml(req) || '<p class="muted" style="margin:4px 0;font-size:0.85rem;">No attachments were submitted with this Payment Request.</p>'}
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn-primary fin-treasurer-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Approve</button>
               <button class="btn-secondary fin-treasurer-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Back with Query</button>
@@ -4296,6 +4300,7 @@ const FinanceModule = (function () {
         </style>
         <button id="fin-exp-cancel-top" class="btn-secondary" style="position:sticky;top:0;float:right;z-index:1;">✕ Close</button>
         <h3>${isCorrection ? 'Edit' : 'Log'} Expense Entry — ${escapeHtml(req.Category)}</h3>
+        ${attachmentLinksHtml(req) || '<p class="muted" style="margin:0 0 8px;">No attachments were submitted with this Payment Request.</p>'}
         <label>Month (Expense Sheet tab)
           <select id="fin-exp-tab" ${isCorrection ? 'disabled' : ''}>
             ${tabs.map(t => `<option value="${t}" ${req.ExpenseTab === t ? 'selected' : ''}>${t.replace(EXPENSE_TAB_PREFIX,'')}</option>`).join('')}
