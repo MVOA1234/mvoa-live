@@ -629,6 +629,14 @@ const FinanceModule = (function () {
     currentTopTab = 'home';
     currentView = 'mine';
     container.innerHTML = `<p class="muted">Loading…</p>`;
+    // Separate try/catch from the main load below — the
+    // PermissionsMatrix_Finance sheet tab may not exist yet (it's a new,
+    // opt-in feature), and canViewFinanceSection/canEditFinanceSection both
+    // default to fully open when the matrix hasn't loaded, so a missing tab
+    // here should never take down the rest of the Finance Application.
+    try {
+      await MVOA.loadFinancePermissionsMatrix(true);
+    } catch (e) { /* PermissionsMatrix_Finance tab may not exist yet — defaults to fully open */ }
     try {
       await loadAll(true);
     } catch (e) {
@@ -638,6 +646,22 @@ const FinanceModule = (function () {
     render(container);
   }
 
+  // Section names for the Finance Permissions Matrix (see shared.js —
+  // MVOA.canViewFinanceSection/canEditFinanceSection) — one per top-level
+  // tab. Must match exactly what an admin types as the "Section" for that
+  // tab's rows in the PermissionsMatrix_Finance sheet.
+  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts' };
+  // Recomputed at the top of render() for whichever top-level tab is
+  // currently open — 'Edit' lets every action through exactly as before;
+  // 'ReadOnly' (a Title with an explicit Read Only row for this tab) hides
+  // every action that writes something (submit, approve/reject/send
+  // back/resubmit, log/edit an Expense Sheet entry, release payment,
+  // set/revise a budget, add a contract) while still allowing normal
+  // browsing/viewing. Notes are treated as viewing/conversation, not an
+  // "edit" of the underlying request, so asking or answering a
+  // clarification stays available even under Read Only.
+  let currentSectionCanEdit = true;
+
   // Sub-tabs for each of the two workflow groups. "Spend Approval" and
   // "Payment Approval" are the two top-level buckets requested — most
   // views (My Requests, My Approvals, Approval Queue) aren't inherently
@@ -646,9 +670,9 @@ const FinanceModule = (function () {
   // underlying list IS filtered by type per group (see renderQueue's
   // filterMode param) so each group only shows what's actually relevant
   // to it, even though the raw data is shared.
-  function subTabsFor(topTab) {
+  function subTabsFor(topTab, canEdit) {
     if (topTab === 'spend') return [
-      { view: 'submit', label: '+ New Request' },
+      ...(canEdit ? [{ view: 'submit', label: '+ New Request' }] : []),
       { view: 'mine', label: 'My Requests' },
       { view: 'sentback', label: '🔁 Sent Back' },
       { view: 'myapprovals', label: '✅ My Approvals' },
@@ -656,7 +680,7 @@ const FinanceModule = (function () {
       { view: 'budgetrevisions', label: '🔄 Budget Revisions' }
     ];
     if (topTab === 'payment') return [
-      { view: 'payreq', label: '💵 New Payment Request' },
+      ...(canEdit ? [{ view: 'payreq', label: '💵 New Payment Request' }] : []),
       { view: 'mine', label: 'My Requests' },
       { view: 'sentback', label: '🔁 Sent Back' },
       { view: 'myapprovals', label: '✅ My Approvals' },
@@ -707,18 +731,35 @@ const FinanceModule = (function () {
         <span class="muted" style="font-size:0.85rem;">Logged in as: <strong>${escapeHtml(user.name)}</strong>${user.role ? ` (${escapeHtml(user.role)})` : ''}</span>
       </div>`;
 
+    // Finance Permissions Matrix — see shared.js. A Title with "No access"
+    // on the current top-level tab never even lands here (mount() always
+    // starts at 'home', and the home buttons below are filtered to only
+    // what's viewable) — but if it somehow did (e.g. an admin changed the
+    // matrix mid-session), bounce back to the top-level chooser rather
+    // than rendering a tab this Title shouldn't see.
+    if (currentTopTab !== 'home' && !MVOA.canViewFinanceSection(FINANCE_TOP_TAB_SECTION[currentTopTab], user)) {
+      currentTopTab = 'home';
+      currentView = 'mine';
+    }
+
     if (currentTopTab === 'home') {
-      // Home screen — the 4 top-level buckets only. No back button here
-      // by design (nothing to go back to); it appears once inside any
-      // of these.
+      // Home screen — the 4 top-level buckets, filtered to what this
+      // Title has at least Read Only access to per the Finance
+      // Permissions Matrix (a tab with no matrix rows yet stays open to
+      // everyone — see canViewFinanceSection).
+      const ALL_TOP_TABS = [
+        { key: 'spend', label: '📝 Spend Approval' },
+        { key: 'payment', label: '💵 Payment Approval' },
+        { key: 'budget', label: '📊 Budget' },
+        { key: 'contracts', label: '📄 Contracts' }
+      ];
+      const visibleTopTabs = ALL_TOP_TABS.filter(t => MVOA.canViewFinanceSection(FINANCE_TOP_TAB_SECTION[t.key], user));
       container.innerHTML = `
         ${headerHtml}
-        <div class="ops-tabs">
-          <button data-toptab="spend" class="ops-tab-btn">📝 Spend Approval</button>
-          <button data-toptab="payment" class="ops-tab-btn">💵 Payment Approval</button>
-          <button data-toptab="budget" class="ops-tab-btn">📊 Budget</button>
-          <button data-toptab="contracts" class="ops-tab-btn">📄 Contracts</button>
-        </div>`;
+        ${visibleTopTabs.length ? `
+          <div class="ops-tabs">
+            ${visibleTopTabs.map(t => `<button data-toptab="${t.key}" class="ops-tab-btn">${t.label}</button>`).join('')}
+          </div>` : `<p class="muted">You don't have access to any part of the Finance Application. Contact an admin if this seems wrong.</p>`}`;
       container.querySelectorAll('.ops-tab-btn[data-toptab]').forEach(btn => {
         btn.addEventListener('click', () => {
           currentTopTab = btn.dataset.toptab;
@@ -730,7 +771,13 @@ const FinanceModule = (function () {
       return;
     }
 
-    const subTabs = subTabsFor(currentTopTab);
+    currentSectionCanEdit = MVOA.canEditFinanceSection(FINANCE_TOP_TAB_SECTION[currentTopTab], user);
+    // A Read Only Title landing on a view that only exists to submit
+    // something new (there is no read-only "form" to fall back to) gets
+    // bounced to My Requests instead, same as subTabsFor() already
+    // hiding that tab from the nav.
+    if (!currentSectionCanEdit && (currentView === 'submit' || currentView === 'payreq')) currentView = 'mine';
+    const subTabs = subTabsFor(currentTopTab, currentSectionCanEdit);
     const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'budget' ? '📊 Budget' : '📄 Contracts';
     const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
     const tabLabelHtml = (t) => t.view === 'myapprovals'
@@ -777,7 +824,7 @@ const FinanceModule = (function () {
     else if (currentView === 'budget') renderBudgetStatus(body, container);
     else if (currentView === 'budgetrevisions') {
       const person = currentPerson();
-      renderBudgetRevisionsSection(body, container, person, isTreasurerPerson(person) || isAdmin(person));
+      renderBudgetRevisionsSection(body, container, person, currentSectionCanEdit && (isTreasurerPerson(person) || isAdmin(person)));
     }
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
@@ -798,8 +845,10 @@ const FinanceModule = (function () {
     // chain) is initiated by the Secretary/Admin instead — see
     // openReviseBudgetModal, which now also auto-records the Secretary's
     // own approval on submit.
-    const canManageBudget = isTreasurerPerson(person) || isAdmin(person);
-    const canInitiateRevision = isSecretaryPerson(person) || isAdmin(person);
+    // Finance Permissions Matrix — a Read Only Title on the Budget tab
+    // never gets Set/Revise regardless of their role.
+    const canManageBudget = currentSectionCanEdit && (isTreasurerPerson(person) || isAdmin(person));
+    const canInitiateRevision = currentSectionCanEdit && (isSecretaryPerson(person) || isAdmin(person));
     const fys = [...new Set(budgetsCache.map(b => b.FYYear))].sort().reverse();
     const selectedFy = fys.includes(currentFY()) ? currentFY() : (fys[0] || currentFY());
     body.innerHTML = `
@@ -1000,7 +1049,7 @@ const FinanceModule = (function () {
       const steps = BUDGET_REVISION_STAGE_ORDER.map(stage => ({
         stage, done: approvals.some(a => a.Stage === stage && a.Decision === 'Approved')
       }));
-      const canActOnCurrentStage = !state.rejected && !state.fullyApproved && state.stage &&
+      const canActOnCurrentStage = currentSectionCanEdit && !state.rejected && !state.fullyApproved && state.stage &&
         roleMatchesToken(person, BUDGET_REVISION_STAGE_ROLE_TOKEN[state.stage]);
       return `
         <div class="card" style="max-width:600px;margin:0 0 14px 0;">
@@ -1087,11 +1136,11 @@ const FinanceModule = (function () {
     const rows = contractsCache.slice().sort((a, b) => (a.Vendor || '').localeCompare(b.Vendor || ''));
     body.innerHTML = `
       <div style="margin-bottom:12px;">
-        <button id="fin-add-contract-btn" class="btn-primary">+ Add Contract</button>
+        ${currentSectionCanEdit ? `<button id="fin-add-contract-btn" class="btn-primary">+ Add Contract</button>` : `<p class="muted" style="margin:0;">👁️ Read only — you can't add or edit contracts.</p>`}
       </div>
       ${rows.length ? `<div id="fin-contracts-table"></div>` : `<p class="muted">No contracts registered yet. Use "+ Add Contract" to register a new agreement, or backfill your existing ones (AMC contracts, utility accounts, insurance policies).</p>`}
     `;
-    body.querySelector('#fin-add-contract-btn').addEventListener('click', () => {
+    if (currentSectionCanEdit) body.querySelector('#fin-add-contract-btn').addEventListener('click', () => {
       contractFormPrefill = null;
       contractsSubView = 'form';
       renderContractForm(body, container);
@@ -1119,6 +1168,7 @@ const FinanceModule = (function () {
   }
 
   function renderContractForm(body, container) {
+    if (!currentSectionCanEdit) { renderContractsList(body, container); return; }
     contractsSubView = 'form';
     const p = contractFormPrefill || {};
     const categories = selectableCategories(); // same live list New Request already uses, from FinanceApprovalRules
@@ -3663,10 +3713,11 @@ const FinanceModule = (function () {
         ${attachmentLinksHtml(req)}
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
         ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
+        ${!currentSectionCanEdit ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">👁️ Read only — you can't approve, send back, or reject.</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-          ${alreadyVoted ? '' : `<button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>`}
-          <button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>
-          ${state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
+          ${!currentSectionCanEdit ? '' : alreadyVoted ? '' : `<button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>`}
+          ${currentSectionCanEdit ? `<button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>` : ''}
+          ${currentSectionCanEdit && state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-queue-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}"`)}
         </div>
         <p class="error-text fin-queue-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
@@ -3934,6 +3985,22 @@ const FinanceModule = (function () {
     // (clarify the description, attach one more document).
     const openCardsHtml = openOnes.map(({ r, state }) => {
       const existingAttachments = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean);
+      if (!currentSectionCanEdit) {
+        // Read Only — show the same info, but no edit fields or Resubmit
+        // action; resubmitting is a write action on the request.
+        return `
+        <div class="mvoa-list-item" style="border:1px solid #b3261e;">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
+            <span class="mvoa-badge" style="color:#b3261e;background:#fbeaea;">🔁 Sent back</span>
+          </div>
+          ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
+          <p style="margin:4px 0;color:#b3261e;">${state.sentBackAt && state.sentBackAt.Comment ? `"${escapeHtml(state.sentBackAt.Comment)}"` : 'No reason given.'}</p>
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${state.sentBackAt ? escapeHtml(state.sentBackAt.ApproverName) : 'unknown'}${state.sentBackAt ? ' · ' + formatDate(state.sentBackAt.Timestamp) : ''}</p>
+          ${existingAttachments.length ? `<p class="muted" style="margin:6px 0 2px;">Attachments: ${existingAttachments.map((u, i) => `<a href="${u}" target="_blank" rel="noopener">📎 ${i+1}</a>`).join(' · ')}</p>` : ''}
+          <p class="muted" style="margin:6px 0 0;font-size:0.8rem;">👁️ Read only — you can't resubmit here.</p>
+        </div>`;
+      }
       return `
       <div class="mvoa-list-item" style="border:1px solid #b3261e;">
         <div class="mvoa-row">
@@ -3963,7 +4030,7 @@ const FinanceModule = (function () {
     // One pending-new-attachments array per sent-back card, keyed by
     // RequestID, so multiple cards on screen at once don't collide.
     sentBackPendingAttachments = {};
-    openOnes.forEach(({ r }) => {
+    if (currentSectionCanEdit) openOnes.forEach(({ r }) => {
       const existingCount = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean).length;
       if (existingCount >= 3) return;
       sentBackPendingAttachments[r.RequestID] = [];
@@ -4162,11 +4229,11 @@ const FinanceModule = (function () {
       const [newOnes, openOnes] = [needsExpenseEntry.filter(isItemNew), needsExpenseEntry.filter(r => !isItemNew(r))];
       el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : '')).join('')
         + openOnes.map(req => baseCard(req,
-          `<button class="btn-primary fin-log-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Log Expense Entry</button>`,
-          attachmentLinksHtml(req)
+          currentSectionCanEdit ? `<button class="btn-primary fin-log-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Log Expense Entry</button>` : '',
+          `${attachmentLinksHtml(req)}${currentSectionCanEdit ? '' : '<p class="muted" style="margin:4px 0;">👁️ Read only — you can\'t log an expense entry.</p>'}`
         )).join('');
       wireNewItemCards(el, refreshPayments);
-      el.querySelectorAll('.fin-log-entry-btn').forEach(btn => {
+      if (currentSectionCanEdit) el.querySelectorAll('.fin-log-entry-btn').forEach(btn => {
         btn.addEventListener('click', () => openExpenseEntryDialog(btn.dataset.requestId, container, false));
       });
     }
@@ -4185,12 +4252,14 @@ const FinanceModule = (function () {
           ${attachmentLinksHtml(req)}
           ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-corr-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}" style="margin:6px 6px 0 0;"`)}
-          <button class="btn-primary fin-edit-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 0 0 0;">Edit &amp; Resubmit</button>
+          ${currentSectionCanEdit
+            ? `<button class="btn-primary fin-edit-entry-btn" data-request-id="${escapeHtml(req.RequestID)}" style="font-size:0.8rem;padding:4px 10px;margin:6px 0 0 0;">Edit &amp; Resubmit</button>`
+            : `<p class="muted" style="margin:6px 0 0 0;">👁️ Read only — you can't edit or resubmit this entry.</p>`}
           <div class="fin-corr-notes-body hidden" data-request-id="${escapeHtml(req.RequestID)}"></div>
         </div>`;
       }).join('');
       wireNewItemCards(el, refreshPayments);
-      el.querySelectorAll('.fin-edit-entry-btn').forEach(btn => {
+      if (currentSectionCanEdit) el.querySelectorAll('.fin-edit-entry-btn').forEach(btn => {
         btn.addEventListener('click', () => openExpenseEntryDialog(btn.dataset.requestId, container, true));
       });
       el.querySelectorAll('.fin-corr-notes-toggle').forEach(btn => {
@@ -4232,17 +4301,21 @@ const FinanceModule = (function () {
               <p class="muted" style="margin:4px 0;font-size:0.85rem;">Invoice ${escapeHtml(entry.row.InvoiceNumber || '—')} · Gross ${formatAmount(entry.row.GrossAmount)} · GST ${escapeHtml(entry.row.GST || '0')} · TDS ${escapeHtml(entry.row.TDS || '0')} · Net ${formatAmount(entry.row.NetAmount)}</p>
             ` : '<p class="error-text" style="font-size:0.85rem;">Could not load the Expense Sheet entry.</p>'}
             ${attachmentLinksHtml(req) || '<p class="muted" style="margin:4px 0;font-size:0.85rem;">No attachments were submitted with this Payment Request.</p>'}
+            ${currentSectionCanEdit ? `
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn-primary fin-treasurer-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Approve</button>
               <button class="btn-secondary fin-treasurer-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Back with Query</button>
             </div>
             <p class="error-text fin-treasurer-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+            ` : `<p class="muted" style="margin:8px 0 0 0;">👁️ Read only — you can't approve or send back this request.</p>`}
           `;
-          div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', e => runOnce(e.currentTarget, 'Approving…', () => treasurerApprove(req.RequestID, container)));
-          div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', e => {
-            const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
-            if (q && q.trim()) runOnce(e.currentTarget, 'Sending…', () => treasurerSendBack(req.RequestID, q.trim(), container));
-          });
+          if (currentSectionCanEdit) {
+            div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', e => runOnce(e.currentTarget, 'Approving…', () => treasurerApprove(req.RequestID, container)));
+            div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', e => {
+              const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
+              if (q && q.trim()) runOnce(e.currentTarget, 'Sending…', () => treasurerSendBack(req.RequestID, q.trim(), container));
+            });
+          }
         });
       } catch (e) {
         el.innerHTML = `<p class="error-text">Could not display items awaiting review: ${escapeHtml(e.message)}. Try ↻ Refresh, or open the browser console for details.</p>`;
@@ -4259,6 +4332,7 @@ const FinanceModule = (function () {
             <span class="mvoa-badge" style="color:#0f6e56;background:#eaf5ef;">Treasurer approved</span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          ${currentSectionCanEdit ? `
           <div style="margin-top:8px;">
             <select class="fin-bank-select" data-request-id="${escapeHtml(req.RequestID)}" style="width:100%;margin-bottom:6px;">
               <option value="">— Select Bank —</option>
@@ -4269,9 +4343,10 @@ const FinanceModule = (function () {
             <button class="btn-primary fin-disburse-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Release Payment</button>
           </div>
           <p class="error-text fin-disburse-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+          ` : `<p class="muted" style="margin:8px 0 0 0;">👁️ Read only — you can't release this payment.</p>`}
         </div>`).join('');
       wireNewItemCards(el, refreshPayments);
-      el.querySelectorAll('.fin-disburse-btn').forEach(btn => {
+      if (currentSectionCanEdit) el.querySelectorAll('.fin-disburse-btn').forEach(btn => {
         btn.addEventListener('click', () => runOnce(btn, 'Releasing…', () => disbursePayment(btn.dataset.requestId, el, container)));
       });
     }
