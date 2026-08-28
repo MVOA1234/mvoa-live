@@ -766,7 +766,7 @@ const FinanceModule = (function () {
           currentTopTab = btn.dataset.toptab;
           currentView = TOP_TAB_DEFAULT_VIEW[currentTopTab];
           if (currentTopTab === 'contracts') contractsSubView = 'list';
-          if (currentTopTab === 'dashboard') dashboardDrilldownKey = null;
+          if (currentTopTab === 'dashboard') { dashboardDrilldownKey = null; dashboardDrilldownStageMap = null; }
           render(container);
         });
       });
@@ -2104,11 +2104,24 @@ const FinanceModule = (function () {
   // survives the re-render each click triggers but resets when the module
   // remounts. null = nothing expanded.
   let dashboardDrilldownKey = null;
+  // Only the two "Pending Approval" groups can be sitting at more than one
+  // possible stage (Administrative/Financial/EC/AGM for spend, FM/OpsHead/
+  // Secretary/Treasurer/President for payment) — everything else in the
+  // pipeline (Needs Expense Entry, Needs Correction, Pending Treasurer
+  // Review, Pending Disbursement) already IS a single specific stage, so
+  // the badge label itself already answers "where". For those two, the
+  // exact stage needs FinanceApprovals (who's approved so far) which the
+  // dashboard otherwise deliberately avoids fetching — so it's loaded
+  // lazily, only when one of these two badges is actually opened, into
+  // this map ({ [RequestID]: 'Awaiting ___ approval — since ...' }).
+  const APPROVAL_STAGE_GROUP_KEYS = ['pendingApprovalSpend', 'pendingApprovalPayment'];
+  let dashboardDrilldownStageMap = null;
   function dashboardBadgeHtml(key, label, count, bg, fg) {
     const active = dashboardDrilldownKey === key;
     return `<button type="button" class="mvoa-badge fin-dashboard-badge" data-key="${escapeHtml(key)}" style="background:${bg};color:${fg};border:${active ? `2px solid ${fg}` : 'none'};cursor:pointer;font:inherit;">${escapeHtml(label)} — ${count}</button>`;
   }
-  function dashboardDrilldownPanelHtml(group) {
+  function dashboardDrilldownPanelHtml(group, key) {
+    const isApprovalStageGroup = APPROVAL_STAGE_GROUP_KEYS.includes(key);
     return `
       <div class="card" style="background:#f7f9fb;margin-bottom:14px;">
         <div class="mvoa-row" style="margin-bottom:8px;">
@@ -2118,16 +2131,24 @@ const FinanceModule = (function () {
         ${group.rows.length ? `
           <div style="overflow-x:auto;width:100%;">
           <table class="mvoa-table" style="width:100%;">
-            <thead><tr><th>Request ID</th><th>Category</th><th>Amount</th><th>Requested By</th><th>Status</th></tr></thead>
+            <thead><tr><th>Request ID</th><th>Category</th><th>Amount</th><th>Requested By</th><th>${isApprovalStageGroup ? 'Pending With' : 'Status'}</th></tr></thead>
             <tbody>
-              ${group.rows.map(r => `
+              ${group.rows.map(r => {
+                let statusCell;
+                if (isApprovalStageGroup) {
+                  statusCell = dashboardDrilldownStageMap ? (dashboardDrilldownStageMap[r.RequestID] || displayStatus(r)) : '<span class="muted">Loading…</span>';
+                } else {
+                  statusCell = displayStatus(r);
+                }
+                return `
                 <tr>
                   <td>${escapeHtml(r.RequestID)}</td>
                   <td>${escapeHtml(r.Category)}${r.Vendor ? ` <span class="muted">(${escapeHtml(r.Vendor)})</span>` : ''}</td>
                   <td>${formatAmount(r.Amount)}</td>
                   <td>${escapeHtml(r.RequestedBy)}</td>
-                  <td>${displayStatus(r)}</td>
-                </tr>`).join('')}
+                  <td>${statusCell}</td>
+                </tr>`;
+              }).join('')}
             </tbody>
           </table>
           </div>` : `<p class="muted">Nothing currently in this state.</p>`}
@@ -2259,7 +2280,7 @@ const FinanceModule = (function () {
           ${dashboardBadgeHtml('pendingTreasurer', 'Pending Treasurer Review', pendingTreasurerRows.length, '#fdf1cf', '#8a6d00')}
           ${dashboardBadgeHtml('pendingDisbursement', 'Pending Disbursement', pendingPaymentRows.length, '#e6f1fb', '#185fa5')}
         </div>
-        ${dashboardDrilldownKey && drilldownGroups[dashboardDrilldownKey] ? dashboardDrilldownPanelHtml(drilldownGroups[dashboardDrilldownKey]) : ''}
+        ${dashboardDrilldownKey && drilldownGroups[dashboardDrilldownKey] ? dashboardDrilldownPanelHtml(drilldownGroups[dashboardDrilldownKey], dashboardDrilldownKey) : ''}
         <p class="muted" style="font-size:0.8rem;margin-bottom:6px;">Oldest still-open requests, across every stage:</p>
         ${oldestPending.length ? `
           <div style="overflow-x:auto;width:100%;">
@@ -2301,12 +2322,33 @@ const FinanceModule = (function () {
     body.querySelectorAll('.fin-dashboard-badge').forEach(btn => {
       btn.addEventListener('click', () => {
         const key = btn.dataset.key;
-        dashboardDrilldownKey = (dashboardDrilldownKey === key) ? null : key;
+        if (dashboardDrilldownKey === key) {
+          dashboardDrilldownKey = null;
+          dashboardDrilldownStageMap = null;
+          renderDashboardTab(body, container);
+          return;
+        }
+        dashboardDrilldownKey = key;
+        dashboardDrilldownStageMap = null; // re-render now with the row list, "Loading…" for the stage column if applicable
         renderDashboardTab(body, container);
+        if (APPROVAL_STAGE_GROUP_KEYS.includes(key)) {
+          const rows = drilldownGroups[key].rows;
+          MVOA.sheetsRead(TAB_APPROVALS).then(approvalRows => {
+            if (dashboardDrilldownKey !== key) return; // user switched away while this was in flight
+            const allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+            const map = {};
+            rows.forEach(r => {
+              const approvalsForReq = allApprovals.filter(a => a.RequestID === r.RequestID);
+              map[r.RequestID] = stageDescription(r, approvalsForReq).text;
+            });
+            dashboardDrilldownStageMap = map;
+            renderDashboardTab(body, container);
+          }).catch(() => { /* leave the generic status showing on failure */ });
+        }
       });
     });
     const closeBtn = body.querySelector('#fin-dashboard-drilldown-close');
-    if (closeBtn) closeBtn.addEventListener('click', () => { dashboardDrilldownKey = null; renderDashboardTab(body, container); });
+    if (closeBtn) closeBtn.addEventListener('click', () => { dashboardDrilldownKey = null; dashboardDrilldownStageMap = null; renderDashboardTab(body, container); });
   }
 
   // ───────────────────────────────────────────────────────────
