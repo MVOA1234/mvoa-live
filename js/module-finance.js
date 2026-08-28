@@ -882,7 +882,7 @@ const FinanceModule = (function () {
       if (!amount || amount <= 0) { errEl.textContent = 'Enter a budget amount greater than 0.'; errEl.style.display = 'block'; return; }
       const notes = modal.querySelector('#fin-setb-notes').value.trim();
       const btn = modal.querySelector('#fin-setb-save');
-      btn.disabled = true; btn.textContent = 'Saving…';
+      setBtnBusy(btn, 'Saving…');
       try {
         const updated = Object.assign({}, budgetRow, { TotalBudget: amount, Notes: notes });
         await MVOA.sheetsUpdateRow(TAB_BUDGETS, budgetRow.rowNumber, objToRow(BUDGET_COLS, updated));
@@ -891,7 +891,7 @@ const FinanceModule = (function () {
         render(container);
       } catch (e) {
         errEl.textContent = 'Failed: ' + e.message; errEl.style.display = 'block';
-        btn.disabled = false; btn.textContent = 'Save';
+        clearBtnBusy(btn, 'Save');
       }
     });
   }
@@ -928,7 +928,7 @@ const FinanceModule = (function () {
       if (amount === (Number(budgetRow.TotalBudget) || 0)) { errEl.textContent = 'Proposed amount is the same as the current budget.'; errEl.style.display = 'block'; return; }
       const notes = modal.querySelector('#fin-revb-notes').value.trim();
       const btn = modal.querySelector('#fin-revb-submit');
-      btn.disabled = true; btn.textContent = 'Submitting…';
+      setBtnBusy(btn, 'Submitting…');
       try {
         const user = MVOA.getUser();
         const existingIds = budgetRevisionsCache.map(r => r.RevisionID);
@@ -956,7 +956,7 @@ const FinanceModule = (function () {
         render(container);
       } catch (e) {
         errEl.textContent = 'Failed: ' + e.message; errEl.style.display = 'block';
-        btn.disabled = false; btn.textContent = 'Submit for Approval';
+        clearBtnBusy(btn, 'Submit for Approval');
       }
     });
   }
@@ -1016,11 +1016,12 @@ const FinanceModule = (function () {
     }).join('');
 
     el.querySelectorAll('.fin-budrev-approve, .fin-budrev-reject').forEach(btn => {
-      btn.addEventListener('click', () => decideBudgetRevision(btn.dataset.revisionId, btn.dataset.stage,
-        btn.classList.contains('fin-budrev-approve') ? 'Approved' : 'Rejected', container));
+      const decision = btn.classList.contains('fin-budrev-approve') ? 'Approved' : 'Rejected';
+      btn.addEventListener('click', () => runOnce(btn, decision === 'Approved' ? 'Approving…' : 'Rejecting…',
+        () => decideBudgetRevision(btn.dataset.revisionId, btn.dataset.stage, decision, container)));
     });
     el.querySelectorAll('.fin-budrev-apply').forEach(btn => {
-      btn.addEventListener('click', () => applyBudgetRevision(btn.dataset.revisionId, container));
+      btn.addEventListener('click', () => runOnce(btn, 'Applying…', () => applyBudgetRevision(btn.dataset.revisionId, container)));
     });
   }
 
@@ -1161,8 +1162,7 @@ const FinanceModule = (function () {
     if (!category) { errEl.textContent = 'Please select a Category.'; return; }
     if (!vendor) { errEl.textContent = 'Please enter a Vendor.'; return; }
 
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Saving…';
+    setBtnBusy(submitBtn, 'Saving…');
 
     const existingIds = contractsCache.map(c => c.ContractID);
     const contractId = MVOA.nextId('AGR', existingIds);
@@ -1180,7 +1180,7 @@ const FinanceModule = (function () {
       await MVOA.sheetsAppend(TAB_CONTRACTS, objToRow(CONTRACT_COLS, row));
     } catch (e) {
       errEl.textContent = 'Could not save contract: ' + e.message;
-      submitBtn.disabled = false; submitBtn.textContent = 'Save Contract';
+      clearBtnBusy(submitBtn, 'Save Contract');
       return;
     }
 
@@ -1203,6 +1203,71 @@ const FinanceModule = (function () {
   function formatAmount(n) {
     const num = Number(n) || 0;
     return '₹' + num.toLocaleString('en-IN');
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // runOnce() — shared "processing" guard for every submission button
+  // in this module (approve/reject/send-back, submitting a new request,
+  // Release Payment, Treasurer Approve/Send Back, Resubmit, etc.). Disables
+  // the clicked button immediately (so a fast double-click or a slow
+  // network round-trip can't submit the same action twice) and swaps its
+  // label for a small spinning graphic + busy text, so it's visually
+  // obvious the app is working rather than looking like the click didn't
+  // register. Only re-enables the button if it's still attached to the
+  // DOM and still disabled once the action settles — i.e. only on
+  // failure; a successful action normally re-renders and replaces this
+  // exact button node, so there's nothing left to re-enable.
+  let finSpinnerStyleInjected = false;
+  function ensureSpinnerStyle() {
+    if (finSpinnerStyleInjected || document.getElementById('fin-spinner-style')) { finSpinnerStyleInjected = true; return; }
+    const style = document.createElement('style');
+    style.id = 'fin-spinner-style';
+    style.textContent = `
+      @keyframes finSpin { to { transform: rotate(360deg); } }
+      .fin-btn-spinner {
+        display:inline-block; width:0.85em; height:0.85em; margin-right:7px;
+        border:2px solid rgba(255,255,255,0.45); border-top-color:#fff;
+        border-radius:50%; animation:finSpin 0.6s linear infinite;
+        vertical-align:-0.15em;
+      }
+      .fin-btn-spinner.fin-spinner-dark {
+        border-color:rgba(0,0,0,0.25); border-top-color:rgba(0,0,0,0.75);
+      }
+    `;
+    document.head.appendChild(style);
+    finSpinnerStyleInjected = true;
+  }
+  function runOnce(btn, busyText, action) {
+    if (!btn || btn.disabled) return; // already in flight — ignore a redundant click
+    ensureSpinnerStyle();
+    const original = btn.innerHTML;
+    const dark = btn.classList.contains('btn-secondary');
+    btn.disabled = true;
+    btn.innerHTML = `<span class="fin-btn-spinner${dark ? ' fin-spinner-dark' : ''}"></span>${escapeHtml(busyText)}`;
+    const reset = () => { if (document.body.contains(btn) && btn.disabled) { btn.disabled = false; btn.innerHTML = original; } };
+    try {
+      Promise.resolve(action()).then(reset, reset);
+    } catch (e) {
+      reset();
+    }
+  }
+  // For the handful of submit buttons that need their own validation
+  // BEFORE going busy (so a bad input shows an error without ever
+  // disabling the button) — same spinner/disable treatment as runOnce,
+  // just split into two calls instead of wrapping the whole action.
+  function setBtnBusy(btn, busyText) {
+    if (!btn) return;
+    ensureSpinnerStyle();
+    if (btn.dataset.finOriginal === undefined) btn.dataset.finOriginal = btn.innerHTML;
+    const dark = btn.classList.contains('btn-secondary');
+    btn.disabled = true;
+    btn.innerHTML = `<span class="fin-btn-spinner${dark ? ' fin-spinner-dark' : ''}"></span>${escapeHtml(busyText)}`;
+  }
+  function clearBtnBusy(btn, fallbackText) {
+    if (!btn) return;
+    btn.disabled = false;
+    btn.innerHTML = btn.dataset.finOriginal !== undefined ? btn.dataset.finOriginal : escapeHtml(fallbackText || '');
+    delete btn.dataset.finOriginal;
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1794,7 +1859,19 @@ const FinanceModule = (function () {
       const linked = requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === request.RequestID);
       const paid = linked.find(p => p.DisbursementStage === 'Paid');
       if (paid) return { text: `Paid via linked Payment Request ${paid.RequestID}${paid.PaymentRef ? ' (Ref: ' + paid.PaymentRef + ')' : ''}`, cls: 'paid' };
-      return { text: `Payment in progress — see linked Payment Request ${linked[0].RequestID}`, cls: 'approved' };
+      const active = linked[0];
+      // Bug found in testing: a linked Payment Request that hasn't even
+      // finished ITS OWN pre-approval chain yet (Status still
+      // 'PendingApproval' — FM/OpsHead/Secretary/President/Treasurer, per
+      // PAYMENT_PRE_APPROVAL_STAGES) was still shown here as "Payment in
+      // progress", which reads as active disbursement processing that
+      // hasn't actually started (and may never — the Payment Request
+      // could still be sent back or rejected). Only call it "in progress"
+      // once that Payment Request is itself Approved.
+      if (active.Status !== 'Approved') {
+        return { text: `Linked Payment Request ${active.RequestID} submitted — awaiting its own approvals`, cls: 'pending' };
+      }
+      return { text: `Payment in progress — see linked Payment Request ${active.RequestID}`, cls: 'approved' };
     }
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
@@ -2307,8 +2384,7 @@ const FinanceModule = (function () {
       return;
     }
 
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Submitting…';
+    setBtnBusy(submitBtn, 'Submitting…');
 
     const user = MVOA.getUser();
     const existingIds = requestsCache.map(r => r.RequestID);
@@ -2328,7 +2404,7 @@ const FinanceModule = (function () {
           attachmentUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_att${i+1}_${att.name}`);
         } catch (e) {
           errEl.textContent = `Attachment ${i+1} upload failed: ${e.message}`;
-          submitBtn.disabled = false; submitBtn.textContent = 'Submit Payment Request';
+          clearBtnBusy(submitBtn, 'Submit Payment Request');
           return;
         }
       }
@@ -2422,7 +2498,7 @@ const FinanceModule = (function () {
       }
     } catch (e) {
       errEl.textContent = 'Could not save request: ' + e.message;
-      submitBtn.disabled = false; submitBtn.textContent = 'Submit Payment Request';
+      clearBtnBusy(submitBtn, 'Submit Payment Request');
       return;
     }
 
@@ -3007,8 +3083,7 @@ const FinanceModule = (function () {
       }
     }
 
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Submitting…';
+    setBtnBusy(submitBtn, 'Submitting…');
 
     const user = MVOA.getUser();
     const existingIds = requestsCache.map(r => r.RequestID);
@@ -3028,7 +3103,7 @@ const FinanceModule = (function () {
           attachmentUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_att${i+1}_${att.name}`);
         } catch (e) {
           errEl.textContent = `Attachment ${i+1} upload failed: ${e.message}`;
-          submitBtn.disabled = false; submitBtn.textContent = 'Submit Request';
+          clearBtnBusy(submitBtn, 'Submit Request');
           return;
         }
       }
@@ -3063,7 +3138,7 @@ const FinanceModule = (function () {
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Submitted', comment: `${category} — ${formatAmount(amount)}`, statusAfter: initialStatus });
     } catch (e) {
       errEl.textContent = 'Could not save request: ' + e.message;
-      submitBtn.disabled = false; submitBtn.textContent = 'Submit Request';
+      clearBtnBusy(submitBtn, 'Submit Request');
       return;
     }
 
@@ -3217,9 +3292,12 @@ const FinanceModule = (function () {
       // Payment Request instead.
       const linked = requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === request.RequestID);
       const paid = linked.find(p => p.DisbursementStage === 'Paid');
+      const active = linked[0];
       paymentsTrailHtml = paid
         ? `<p style="margin:10px 0 3px;color:green;">✅ Paid via linked Payment Request ${escapeHtml(paid.RequestID)}${paid.PaymentRef ? ' — Ref: ' + escapeHtml(paid.PaymentRef) : ''}</p>`
-        : `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Payment in progress — see linked Payment Request ${escapeHtml(linked[0].RequestID)}</p>`;
+        : active.Status !== 'Approved'
+          ? `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Linked Payment Request ${escapeHtml(active.RequestID)} submitted — awaiting its own approvals</p>`
+          : `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Payment in progress — see linked Payment Request ${escapeHtml(active.RequestID)}</p>`;
     } else if (request.Status === 'Approved' && !isPettyCashExpense(request)) {
       const stage = request.DisbursementStage;
       const steps = [
@@ -3492,7 +3570,7 @@ const FinanceModule = (function () {
         const text = textarea.value.trim();
         errEl.textContent = '';
         if (!text) { errEl.textContent = 'Note cannot be empty.'; return; }
-        submitBtn.disabled = true; submitBtn.textContent = 'Saving…';
+        setBtnBusy(submitBtn, 'Saving…');
         try {
           const user = MVOA.getUser();
           const existingIds = [];
@@ -3504,7 +3582,7 @@ const FinanceModule = (function () {
           await renderNotesThread(notesBody, requestId, toggleBtn, canWrite, container, false);
         } catch (e) {
           errEl.textContent = 'Could not save note: ' + escapeHtml(e.message);
-          submitBtn.disabled = false; submitBtn.textContent = 'Add Note';
+          clearBtnBusy(submitBtn, 'Add Note');
         }
       });
     }
@@ -3595,23 +3673,16 @@ const FinanceModule = (function () {
     // Harmless to the final outcome (the stage engine only needs one
     // qualifying approval per group — a duplicate for an already-satisfied
     // group changes nothing) but it's a confusing duplicate log entry and
-    // pure waste. runOnce() disables the clicked button immediately, before
-    // the async decide() call even starts, and only re-enables it if decide()
+    // pure waste. Uses the shared runOnce() (defined near formatAmount, so
+    // every submission button in this module gets the same spinner/busy
+    // treatment) — it disables the clicked button immediately, before the
+    // async decide() call even starts, and only re-enables it if decide()
     // left the DOM alone — which is exactly what happens on failure (the
     // catch block in decide() never calls render()); on success, decide()
     // calls render(container), which rebuilds this whole card from fresh
     // data and detaches this exact button node, so there's nothing to
     // re-enable — a genuinely new button (or none, per the fresh
     // "alreadyVoted" state) takes its place.
-    function runOnce(btn, busyText, action) {
-      if (btn.disabled) return; // already in flight — ignore a redundant click
-      const original = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = busyText;
-      Promise.resolve(action()).then(() => {
-        if (document.body.contains(btn) && btn.disabled) { btn.disabled = false; btn.textContent = original; }
-      });
-    }
     cardsEl.querySelectorAll('.fin-approve-btn').forEach(btn => {
       btn.addEventListener('click', () => runOnce(btn, 'Approving…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Approved', container)));
     });
@@ -3892,12 +3963,12 @@ const FinanceModule = (function () {
     });
     body.querySelectorAll('.fin-resubmit-btn').forEach(btn => {
       const id = btn.dataset.requestId;
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', () => runOnce(btn, 'Resubmitting…', () => {
         const descEl = body.querySelector(`.fin-sb-desc[data-request-id="${id}"]`);
         const newDesc = descEl ? descEl.value.trim() : undefined;
         const newAttachments = sentBackPendingAttachments[id] || [];
-        resubmitRequest(id, container, `.fin-resubmit-error[data-request-id="${id}"]`, newDesc, newAttachments);
-      });
+        return resubmitRequest(id, container, `.fin-resubmit-error[data-request-id="${id}"]`, newDesc, newAttachments);
+      }));
     });
   }
 
@@ -4152,10 +4223,10 @@ const FinanceModule = (function () {
             </div>
             <p class="error-text fin-treasurer-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
           `;
-          div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', () => treasurerApprove(req.RequestID, container));
-          div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', () => {
+          div.querySelector('.fin-treasurer-approve-btn').addEventListener('click', e => runOnce(e.currentTarget, 'Approving…', () => treasurerApprove(req.RequestID, container)));
+          div.querySelector('.fin-treasurer-sendback-btn').addEventListener('click', e => {
             const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
-            if (q && q.trim()) treasurerSendBack(req.RequestID, q.trim(), container);
+            if (q && q.trim()) runOnce(e.currentTarget, 'Sending…', () => treasurerSendBack(req.RequestID, q.trim(), container));
           });
         });
       } catch (e) {
@@ -4186,7 +4257,7 @@ const FinanceModule = (function () {
         </div>`).join('');
       wireNewItemCards(el, refreshPayments);
       el.querySelectorAll('.fin-disburse-btn').forEach(btn => {
-        btn.addEventListener('click', () => disbursePayment(btn.dataset.requestId, el, container));
+        btn.addEventListener('click', () => runOnce(btn, 'Releasing…', () => disbursePayment(btn.dataset.requestId, el, container)));
       });
     }
     if (paid.length) {
@@ -4300,7 +4371,7 @@ const FinanceModule = (function () {
     const vendor = val('#fin-exp-vendor').trim();
     if (!vendor) { errEl.textContent = 'Vendor is required.'; return; }
     if (gross <= 0) { errEl.textContent = 'Gross Amount must be greater than zero.'; return; }
-    saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    setBtnBusy(saveBtn, 'Saving…');
 
     const tabName = isCorrection ? req.ExpenseTab : val('#fin-exp-tab');
     // "Passed By" records the Accountant who logged (or re-logged, after a
@@ -4342,7 +4413,7 @@ const FinanceModule = (function () {
       render(container);
     } catch (err) {
       errEl.textContent = 'Could not save: ' + err.message;
-      saveBtn.disabled = false; saveBtn.textContent = isCorrection ? 'Resubmit to Treasurer' : 'Save & Send to Treasurer';
+      clearBtnBusy(saveBtn, isCorrection ? 'Resubmit to Treasurer' : 'Save & Send to Treasurer');
     }
   }
 
