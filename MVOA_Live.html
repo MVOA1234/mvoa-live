@@ -169,6 +169,12 @@
         <p class="muted">Edit the Title × Section access grid for Staff Attendance — changes save in place.</p>
         <button id="open-att-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
       </div>
+      <!-- Finance Permissions Matrix entry -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Finance Permissions</h2>
+        <p class="muted">Edit the Title × Tab access grid for the Finance Application — changes save in place.</p>
+        <button id="open-fin-perm-matrix-btn" class="btn-primary">🔐 Open Permissions Matrix</button>
+      </div>
       <!-- Manage Users -->
       <div class="card" id="manage-users-card">
         <h2 style="margin:0 0 4px;color:var(--mvoa-blue);">Manage Users</h2>
@@ -299,6 +305,26 @@
       <button id="am-save-btn" class="btn-primary" style="margin-top:14px;">Save Changes</button>
       <p class="error-text" id="am-error"></p>
       <p class="muted" id="am-saved-msg"></p>
+    </div>
+  </div>
+
+  <div id="fin-perm-matrix-screen" class="screen hidden">
+    <div class="card">
+      <div class="mvoa-row">
+        <h1 style="margin:0;">Finance Permissions Matrix</h1>
+        <button id="fin-perm-matrix-back-btn" class="btn-secondary">&larr; Settings</button>
+      </div>
+      <p class="muted">Controls access to the Finance Application's 4 top-level tabs (Spend Approval, Payment Approval, Budget, Contracts). "No access" hides the tab entirely for that Title. "Read Only" shows the tab but hides every approve/submit/edit action. "Edit" is full access, same as today. Changes update the existing row in place — no duplicate rows are created. A cell set back to "No access" is blanked, not deleted. A tab with no rows at all stays open to everyone until you add its first row here.</p>
+      <div class="mvoa-row" style="gap:8px;flex-wrap:wrap;margin:10px 0;">
+        <input id="fm-new-title" type="text" placeholder="New title name (e.g. Assistant Treasurer)" style="flex:1;min-width:180px;">
+        <button id="fm-add-title-btn" class="btn-secondary">+ Add Title Column</button>
+      </div>
+      <div id="fm-grid-wrap" style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <p class="muted">Loading…</p>
+      </div>
+      <button id="fm-save-btn" class="btn-primary" style="margin-top:14px;">Save Changes</button>
+      <p class="error-text" id="fm-error"></p>
+      <p class="muted" id="fm-saved-msg"></p>
     </div>
   </div>
 
@@ -524,6 +550,12 @@
       renderPrPermMatrixGrid();
     });
     document.getElementById('pr-perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
+    document.getElementById('open-fin-perm-matrix-btn').addEventListener('click', () => {
+      show('fin-perm-matrix-screen');
+      renderFinPermMatrixGrid();
+    });
+    document.getElementById('fin-perm-matrix-back-btn').addEventListener('click', () => show('settings-screen'));
+
     document.getElementById('open-att-perm-matrix-btn').addEventListener('click', () => {
       show('att-perm-matrix-screen');
       renderAttPermMatrixGrid();
@@ -1096,6 +1128,147 @@
         amExtraTitles = [];
         savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
         await renderAttPermMatrixGrid();
+      } catch (e) {
+        errEl.textContent = 'Could not save changes: ' + e.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+    });
+
+    // ─── Finance Permissions Matrix ───
+    // Same shape and edit-in-place approach as the matrices above, pointed
+    // at PermissionsMatrix_Finance. Structural difference: this one gates
+    // Finance's 4 top-level tabs (Spend Approval/Payment Approval/Budget/
+    // Contracts) rather than a module's internal sections, so the "Section"
+    // list is a fixed set of tab names instead of a category sheet or a
+    // hardcoded internal-screen list. Same fail-open behavior: a tab with
+    // zero matrix rows stays open to everyone until its first row is added
+    // here (see canViewFinanceSection/canEditFinanceSection in shared.js).
+    const FM_SECTIONS = [
+      { key: 'Spend Approval', label: 'Spend Approval' },
+      { key: 'Payment Approval', label: 'Payment Approval' },
+      { key: 'Budget', label: 'Budget' },
+      { key: 'Contracts', label: 'Contracts' }
+    ];
+    let fmTitles = [];
+    let fmRowNumberByKey = {};
+    let fmOriginalByKey = {};
+    let fmExtraTitles = [];
+
+    function fmKey(section, title) { return section + '||' + title; }
+
+    async function renderFinPermMatrixGrid() {
+      const wrap = document.getElementById('fm-grid-wrap');
+      const errEl = document.getElementById('fm-error');
+      const savedEl = document.getElementById('fm-saved-msg');
+      errEl.textContent = ''; savedEl.textContent = '';
+      wrap.innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        await MVOA.loadFinancePermissionsMatrix();
+        const rawRows = MVOA.getFinancePermissionsMatrixRows();
+        const users = await MVOA.loadRoles();
+
+        const titleSet = new Set();
+        users.filter(u => u.active).forEach(u => titleSet.add(MVOA.displayTitle(u)));
+        rawRows.forEach(r => titleSet.add(r.Title));
+        fmExtraTitles.forEach(t => titleSet.add(t));
+        fmTitles = [...titleSet].filter(Boolean).sort((a, b) => a.localeCompare(b));
+
+        fmRowNumberByKey = {};
+        fmOriginalByKey = {};
+        rawRows.forEach(r => {
+          const key = fmKey(r.Section, r.Title);
+          fmRowNumberByKey[key] = r.rowNumber;
+          fmOriginalByKey[key] = r.AccessLevel || '';
+        });
+      } catch (e) {
+        wrap.innerHTML = '<p class="error-text">Could not load permissions matrix: ' + e.message + '</p>';
+        return;
+      }
+
+      if (!fmTitles.length) {
+        wrap.innerHTML = '<p class="muted">No titles yet — add one above, or create a user with a Title set.</p>';
+        return;
+      }
+
+      const headerCells = fmTitles.map(t => `<th style="padding:6px 8px;white-space:nowrap;">${t}</th>`).join('');
+      const bodyRows = FM_SECTIONS.map(sec => {
+        const cells = fmTitles.map(title => {
+          const key = fmKey(sec.key, title);
+          const current = fmOriginalByKey[key] || '';
+          return `
+            <td style="padding:4px 6px;">
+              <select class="fm-cell" data-section="${sec.key}" data-title="${title}" style="width:auto;min-width:110px;">
+                <option value="" ${current===''?'selected':''}>No access</option>
+                <option value="ReadOnly" ${current==='ReadOnly'?'selected':''}>Read Only</option>
+                <option value="Edit" ${current==='Edit'?'selected':''}>Edit</option>
+              </select>
+            </td>`;
+        }).join('');
+        return `<tr><td style="padding:6px 8px;font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">${sec.label}</td>${cells}</tr>`;
+      }).join('');
+
+      wrap.innerHTML = `
+        <table class="mvoa-table" style="border-collapse:collapse;">
+          <thead><tr><th style="padding:6px 8px;position:sticky;left:0;background:#fff;z-index:2;box-shadow:2px 0 4px -2px rgba(0,0,0,0.15);">Tab</th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      `;
+    }
+
+    document.getElementById('fm-add-title-btn').addEventListener('click', () => {
+      const input = document.getElementById('fm-new-title');
+      const title = input.value.trim();
+      const errEl = document.getElementById('fm-error');
+      errEl.textContent = '';
+      if (!title) { errEl.textContent = 'Enter a title name first.'; return; }
+      if (fmTitles.includes(title)) { errEl.textContent = 'That title column already exists.'; return; }
+      fmExtraTitles.push(title);
+      input.value = '';
+      renderFinPermMatrixGrid();
+    });
+
+    document.getElementById('fm-save-btn').addEventListener('click', async () => {
+      const errEl = document.getElementById('fm-error');
+      const savedEl = document.getElementById('fm-saved-msg');
+      const btn = document.getElementById('fm-save-btn');
+      errEl.textContent = ''; savedEl.textContent = '';
+
+      const toUpdate = [];
+      const toAppend = [];
+      document.querySelectorAll('.fm-cell').forEach(sel => {
+        const section = sel.dataset.section;
+        const title = sel.dataset.title;
+        const newVal = sel.value;
+        const key = fmKey(section, title);
+        const original = fmOriginalByKey[key] || '';
+        if (newVal === original) return;
+        const rowNumber = fmRowNumberByKey[key];
+        if (rowNumber) {
+          toUpdate.push({ rowNumber, row: [section, title, newVal] });
+        } else if (newVal) {
+          toAppend.push([section, title, newVal]);
+        }
+      });
+
+      if (!toUpdate.length && !toAppend.length) {
+        savedEl.textContent = 'No changes to save.';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        for (const u of toUpdate) {
+          await MVOA.sheetsUpdateRow(MVOA.TABS.permissionsMatrixFinance, u.rowNumber, u.row);
+        }
+        if (toAppend.length) {
+          await MVOA.sheetsAppendMany(MVOA.TABS.permissionsMatrixFinance, toAppend);
+        }
+        await MVOA.loadFinancePermissionsMatrix(true);
+        fmExtraTitles = [];
+        savedEl.textContent = `✓ Saved ${toUpdate.length + toAppend.length} change(s).`;
+        await renderFinPermMatrixGrid();
       } catch (e) {
         errEl.textContent = 'Could not save changes: ' + e.message;
       }
