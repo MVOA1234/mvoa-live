@@ -1151,7 +1151,7 @@ const FinanceModule = (function () {
       const today = new Date(); today.setHours(0, 0, 0, 0);
       body.querySelector('#fin-contracts-table').innerHTML = `
         <table class="mvoa-table">
-          <thead><tr><th>Vendor</th><th>Category</th><th>Nature</th><th>Valid To</th><th>Status</th></tr></thead>
+          <thead><tr><th>Vendor</th><th>Category</th><th>Nature</th><th>Valid To</th><th>Status</th>${currentSectionCanEdit ? '<th></th>' : ''}</tr></thead>
           <tbody>
             ${rows.map(c => {
               const expired = c.EndDate && new Date(c.EndDate) < today;
@@ -1162,10 +1162,20 @@ const FinanceModule = (function () {
                 <td>${escapeHtml(c.Nature)}</td>
                 <td>${c.EndDate ? escapeHtml(c.EndDate) : 'Open-ended'}</td>
                 <td style="color:${(expired || terminated) ? '#b3261e' : 'green'};font-weight:600;">${terminated ? 'Terminated' : expired ? 'Expired' : 'Active'}</td>
+                ${currentSectionCanEdit ? `<td><button class="btn-secondary fin-edit-contract-btn" data-contract-id="${escapeHtml(c.ContractID)}" style="font-size:0.75rem;padding:4px 10px;">✏️ Edit</button></td>` : ''}
               </tr>`;
             }).join('')}
           </tbody>
         </table>`;
+      if (currentSectionCanEdit) body.querySelectorAll('.fin-edit-contract-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const c = contractsCache.find(x => x.ContractID === btn.dataset.contractId);
+          if (!c) return;
+          contractFormPrefill = Object.assign({}, c); // full existing row, including rowNumber/ContractID — see doSubmitContract's edit-vs-create branch
+          contractsSubView = 'form';
+          renderContractForm(body, container);
+        });
+      });
     }
   }
 
@@ -1173,11 +1183,13 @@ const FinanceModule = (function () {
     if (!currentSectionCanEdit) { renderContractsList(body, container); return; }
     contractsSubView = 'form';
     const p = contractFormPrefill || {};
+    const isEdit = !!p.rowNumber;
     const categories = selectableCategories(); // same live list New Request already uses, from FinanceApprovalRules
     body.innerHTML = `
       <button id="fin-contract-back-btn" class="btn-secondary" style="margin-bottom:12px;">← Back to Contracts</button>
       <div class="card" style="max-width:560px;margin:0;">
-        ${p.ApprovedRequestID ? `<p class="muted" style="margin:0 0 10px;">Registering the agreement just approved as ${escapeHtml(p.ApprovedRequestID)}.</p>` : ''}
+        ${isEdit ? `<p class="muted" style="margin:0 0 10px;">Editing contract for ${escapeHtml(p.Vendor || '')} (${escapeHtml(p.ContractID || '')}).</p>`
+          : (p.ApprovedRequestID ? `<p class="muted" style="margin:0 0 10px;">Registering the agreement just approved as ${escapeHtml(p.ApprovedRequestID)}.</p>` : '')}
         <label>Category
           <select id="fc-category">
             <option value="">— Select —</option>
@@ -1185,25 +1197,25 @@ const FinanceModule = (function () {
           </select>
         </label>
         <label>Vendor <input id="fc-vendor" type="text" value="${escapeHtml(p.Vendor || '')}"></label>
-        <label>Vendor Details <input id="fc-vendordetails" type="text" placeholder="Phone, contact person, account/consumer no. etc."></label>
-        <label>Nature of Contract <input id="fc-nature" type="text" placeholder="e.g. Annual AMC - DG Set"></label>
-        <label>PO / Work Order Number <input id="fc-po" type="text"></label>
-        <label>Policy Number <input id="fc-policy" type="text" placeholder="For Insurance — leave blank otherwise"></label>
-        <label>Start Date <input id="fc-start" type="date"></label>
-        <label>End Date <input id="fc-end" type="date"></label>
+        <label>Vendor Details <input id="fc-vendordetails" type="text" placeholder="Phone, contact person, account/consumer no. etc." value="${escapeHtml(p.VendorDetails || '')}"></label>
+        <label>Nature of Contract <input id="fc-nature" type="text" placeholder="e.g. Annual AMC - DG Set" value="${escapeHtml(p.Nature || '')}"></label>
+        <label>PO / Work Order Number <input id="fc-po" type="text" value="${escapeHtml(p.PO_WO_Number || '')}"></label>
+        <label>Policy Number <input id="fc-policy" type="text" placeholder="For Insurance — leave blank otherwise" value="${escapeHtml(p.PolicyNumber || '')}"></label>
+        <label>Start Date <input id="fc-start" type="date" value="${escapeHtml(p.StartDate || '')}"></label>
+        <label>End Date <input id="fc-end" type="date" value="${escapeHtml(p.EndDate || '')}"></label>
         <p class="muted" style="margin:-8px 0 10px;">Leave End Date blank for an open-ended commitment (e.g. an ongoing utility account with no fixed expiry) — it will never be flagged as expiring.</p>
         <label>Status
           <select id="fc-status">
-            <option value="Active">Active</option>
-            <option value="Terminated">Terminated</option>
+            <option value="Active" ${(p.Status || 'Active') === 'Active' ? 'selected' : ''}>Active</option>
+            <option value="Terminated" ${p.Status === 'Terminated' ? 'selected' : ''}>Terminated</option>
           </select>
         </label>
-        <label>Notes <textarea id="fc-notes" rows="2"></textarea></label>
-        <button id="fc-submit-btn" class="btn-primary">Save Contract</button>
+        <label>Notes <textarea id="fc-notes" rows="2">${escapeHtml(p.Notes || '')}</textarea></label>
+        <button id="fc-submit-btn" class="btn-primary">${isEdit ? 'Update Contract' : 'Save Contract'}</button>
         <p class="error-text" id="fc-form-error"></p>
       </div>
     `;
-    body.querySelector('#fin-contract-back-btn').addEventListener('click', () => renderContractsList(body, container));
+    body.querySelector('#fin-contract-back-btn').addEventListener('click', () => { contractFormPrefill = null; renderContractsList(body, container); });
     body.querySelector('#fc-submit-btn').addEventListener('click', () => submitContract(body, container, p.ApprovedRequestID || ''));
   }
 
@@ -1225,25 +1237,31 @@ const FinanceModule = (function () {
     if (!category) { errEl.textContent = 'Please select a Category.'; return; }
     if (!vendor) { errEl.textContent = 'Please enter a Vendor.'; return; }
 
-    setBtnBusy(submitBtn, 'Saving…');
+    const isEdit = !!(contractFormPrefill && contractFormPrefill.rowNumber);
+    setBtnBusy(submitBtn, isEdit ? 'Updating…' : 'Saving…');
 
     const existingIds = contractsCache.map(c => c.ContractID);
-    const contractId = MVOA.nextId('AGR', existingIds);
+    const contractId = isEdit ? contractFormPrefill.ContractID : MVOA.nextId('AGR', existingIds);
     const row = {
       ContractID: contractId, Category: category, Vendor: vendor,
       VendorDetails: val('#fc-vendordetails'), Nature: val('#fc-nature'),
       PO_WO_Number: val('#fc-po'), PolicyNumber: val('#fc-policy'),
       StartDate: val('#fc-start'), EndDate: val('#fc-end'),
-      Status: val('#fc-status') || 'Active', ApprovedRequestID: approvedRequestId || '',
+      Status: val('#fc-status') || 'Active',
+      ApprovedRequestID: (isEdit ? contractFormPrefill.ApprovedRequestID : approvedRequestId) || '',
       Notes: val('#fc-notes')
     };
 
     try {
       await MVOA.sheetsEnsureTab(TAB_CONTRACTS, CONTRACT_COLS);
-      await MVOA.sheetsAppend(TAB_CONTRACTS, objToRow(CONTRACT_COLS, row));
+      if (isEdit) {
+        await MVOA.sheetsUpdateRow(TAB_CONTRACTS, contractFormPrefill.rowNumber, objToRow(CONTRACT_COLS, row));
+      } else {
+        await MVOA.sheetsAppend(TAB_CONTRACTS, objToRow(CONTRACT_COLS, row));
+      }
     } catch (e) {
       errEl.textContent = 'Could not save contract: ' + e.message;
-      clearBtnBusy(submitBtn, 'Save Contract');
+      clearBtnBusy(submitBtn, isEdit ? 'Update Contract' : 'Save Contract');
       return;
     }
 
