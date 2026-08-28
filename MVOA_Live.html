@@ -314,7 +314,7 @@
         <h1 style="margin:0;">Finance Permissions Matrix</h1>
         <button id="fin-perm-matrix-back-btn" class="btn-secondary">&larr; Settings</button>
       </div>
-      <p class="muted">Controls access to the Finance Application's 4 top-level tabs (Spend Approval, Payment Approval, Budget, Contracts). "No access" hides the tab entirely for that Title. "Read Only" shows the tab but hides every approve/submit/edit action. "Edit" is full access, same as today. Changes update the existing row in place — no duplicate rows are created. A cell set back to "No access" is blanked, not deleted. A tab with no rows at all stays open to everyone until you add its first row here.</p>
+      <p class="muted">Controls access to the Finance Application's 5 top-level tabs (Dashboard, Spend Approval, Payment Approval, Budget, Contracts). "No access" hides the tab entirely for that Title. "Read Only" shows the tab but hides every approve/submit/edit action (Dashboard has no actions to hide, so Read Only and Edit look the same there). "Edit" is full access, same as today. Changes update the existing row in place — no duplicate rows are created. A cell set back to "No access" is blanked, not deleted. A tab with no rows at all stays open to everyone until you add its first row here.</p>
       <div class="mvoa-row" style="gap:8px;flex-wrap:wrap;margin:10px 0;">
         <input id="fm-new-title" type="text" placeholder="New title name (e.g. Assistant Treasurer)" style="flex:1;min-width:180px;">
         <button id="fm-add-title-btn" class="btn-secondary">+ Add Title Column</button>
@@ -1138,13 +1138,17 @@
     // ─── Finance Permissions Matrix ───
     // Same shape and edit-in-place approach as the matrices above, pointed
     // at PermissionsMatrix_Finance. Structural difference: this one gates
-    // Finance's 4 top-level tabs (Spend Approval/Payment Approval/Budget/
-    // Contracts) rather than a module's internal sections, so the "Section"
-    // list is a fixed set of tab names instead of a category sheet or a
-    // hardcoded internal-screen list. Same fail-open behavior: a tab with
-    // zero matrix rows stays open to everyone until its first row is added
-    // here (see canViewFinanceSection/canEditFinanceSection in shared.js).
+    // Finance's 5 top-level tabs (Dashboard/Spend Approval/Payment Approval/
+    // Budget/Contracts) rather than a module's internal sections, so the
+    // "Section" list is a fixed set of tab names instead of a category
+    // sheet or a hardcoded internal-screen list. Same fail-open behavior: a
+    // tab with zero matrix rows stays open to everyone until its first row
+    // is added here (see canViewFinanceSection/canEditFinanceSection in
+    // shared.js). Dashboard has no write actions at all, so an "Edit" vs
+    // "Read Only" row for it behaves identically — either just shows or
+    // hides the tab, same as "No access" does either way.
     const FM_SECTIONS = [
+      { key: 'Dashboard', label: 'Dashboard' },
       { key: 'Spend Approval', label: 'Spend Approval' },
       { key: 'Payment Approval', label: 'Payment Approval' },
       { key: 'Budget', label: 'Budget' },
