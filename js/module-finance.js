@@ -617,6 +617,17 @@ const FinanceModule = (function () {
   }
 
   async function mount(container) {
+    // currentTopTab/currentView are module-level state that otherwise
+    // survives across visits (they're only ever changed by navigating
+    // within Finance, never reset) — so leaving Finance mid-workflow
+    // (e.g. on Payment Approval → Payments) and reopening it from Home
+    // dropped the user right back into that same sub-view instead of the
+    // top-level Spend/Payment/Budget/Contracts chooser. Every fresh open
+    // from Home now always starts at that top-level chooser, per explicit
+    // request — navigating within an open session (the sub-tabs, or the
+    // "← Back to Finance Application" button) still behaves as before.
+    currentTopTab = 'home';
+    currentView = 'mine';
     container.innerHTML = `<p class="muted">Loading…</p>`;
     try {
       await loadAll(true);
