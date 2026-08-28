@@ -4039,12 +4039,22 @@ const FinanceModule = (function () {
 
     body.querySelector('#fin-view-expense-sheet-btn').addEventListener('click', () => renderExpenseSheetBrowser(container));
 
+    // Bug found in testing: the "Log Expense Entry" button used to
+    // stretch to fill whatever space was left in the row after the
+    // category/amount text — so its width varied card to card depending
+    // on how long that text was, instead of staying a uniform size, and
+    // in the process squeezed how much room the text itself actually got.
+    // Explicitly stopping the right-hand side from growing (flex:0 0
+    // auto) fixes both at once: every button/badge now sizes to its own
+    // content only (uniform across cards, since the button text is
+    // identical every time), and the left text — now the only flexible
+    // side — gets first claim on the row's width.
     function baseCard(req, extraRight) {
       return `
         <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
-          <div class="mvoa-row">
-            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
-            ${extraRight || ''}
+          <div class="mvoa-row" style="display:flex;align-items:center;gap:10px;">
+            <strong style="flex:1 1 auto;min-width:0;">${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+            <span style="flex:0 0 auto;">${extraRight || ''}</span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested by ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
@@ -4203,6 +4213,14 @@ const FinanceModule = (function () {
       const tabs = allKnownExpenseTabs();
       const box = modal.querySelector('.ops-qr-box');
       box.innerHTML = `
+        <style>
+          /* Hides the native up/down stepper on TDS Rate (%) — a percentage
+             typed once doesn't benefit from click-to-increment, and it was
+             easy to bump by mistake. */
+          .fin-no-spinner::-webkit-outer-spin-button,
+          .fin-no-spinner::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+          .fin-no-spinner { -moz-appearance: textfield; }
+        </style>
         <button id="fin-exp-cancel-top" class="btn-secondary" style="position:sticky;top:0;float:right;z-index:1;">✕ Close</button>
         <h3>${isCorrection ? 'Edit' : 'Log'} Expense Entry — ${escapeHtml(req.Category)}</h3>
         <label>Month (Expense Sheet tab)
@@ -4220,10 +4238,11 @@ const FinanceModule = (function () {
           <option value="No" ${(e.GST || 'No') === 'No' ? 'selected' : ''}>No</option>
           <option value="Yes" ${e.GST === 'Yes' ? 'selected' : ''}>Yes</option>
         </select></label>
-        <label>TDS Rate (%) <input id="fin-exp-tdsrate" type="number" min="0" value="${escapeHtml(e.TDSRate || 0)}"></label>
+        <label>TDS Rate (%) <input id="fin-exp-tdsrate" class="fin-no-spinner" type="number" min="0" value="${escapeHtml(e.TDSRate || 0)}"></label>
         <label>TDS (₹) <input id="fin-exp-tds" type="number" min="0" value="${escapeHtml(e.TDS || 0)}"></label>
+        <p class="muted" id="fin-exp-tds-note" style="margin:-6px 0 0;font-size:0.8rem;"></p>
         <label>Less / Add (₹, +/-) <input id="fin-exp-lessadd" type="number" value="${escapeHtml(e.LessAdd || 0)}"></label>
-        <label>Net Amount (₹) <input id="fin-exp-net" type="number" min="0" value="${escapeHtml(e.NetAmount || '')}"></label>
+        <label>Net Amount (₹) <input id="fin-exp-net" type="number" min="0" readonly style="background:#eee;" value="${escapeHtml(e.NetAmount || '')}"></label>
         <button id="fin-exp-save" class="btn-primary" style="margin-top:10px;">${isCorrection ? 'Resubmit to Treasurer' : 'Save &amp; Send to Treasurer'}</button>
         <button id="fin-exp-cancel" class="btn-secondary">Cancel</button>
         <p class="error-text" id="fin-exp-error"></p>
@@ -4231,6 +4250,42 @@ const FinanceModule = (function () {
       box.querySelector('#fin-exp-cancel-top').addEventListener('click', () => modal.remove());
       box.querySelector('#fin-exp-cancel').addEventListener('click', () => modal.remove());
       box.querySelector('#fin-exp-save').addEventListener('click', () => saveExpenseEntry(req, modal, container, isCorrection, existing));
+
+      // Live TDS / Net Amount calculation. TDS (₹) is auto-derived ONLY
+      // when GST Applicable = Yes — the Gross Amount is GST-inclusive in
+      // that case, so TDS is computed on the pre-GST base (Gross / 1.18),
+      // not on the GST-inclusive figure — and becomes read-only so it
+      // can't drift out of sync with that formula by manual edit. When
+      // GST = No, TDS (₹) goes back to a plain manual entry (no reliable
+      // base to derive it from). Net Amount = Gross − TDS(₹) − Less/Add
+      // is unconditional and always read-only, per explicit instruction.
+      const grossEl = box.querySelector('#fin-exp-gross');
+      const gstEl = box.querySelector('#fin-exp-gst');
+      const tdsRateEl = box.querySelector('#fin-exp-tdsrate');
+      const tdsEl = box.querySelector('#fin-exp-tds');
+      const lessAddEl = box.querySelector('#fin-exp-lessadd');
+      const netEl = box.querySelector('#fin-exp-net');
+      const tdsNoteEl = box.querySelector('#fin-exp-tds-note');
+      const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+      function recalc() {
+        const gross = Number(grossEl.value) || 0;
+        const gstApplicable = gstEl.value === 'Yes';
+        if (gstApplicable) {
+          const baseAmount = gross / 1.18; // Gross Amount is GST-inclusive — TDS applies to the pre-GST base
+          tdsEl.value = round2(baseAmount * (Number(tdsRateEl.value) || 0) / 100);
+          tdsEl.readOnly = true;
+          tdsEl.style.background = '#eee';
+          tdsNoteEl.textContent = 'Auto-calculated: (Gross ÷ 1.18) × TDS Rate — GST Applicable is Yes.';
+        } else {
+          tdsEl.readOnly = false;
+          tdsEl.style.background = '';
+          tdsNoteEl.textContent = '';
+        }
+        netEl.value = round2(gross - (Number(tdsEl.value) || 0) - (Number(lessAddEl.value) || 0));
+      }
+      [grossEl, tdsRateEl, tdsEl, lessAddEl].forEach(el => el.addEventListener('input', recalc));
+      gstEl.addEventListener('change', recalc);
+      recalc();
     })();
   }
 
