@@ -944,8 +944,9 @@
     // hard violation if a staff member had zero days off in it — that's
     // already happened and needs correcting going forward. "This week"
     // (in progress) is an early warning: every day so far had a login, but
-    // there's still time before Sunday to give them a day off, so it's
-    // shown separately and less alarmingly than a completed-week flag.
+    // there's still time, up to and including Sunday itself, to give them
+    // a day off, so it's shown separately and less alarmingly than a
+    // completed-week flag.
     const woToday = new Date(); woToday.setHours(0, 0, 0, 0);
     const woThisMonday = mondayOf(woToday);
     const woThisSunday = sundayOf(woThisMonday);
@@ -1033,7 +1034,7 @@
         ${thisWeekAtRisk.length ? `
           <div style="margin-bottom:14px;padding:10px 12px;background:#fdf1cf;border-radius:8px;">
             <strong style="font-size:0.85rem;color:#8a6d00;">⚠️ No day off yet this week (${escapeHtml(weekLabel(woThisMonday, woThisSunday))}) — ${thisWeekAtRisk.length}</strong>
-            <div class="muted" style="font-size:0.82rem;margin-top:4px;">${thisWeekAtRisk.map(s => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))})`).join(', ')} — still time to schedule one before Sunday.</div>
+            <div class="muted" style="font-size:0.82rem;margin-top:4px;">${thisWeekAtRisk.map(s => `${escapeHtml(s.Name)} (${escapeHtml(agencyName(s.AgencyID))})`).join(', ')} — still time to schedule one by Sunday.</div>
           </div>
         ` : ''}
         <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:flex-end;">
