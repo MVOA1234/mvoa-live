@@ -2339,7 +2339,15 @@ const FinanceModule = (function () {
             const map = {};
             rows.forEach(r => {
               const approvalsForReq = allApprovals.filter(a => a.RequestID === r.RequestID);
-              map[r.RequestID] = stageDescription(r, approvalsForReq).text;
+              let text = stageDescription(r, approvalsForReq).text;
+              // stageDescription's "Sent back to you" is written from the
+              // requester's own point of view (correct in their My Requests
+              // screen) — but this dashboard is viewed by anyone with Finance
+              // access, not just the requester, so "you" here is ambiguous.
+              // Name the actual requester instead: the ball is with them,
+              // not with any approver, until they correct and resubmit.
+              text = text.replace(/^🔁 Sent back to you/, `🔁 With Requester (${escapeHtml(r.RequestedBy)}) — sent back for correction`);
+              map[r.RequestID] = text;
             });
             dashboardDrilldownStageMap = map;
             renderDashboardTab(body, container);
