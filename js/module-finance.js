@@ -2125,18 +2125,19 @@ const FinanceModule = (function () {
       .sort((a, b) => b.daysPending - a.daysPending)
       .slice(0, 8);
 
-    // Recent activity — last few actually paid, last few applied budget
-    // revisions, last few contracts (no CreatedDate on Contracts, so
-    // StartDate is the closest available proxy for "recently added").
+    // Recent activity — most recently approved Schedule A/B/C spend
+    // requests (Status flips to 'Approved' at the moment the chain
+    // finishes, with StageEnteredAt stamped then too — see
+    // settleFullyApproved — so that's the right field to sort "recently
+    // approved" by, falling back to RequestedDate for any older row from
+    // before StageEnteredAt existed), and last few actually paid.
+    const recentApprovedSpend = requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
+      .sort((a, b) => (b.StageEnteredAt || b.RequestedDate || '').localeCompare(a.StageEnteredAt || a.RequestedDate || ''))
+      .slice(0, 5);
     const recentPaid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
       .sort((a, b) => (b.PaymentDate || b.ClosedDate || '').localeCompare(a.PaymentDate || a.ClosedDate || ''))
       .slice(0, 5);
-    const recentRevisions = budgetRevisionsCache.filter(r => r.Status === 'Applied')
-      .sort((a, b) => (b.AppliedDate || b.RequestedDate || '').localeCompare(a.AppliedDate || a.RequestedDate || ''))
-      .slice(0, 5);
-    const recentContracts = contractsCache.slice()
-      .sort((a, b) => (b.StartDate || '').localeCompare(a.StartDate || ''))
-      .slice(0, 5);
+    const pettyCashBalance = computeFloatBalance();
 
     // The .card divs below get an explicit width:100%;box-sizing:border-box
     // — the shared .card class shrink-wraps to its own content's natural
@@ -2212,16 +2213,17 @@ const FinanceModule = (function () {
         <h3 style="margin-top:0;">🕘 Recent Activity</h3>
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:16px;">
           <div>
+            <strong style="font-size:0.85rem;">📝 Recent Approval to Spend</strong>
+            ${recentApprovedSpend.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentApprovedSpend.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.StageEnteredAt || r.RequestedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
+          </div>
+          <div>
             <strong style="font-size:0.85rem;">💰 Recently Paid</strong>
             ${recentPaid.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentPaid.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.PaymentDate || r.ClosedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
           </div>
           <div>
-            <strong style="font-size:0.85rem;">🔄 Recent Budget Revisions</strong>
-            ${recentRevisions.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentRevisions.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.CurrentBudget)} → ${formatAmount(r.ProposedBudget)} — ${formatDate(r.AppliedDate || r.RequestedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None applied yet.</p>`}
-          </div>
-          <div>
-            <strong style="font-size:0.85rem;">📄 Recent Contracts</strong>
-            ${recentContracts.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentContracts.map(c => `${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)} — ${formatDate(c.StartDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
+            <strong style="font-size:0.85rem;">💵 Current Petty Cash Balance (with FM)</strong>
+            <div style="font-size:1.15rem;font-weight:700;margin-top:4px;color:${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : '#1e6b33'};">${formatAmount(pettyCashBalance)}</div>
+            <div class="muted" style="font-size:0.75rem;margin-top:2px;">of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below operational minimum' : ''}</div>
           </div>
         </div>
       </div>
