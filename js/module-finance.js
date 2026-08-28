@@ -4450,7 +4450,15 @@ const FinanceModule = (function () {
       try { rows = await MVOA.sheetsRead(monthSel.value); }
       catch (e) { tableEl.innerHTML = `<p class="muted">No entries yet for this month.</p>`; return; }
       if (rows.length <= 1) { tableEl.innerHTML = `<p class="muted">No entries yet for this month.</p>`; return; }
-      const header = EXPENSE_COLS.filter(c => c !== 'RequestID');
+      // Display-only column selection/order for this read-only browser —
+      // independent of EXPENSE_COLS, which stays untouched since it's the
+      // actual physical column order of the live sheet (writes/reads
+      // elsewhere still rely on it positionally). Nelson Check / Lakshman
+      // Check are hidden from view here per explicit request; UDNumber
+      // (the UTR/Cheque/UD reference) is moved to display after Bank.
+      const HIDDEN_COLS = new Set(['RequestID', 'NelsonCheck', 'LakshmanCheck', 'UDNumber']);
+      const header = EXPENSE_COLS.filter(c => !HIDDEN_COLS.has(c));
+      header.push('UDNumber');
       // Columns holding money — display with Indian comma grouping
       // (1,00,000 style: thousands, then lakhs/crores) rather than the
       // raw digit string.
