@@ -5055,11 +5055,19 @@ const HSModule = (function () {
         <title>${escapeHtml(title)}</title>
         <style>
           body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
-          h1 { color: #1d4e6b; font-size: 1.3rem; margin-bottom: 4px; }
-          .muted { color: #6b7280; font-size: 0.85rem; margin-top: 0; }
-          table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-          th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; font-size: 0.8rem; white-space: nowrap; }
-          th { background: #f5f6f8; }
+          h1 { color: #1d4e6b; font-size: 1.3rem; margin: 0 0 4px; }
+          .muted { color: #6b7280; font-size: 0.85rem; margin: 0 0 14px; padding-bottom: 12px; border-bottom: 2px solid #1d4e6b; }
+          table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+          th, td { border: 1px solid #d3d8de; padding: 8px 10px; text-align: center; font-size: 0.8rem; white-space: nowrap; }
+          /* Row-header column (Category/Zone/Item/etc.) reads as a label,
+             not a value — keep it left-aligned and visually distinct from
+             the centered data columns beside it. Every other column
+             centered per request: short values like ✓, "Due every Monday",
+             a date or a status word all read cleaner centered than ragged-left. */
+          th:first-child, td:first-child { text-align: left; }
+          th { background: #eaf1f6; color: #1d4e6b; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; font-size: 0.7rem; }
+          tbody tr:nth-child(even) td { background: #f7f9fb; }
+          tbody tr:hover td { background: #eef3f7; }
           .back-btn {
             display: inline-block; margin-bottom: 16px; padding: 10px 18px;
             border-radius: 8px; border: none; background: #1d4e6b; color: white;
@@ -5080,8 +5088,13 @@ const HSModule = (function () {
           @media print {
             .back-btn { display: none; }
             table { table-layout: fixed; width: 100%; }
-            th, td { white-space: normal; word-break: break-word; font-size: 0.62rem; padding: 3px 4px; }
+            th, td { white-space: normal; word-break: break-word; font-size: 0.62rem; padding: 4px 5px; }
             th:first-child, td:first-child { width: 110px; }
+            /* Zebra striping and hover tint above rely on background-color,
+               which most browsers' print engines drop unless "Background
+               graphics" is checked in the print dialog — borders aren't
+               affected either way, so the table still reads cleanly with
+               that option left off. */
           }
           @page { size: landscape; margin: 10mm; }
         </style>
