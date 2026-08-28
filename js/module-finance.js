@@ -44,9 +44,11 @@
 //   InvoicePeriodPurpose | Period | GrossAmount | GST | TDSRate | TDS |
 //   LessAdd | NetAmount | NelsonCheck | LakshmanCheck | ApprovedBy |
 //   PassedBy | UDNumber | Date
-// ("PassedBy" being filled in is what constitutes the Treasurer's formal
-// approval — same as the real paper process. UDNumber/Date are filled by
-// the Disbursement Officer at the moment of payment.)
+// ("PassedBy" is auto-filled with the Accountant's name/date whenever they
+// log or re-log this entry — the preparer sign-off. "ApprovedBy" is
+// auto-filled with the Treasurer's name/date when they approve the entry —
+// the formal approval, same as the real paper process. UDNumber/Date are
+// filled by the Disbursement Officer at the moment of payment.)
 //
 // FinanceApprovals columns: ApprovalID | RequestID | ApproverName |
 //   ApproverRole | Stage | Decision | Comment | Timestamp
@@ -4301,6 +4303,12 @@ const FinanceModule = (function () {
     saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
 
     const tabName = isCorrection ? req.ExpenseTab : val('#fin-exp-tab');
+    // "Passed By" records the Accountant who logged (or re-logged, after a
+    // correction) this Expense Sheet entry — refreshed on every save by
+    // the Accountant. "Approved By" is a separate sign-off, populated only
+    // when the Treasurer approves it (see treasurerApprove below).
+    const preparer = MVOA.getUser();
+    const passedByStamp = `${preparer.name} · ${new Date().toLocaleDateString()}`;
     const entryRow = {
       RequestID: req.RequestID,
       SlNo: (existing && existing.row.SlNo) || '',
@@ -4310,7 +4318,7 @@ const FinanceModule = (function () {
       TDS: Number(val('#fin-exp-tds')) || 0, LessAdd: Number(val('#fin-exp-lessadd')) || 0,
       NetAmount: Number(val('#fin-exp-net')) || gross,
       NelsonCheck: (existing && existing.row.NelsonCheck) || '', LakshmanCheck: (existing && existing.row.LakshmanCheck) || '',
-      ApprovedBy: (existing && existing.row.ApprovedBy) || '', PassedBy: '', UDNumber: '', Date: ''
+      ApprovedBy: (existing && existing.row.ApprovedBy) || '', PassedBy: passedByStamp, UDNumber: '', Date: ''
     };
 
     try {
@@ -4347,7 +4355,11 @@ const FinanceModule = (function () {
     try {
       const entry = await readExpenseRow(req.ExpenseTab, requestId);
       if (!entry) throw new Error('Expense Sheet entry not found');
-      const updatedEntry = Object.assign({}, entry.row, { PassedBy: `${user.name} · ${new Date().toLocaleDateString()}` });
+      // Treasurer's approval of the Expense Sheet entry auto-populates
+      // "Approved By" — "Passed By" (the Accountant who logged the entry)
+      // is left untouched here.
+      const approvalStamp = `${user.name} · ${new Date().toLocaleDateString()}`;
+      const updatedEntry = Object.assign({}, entry.row, { ApprovedBy: approvalStamp });
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
       const updatedReq = Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber, StageEnteredAt: new Date().toISOString(), StageOpenedAt: '' });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
@@ -4439,12 +4451,28 @@ const FinanceModule = (function () {
       catch (e) { tableEl.innerHTML = `<p class="muted">No entries yet for this month.</p>`; return; }
       if (rows.length <= 1) { tableEl.innerHTML = `<p class="muted">No entries yet for this month.</p>`; return; }
       const header = EXPENSE_COLS.filter(c => c !== 'RequestID');
+      // Columns holding money — display with Indian comma grouping
+      // (1,00,000 style: thousands, then lakhs/crores) rather than the
+      // raw digit string.
+      const AMOUNT_COLS = new Set(['GrossAmount', 'TDS', 'LessAdd', 'NetAmount']);
+      // Columns storing a "Name · date" stamp — show name and date on
+      // two separate lines within the same cell instead of one long line.
+      const PERSON_DATE_COLS = new Set(['ApprovedBy', 'PassedBy']);
+      const formatAmountPlain = n => {
+        const num = Number(n);
+        return isFinite(num) && n !== '' ? num.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '';
+      };
+      const cellHtml = (h, raw) => {
+        if (AMOUNT_COLS.has(h)) return formatAmountPlain(raw);
+        if (PERSON_DATE_COLS.has(h) && raw) return String(raw).split(' · ').map(escapeHtml).join('<br>');
+        return escapeHtml(raw || '');
+      };
       tableEl.innerHTML = `
-        <table class="mvoa-table" style="min-width:900px;">
-          <thead><tr>${header.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+        <table class="mvoa-table" style="min-width:900px;text-align:center;">
+          <thead><tr>${header.map(h => `<th style="text-align:center;">${h}</th>`).join('')}</tr></thead>
           <tbody>${rows.slice(1).map(r => {
             const obj = rowToObj(EXPENSE_COLS, r, 0);
-            return `<tr>${header.map(h => `<td>${escapeHtml(obj[h] || '')}</td>`).join('')}</tr>`;
+            return `<tr>${header.map(h => `<td style="text-align:center;">${cellHtml(h, obj[h])}</td>`).join('')}</tr>`;
           }).join('')}</tbody>
         </table>`;
     };
