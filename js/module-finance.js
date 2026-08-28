@@ -4525,11 +4525,13 @@ const FinanceModule = (function () {
       // independent of EXPENSE_COLS, which stays untouched since it's the
       // actual physical column order of the live sheet (writes/reads
       // elsewhere still rely on it positionally). Nelson Check / Lakshman
-      // Check are hidden from view here per explicit request; UDNumber
-      // (the UTR/Cheque/UD reference) is moved to display after Bank.
-      const HIDDEN_COLS = new Set(['RequestID', 'NelsonCheck', 'LakshmanCheck', 'UDNumber']);
+      // Check are hidden from view here per explicit request. UDNumber
+      // (the UTR/Cheque/UD reference) and Date (the Disbursement Officer's
+      // payment-release date — distinct from Passed By/Approved By's own
+      // dates) are moved to display together, right after Bank.
+      const HIDDEN_COLS = new Set(['RequestID', 'NelsonCheck', 'LakshmanCheck', 'UDNumber', 'Date']);
       const header = EXPENSE_COLS.filter(c => !HIDDEN_COLS.has(c));
-      header.push('UDNumber');
+      header.push('UDNumber', 'Date');
       // Columns holding money — display with Indian comma grouping
       // (1,00,000 style: thousands, then lakhs/crores) rather than the
       // raw digit string.
