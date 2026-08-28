@@ -766,6 +766,7 @@ const FinanceModule = (function () {
           currentTopTab = btn.dataset.toptab;
           currentView = TOP_TAB_DEFAULT_VIEW[currentTopTab];
           if (currentTopTab === 'contracts') contractsSubView = 'list';
+          if (currentTopTab === 'dashboard') dashboardDrilldownKey = null;
           render(container);
         });
       });
@@ -2096,6 +2097,42 @@ const FinanceModule = (function () {
     const color = over || pct >= 90 ? '#b3261e' : pct >= 70 ? '#8a6d00' : '#1e6b33';
     return `<div style="background:#eee;border-radius:6px;overflow:hidden;height:9px;width:100%;"><div style="background:${color};height:100%;width:${shownPct}%;"></div></div>`;
   }
+
+  // Which pipeline badge (if any) is currently expanded into the inline
+  // drill-down list below the badge row — a module-level "view state"
+  // variable in the same style as contractsSubView/currentTopTab, so it
+  // survives the re-render each click triggers but resets when the module
+  // remounts. null = nothing expanded.
+  let dashboardDrilldownKey = null;
+  function dashboardBadgeHtml(key, label, count, bg, fg) {
+    const active = dashboardDrilldownKey === key;
+    return `<button type="button" class="mvoa-badge fin-dashboard-badge" data-key="${escapeHtml(key)}" style="background:${bg};color:${fg};border:${active ? `2px solid ${fg}` : 'none'};cursor:pointer;font:inherit;">${escapeHtml(label)} — ${count}</button>`;
+  }
+  function dashboardDrilldownPanelHtml(group) {
+    return `
+      <div class="card" style="background:#f7f9fb;margin-bottom:14px;">
+        <div class="mvoa-row" style="margin-bottom:8px;">
+          <strong style="font-size:0.85rem;">${escapeHtml(group.label)} — ${group.rows.length}</strong>
+          <button type="button" id="fin-dashboard-drilldown-close" class="btn-secondary" style="font-size:0.75rem;padding:2px 10px;">✕ Close</button>
+        </div>
+        ${group.rows.length ? `
+          <div style="overflow-x:auto;width:100%;">
+          <table class="mvoa-table" style="width:100%;">
+            <thead><tr><th>Request ID</th><th>Category</th><th>Amount</th><th>Requested By</th><th>Status</th></tr></thead>
+            <tbody>
+              ${group.rows.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.RequestID)}</td>
+                  <td>${escapeHtml(r.Category)}${r.Vendor ? ` <span class="muted">(${escapeHtml(r.Vendor)})</span>` : ''}</td>
+                  <td>${formatAmount(r.Amount)}</td>
+                  <td>${escapeHtml(r.RequestedBy)}</td>
+                  <td>${displayStatus(r)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+          </div>` : `<p class="muted">Nothing currently in this state.</p>`}
+      </div>`;
+  }
   function renderDashboardTab(body, container) {
     const fy = currentFY();
     const budgetRowsFy = budgetsCache.filter(b => b.FYYear === fy);
@@ -2111,11 +2148,23 @@ const FinanceModule = (function () {
     const pendingApprovalSpend = pendingApprovalAll.filter(r => r.RequestType !== 'PaymentRequest').length;
     const pendingApprovalPayment = pendingApprovalAll.filter(r => r.RequestType === 'PaymentRequest').length;
 
-    const needsExpenseEntryCount = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r)).length;
-    const needsCorrectionCount = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection').length;
-    const pendingTreasurerCount = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer').length;
+    const needsExpenseEntryRows = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
+    const needsCorrectionRows = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
+    const pendingTreasurerRows = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
     const pendingPaymentRows = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
     const awaitingDisbursementAmount = pendingPaymentRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+
+    // Pipeline badges double as drill-downs — clicking one shows the actual
+    // requests behind that count inline below the badges (dashboardDrilldownKey,
+    // toggled by dashboardBadgeHtml's click handler further down). Keyed
+    // object so the click handler can look the row list back up by key.
+    const drilldownGroups = {
+      pendingApproval: { label: 'Pending Approval', rows: pendingApprovalAll },
+      needsExpenseEntry: { label: 'Needs Expense Entry', rows: needsExpenseEntryRows },
+      needsCorrection: { label: 'Needs Correction', rows: needsCorrectionRows },
+      pendingTreasurer: { label: 'Pending Treasurer Review', rows: pendingTreasurerRows },
+      pendingDisbursement: { label: 'Pending Disbursement', rows: pendingPaymentRows }
+    };
 
     const now = new Date();
     const paidThisMonthRows = requestsCache.filter(r => {
@@ -2202,12 +2251,13 @@ const FinanceModule = (function () {
       <div class="card" style="margin-bottom:16px;width:100%;box-sizing:border-box;">
         <h3 style="margin-top:0;">🔄 Approval &amp; Payment Pipeline</h3>
         <div style="display:flex;flex-wrap:wrap;justify-content:flex-start;gap:8px;margin-bottom:14px;">
-          <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Pending Approval — ${pendingApprovalAll.length}</span>
-          <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Needs Expense Entry — ${needsExpenseEntryCount}</span>
-          <span class="mvoa-badge" style="background:#fbeaea;color:#a32d2d;">Needs Correction — ${needsCorrectionCount}</span>
-          <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Pending Treasurer Review — ${pendingTreasurerCount}</span>
-          <span class="mvoa-badge" style="background:#e6f1fb;color:#185fa5;">Pending Disbursement — ${pendingPaymentRows.length}</span>
+          ${dashboardBadgeHtml('pendingApproval', 'Pending Approval', pendingApprovalAll.length, '#fdf1cf', '#8a6d00')}
+          ${dashboardBadgeHtml('needsExpenseEntry', 'Needs Expense Entry', needsExpenseEntryRows.length, '#fdf1cf', '#8a6d00')}
+          ${dashboardBadgeHtml('needsCorrection', 'Needs Correction', needsCorrectionRows.length, '#fbeaea', '#a32d2d')}
+          ${dashboardBadgeHtml('pendingTreasurer', 'Pending Treasurer Review', pendingTreasurerRows.length, '#fdf1cf', '#8a6d00')}
+          ${dashboardBadgeHtml('pendingDisbursement', 'Pending Disbursement', pendingPaymentRows.length, '#e6f1fb', '#185fa5')}
         </div>
+        ${dashboardDrilldownKey && drilldownGroups[dashboardDrilldownKey] ? dashboardDrilldownPanelHtml(drilldownGroups[dashboardDrilldownKey]) : ''}
         <p class="muted" style="font-size:0.8rem;margin-bottom:6px;">Oldest still-open requests, across every stage:</p>
         ${oldestPending.length ? `
           <div style="overflow-x:auto;width:100%;">
@@ -2246,6 +2296,15 @@ const FinanceModule = (function () {
         </div>
       </div>
     `;
+    body.querySelectorAll('.fin-dashboard-badge').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.key;
+        dashboardDrilldownKey = (dashboardDrilldownKey === key) ? null : key;
+        renderDashboardTab(body, container);
+      });
+    });
+    const closeBtn = body.querySelector('#fin-dashboard-drilldown-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => { dashboardDrilldownKey = null; renderDashboardTab(body, container); });
   }
 
   // ───────────────────────────────────────────────────────────
