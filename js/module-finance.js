@@ -2053,8 +2053,14 @@ const FinanceModule = (function () {
   // version.
   // ───────────────────────────────────────────────────────────
   function dashboardStatTileHtml(label, value, sublabel, color) {
+    // width:100%/height:100%/box-sizing — this tile sits in a CSS Grid cell
+    // (see renderDashboardTab), not a flex row. Grid guarantees every cell
+    // in a row is the same width regardless of content, but only if the
+    // tile itself actually fills its cell rather than shrink-wrapping —
+    // hence the explicit 100%/100% here rather than relying on flex-basis
+    // sizing, which visibly produced unequal tile widths in testing.
     return `
-      <div style="flex:1 1 150px;min-width:150px;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;">
+      <div style="width:100%;height:100%;box-sizing:border-box;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;">
         <div class="muted" style="font-size:0.78rem;">${escapeHtml(label)}</div>
         <div style="font-size:1.35rem;font-weight:700;${color ? `color:${color};` : ''}margin-top:2px;">${value}</div>
         ${sublabel ? `<div class="muted" style="font-size:0.75rem;margin-top:2px;">${sublabel}</div>` : ''}
@@ -2127,8 +2133,18 @@ const FinanceModule = (function () {
       .sort((a, b) => (b.StartDate || '').localeCompare(a.StartDate || ''))
       .slice(0, 5);
 
+    // Every top-level box below gets an explicit width:100%;box-sizing:
+    // border-box — testing showed the shared .card class shrink-wraps to
+    // its own content's natural width rather than filling its container,
+    // which looked fine for the tiles/budget-bar cards (wide enough
+    // content) but left the Pipeline and Recent Activity cards visibly
+    // narrower, with the Pipeline table then overflowing past its own
+    // card's right edge. Explicit width:100% here is a direct, ambient-
+    // CSS-independent fix. The stat tiles use a CSS Grid (not flex) for
+    // the same reason — flex-grow-based sizing was producing unequal tile
+    // widths, and Grid's equal-width columns don't have that failure mode.
     body.innerHTML = `
-      <div class="mvoa-row" style="flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(160px, 1fr));gap:10px;margin-bottom:16px;width:100%;box-sizing:border-box;">
         ${dashboardStatTileHtml(`FY ${escapeHtml(fy)} Budget`, formatAmount(budgetTotals.total))}
         ${dashboardStatTileHtml('Spent', formatAmount(budgetTotals.consumed), `${utilizationPct}% of budget`, utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33')}
         ${dashboardStatTileHtml('Remaining', formatAmount(remaining), null, remaining < 0 ? '#b3261e' : '#1e6b33')}
@@ -2137,7 +2153,7 @@ const FinanceModule = (function () {
         ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`)}
       </div>
 
-      <div class="card" style="margin-bottom:16px;">
+      <div class="card" style="margin-bottom:16px;width:100%;box-sizing:border-box;">
         <h3 style="margin-top:0;">📊 Budget Utilization — FY ${escapeHtml(fy)}</h3>
         ${budgetRowsFy.length ? budgetRowsFy.map(b => {
           const info = budgetInfoFor(b.Category, fy);
@@ -2153,9 +2169,9 @@ const FinanceModule = (function () {
         }).join('') : `<p class="muted">No budget lines set up yet for FY ${escapeHtml(fy)} — see the 📊 Budget tab.</p>`}
       </div>
 
-      <div class="card" style="margin-bottom:16px;">
+      <div class="card" style="margin-bottom:16px;width:100%;box-sizing:border-box;">
         <h3 style="margin-top:0;">🔄 Approval &amp; Payment Pipeline</h3>
-        <div class="mvoa-row" style="flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+        <div style="display:flex;flex-wrap:wrap;justify-content:flex-start;gap:8px;margin-bottom:14px;">
           <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Pending Approval — ${pendingApprovalAll.length}</span>
           <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Needs Expense Entry — ${needsExpenseEntryCount}</span>
           <span class="mvoa-badge" style="background:#fbeaea;color:#a32d2d;">Needs Correction — ${needsCorrectionCount}</span>
@@ -2164,7 +2180,8 @@ const FinanceModule = (function () {
         </div>
         <p class="muted" style="font-size:0.8rem;margin-bottom:6px;">Oldest still-open requests, across every stage:</p>
         ${oldestPending.length ? `
-          <table class="mvoa-table">
+          <div style="overflow-x:auto;width:100%;">
+          <table class="mvoa-table" style="width:100%;">
             <thead><tr><th>Category</th><th>Amount</th><th>Requested By</th><th>Status</th><th>Days Pending</th></tr></thead>
             <tbody>
               ${oldestPending.map(r => `
@@ -2176,21 +2193,22 @@ const FinanceModule = (function () {
                   <td style="font-weight:700;color:${r.daysPending >= 14 ? '#b3261e' : r.daysPending >= 7 ? '#8a6d00' : 'inherit'};">${r.daysPending}</td>
                 </tr>`).join('')}
             </tbody>
-          </table>` : `<p class="muted">Nothing currently open — every request is either Paid or Rejected.</p>`}
+          </table>
+          </div>` : `<p class="muted">Nothing currently open — every request is either Paid or Rejected.</p>`}
       </div>
 
-      <div class="card">
+      <div class="card" style="width:100%;box-sizing:border-box;">
         <h3 style="margin-top:0;">🕘 Recent Activity</h3>
-        <div class="mvoa-row" style="flex-wrap:wrap;gap:16px;align-items:flex-start;">
-          <div style="flex:1 1 240px;min-width:220px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:16px;">
+          <div>
             <strong style="font-size:0.85rem;">💰 Recently Paid</strong>
             ${recentPaid.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentPaid.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.PaymentDate || r.ClosedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
           </div>
-          <div style="flex:1 1 240px;min-width:220px;">
+          <div>
             <strong style="font-size:0.85rem;">🔄 Recent Budget Revisions</strong>
             ${recentRevisions.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentRevisions.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.CurrentBudget)} → ${formatAmount(r.ProposedBudget)} — ${formatDate(r.AppliedDate || r.RequestedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None applied yet.</p>`}
           </div>
-          <div style="flex:1 1 240px;min-width:220px;">
+          <div>
             <strong style="font-size:0.85rem;">📄 Recent Contracts</strong>
             ${recentContracts.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentContracts.map(c => `${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)} — ${formatDate(c.StartDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
           </div>
