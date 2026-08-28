@@ -4266,7 +4266,7 @@ const FinanceModule = (function () {
       const lessAddEl = box.querySelector('#fin-exp-lessadd');
       const netEl = box.querySelector('#fin-exp-net');
       const tdsNoteEl = box.querySelector('#fin-exp-tds-note');
-      const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+      const round2 = n => Math.round(Number(n) || 0);
       function recalc() {
         const gross = Number(grossEl.value) || 0;
         const gstApplicable = gstEl.value === 'Yes';
