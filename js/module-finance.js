@@ -2053,14 +2053,19 @@ const FinanceModule = (function () {
   // version.
   // ───────────────────────────────────────────────────────────
   function dashboardStatTileHtml(label, value, sublabel, color) {
-    // width:100%/height:100%/box-sizing — this tile sits in a CSS Grid cell
-    // (see renderDashboardTab), not a flex row. Grid guarantees every cell
-    // in a row is the same width regardless of content, but only if the
-    // tile itself actually fills its cell rather than shrink-wrapping —
-    // hence the explicit 100%/100% here rather than relying on flex-basis
-    // sizing, which visibly produced unequal tile widths in testing.
+    // flex:1 1 0 (basis explicitly ZERO, not a content-derived or fixed
+    // pixel basis) — every tile then grows purely by its flex-grow ratio,
+    // which is identical across all six, so they end up exactly equal
+    // width regardless of how much text is inside any one of them.
+    // CSS Grid with auto-fit was tried here instead and made things worse:
+    // when the surrounding container's width is itself indefinite (being
+    // computed by shrink-to-fit from its own content, which is the case
+    // here), `repeat(auto-fit, ...)` resolves to a single column per the
+    // spec — collapsing the whole row to one narrow stacked column, which
+    // is exactly the regression seen in testing. Flexbox with an explicit
+    // zero basis doesn't have that failure mode.
     return `
-      <div style="width:100%;height:100%;box-sizing:border-box;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;">
+      <div style="flex:1 1 0;min-width:150px;box-sizing:border-box;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;">
         <div class="muted" style="font-size:0.78rem;">${escapeHtml(label)}</div>
         <div style="font-size:1.35rem;font-weight:700;${color ? `color:${color};` : ''}margin-top:2px;">${value}</div>
         ${sublabel ? `<div class="muted" style="font-size:0.75rem;margin-top:2px;">${sublabel}</div>` : ''}
@@ -2133,21 +2138,27 @@ const FinanceModule = (function () {
       .sort((a, b) => (b.StartDate || '').localeCompare(a.StartDate || ''))
       .slice(0, 5);
 
-    // Every top-level box below gets an explicit width:100%;box-sizing:
-    // border-box — testing showed the shared .card class shrink-wraps to
-    // its own content's natural width rather than filling its container,
-    // which looked fine for the tiles/budget-bar cards (wide enough
-    // content) but left the Pipeline and Recent Activity cards visibly
-    // narrower, with the Pipeline table then overflowing past its own
-    // card's right edge. Explicit width:100% here is a direct, ambient-
-    // CSS-independent fix. The stat tiles use a CSS Grid (not flex) for
-    // the same reason — flex-grow-based sizing was producing unequal tile
-    // widths, and Grid's equal-width columns don't have that failure mode.
+    // The .card divs below get an explicit width:100%;box-sizing:border-box
+    // — the shared .card class shrink-wraps to its own content's natural
+    // width rather than filling its container, which is fine for a form
+    // but left the Pipeline/Recent Activity cards visibly narrower than
+    // the stat-tile row. That fix only works because the stat-tile row
+    // itself is NOT percentage-sized — it establishes a real, definite
+    // width for the shared parent (#fin-view-body) from its own content
+    // (six flex items with a real min-width each), which the .card divs'
+    // width:100% then resolves against. Giving the tile row ITSELF a
+    // width:100%, or laying it out as a CSS Grid with auto-fit, both
+    // remove that real anchor — auto-fit in particular resolves to a
+    // single column when its container's width is indefinite (which it
+    // is here, before the anchor exists), collapsing the whole dashboard
+    // into one narrow stacked column. Learned that the hard way in
+    // testing — keep the tile row as a plain, non-percentage-width flex
+    // row.
     body.innerHTML = `
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(160px, 1fr));gap:10px;margin-bottom:16px;width:100%;box-sizing:border-box;">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
         ${dashboardStatTileHtml(`FY ${escapeHtml(fy)} Budget`, formatAmount(budgetTotals.total))}
-        ${dashboardStatTileHtml('Spent', formatAmount(budgetTotals.consumed), `${utilizationPct}% of budget`, utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33')}
-        ${dashboardStatTileHtml('Remaining', formatAmount(remaining), null, remaining < 0 ? '#b3261e' : '#1e6b33')}
+        ${dashboardStatTileHtml('Spent (vs Budget)', formatAmount(budgetTotals.consumed), budgetRowsFy.length ? `${utilizationPct}% of budget` : 'no FY budget set yet', utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33')}
+        ${dashboardStatTileHtml('Remaining (Budget)', formatAmount(remaining), budgetRowsFy.length ? null : 'no FY budget set yet', remaining < 0 ? '#b3261e' : '#1e6b33')}
         ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpend} spend · ${pendingApprovalPayment} payment`)}
         ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`)}
         ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`)}
