@@ -1054,8 +1054,20 @@ const MVOA = (function () {
   // ───────────────────────────────────────────────────────────
   let financePermMatrixCache = null;
   let financePermMatrixRowsCache = null;
+  let financePermMatrixTabEnsured = false;
   async function loadFinancePermissionsMatrix(force) {
     if (financePermMatrixCache && !force) return financePermMatrixCache;
+    // Unlike Plant Rounds/Attendance, this tab is brand new and nobody has
+    // created it by hand yet — auto-create it on first read (same pattern
+    // module-finance.js already uses for per-month Expense Sheet tabs and
+    // the Contracts tab) so a fresh install doesn't surface a raw Sheets
+    // API error, it just starts fully open until rows are added. Once
+    // confirmed present this session, skip the extra metadata check on
+    // every subsequent Finance mount (mount() always calls with force:true).
+    if (!financePermMatrixTabEnsured) {
+      await sheetsEnsureTab(TABS.permissionsMatrixFinance, ['Section', 'Title', 'AccessLevel']);
+      financePermMatrixTabEnsured = true;
+    }
     const rows = await sheetsRead(TABS.permissionsMatrixFinance);
     const map = {};
     const rawRows = [];
