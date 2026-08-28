@@ -650,7 +650,7 @@ const FinanceModule = (function () {
   // MVOA.canViewFinanceSection/canEditFinanceSection) — one per top-level
   // tab. Must match exactly what an admin types as the "Section" for that
   // tab's rows in the PermissionsMatrix_Finance sheet.
-  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts' };
+  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard' };
   // Recomputed at the top of render() for whichever top-level tab is
   // currently open — 'Edit' lets every action through exactly as before;
   // 'ReadOnly' (a Title with an explicit Read Only row for this tab) hides
@@ -689,7 +689,7 @@ const FinanceModule = (function () {
     ];
     return [];
   }
-  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts' };
+  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard' };
 
   function render(container) {
     const user = MVOA.getUser();
@@ -748,6 +748,7 @@ const FinanceModule = (function () {
       // Permissions Matrix (a tab with no matrix rows yet stays open to
       // everyone — see canViewFinanceSection).
       const ALL_TOP_TABS = [
+        { key: 'dashboard', label: '📈 Dashboard' },
         { key: 'spend', label: '📝 Spend Approval' },
         { key: 'payment', label: '💵 Payment Approval' },
         { key: 'budget', label: '📊 Budget' },
@@ -778,7 +779,7 @@ const FinanceModule = (function () {
     // hiding that tab from the nav.
     if (!currentSectionCanEdit && (currentView === 'submit' || currentView === 'payreq')) currentView = 'mine';
     const subTabs = subTabsFor(currentTopTab, currentSectionCanEdit);
-    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'budget' ? '📊 Budget' : '📄 Contracts';
+    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : '📄 Contracts';
     const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
     const tabLabelHtml = (t) => t.view === 'myapprovals'
       ? `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`
@@ -827,6 +828,7 @@ const FinanceModule = (function () {
       renderBudgetRevisionsSection(body, container, person, currentSectionCanEdit && (isTreasurerPerson(person) || isAdmin(person)));
     }
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
+    else if (currentView === 'dashboard') renderDashboardTab(body, container);
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
   }
 
@@ -2035,6 +2037,166 @@ const FinanceModule = (function () {
         onOpened();
       });
     });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // DASHBOARD — 5th top-level tab, gated through the Finance Permissions
+  // Matrix exactly like Spend Approval/Payment Approval/Budget/Contracts
+  // (see FINANCE_TOP_TAB_SECTION.dashboard). Purely a read-only landing
+  // view built from data loadAll() already has in memory — no new sheet
+  // reads, no write actions, so currentSectionCanEdit doesn't apply here.
+  // v1 is deliberately plain CSS (progress bars, stat tiles, ranked
+  // lists) — nothing else in this app pulls in a charting library, and
+  // this keeps the dashboard dependency-free and working offline like the
+  // rest of the PWA. A monthly trend chart, vendor ranking, and TDS/
+  // contract-expiry flags are a planned follow-up round, not in this
+  // version.
+  // ───────────────────────────────────────────────────────────
+  function dashboardStatTileHtml(label, value, sublabel, color) {
+    return `
+      <div style="flex:1 1 150px;min-width:150px;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;">
+        <div class="muted" style="font-size:0.78rem;">${escapeHtml(label)}</div>
+        <div style="font-size:1.35rem;font-weight:700;${color ? `color:${color};` : ''}margin-top:2px;">${value}</div>
+        ${sublabel ? `<div class="muted" style="font-size:0.75rem;margin-top:2px;">${sublabel}</div>` : ''}
+      </div>`;
+  }
+  function dashboardBarHtml(consumed, total) {
+    const pct = total > 0 ? (consumed / total) * 100 : (consumed > 0 ? 100 : 0);
+    const shownPct = Math.max(0, Math.min(100, pct));
+    const over = consumed > total;
+    const color = over || pct >= 90 ? '#b3261e' : pct >= 70 ? '#8a6d00' : '#1e6b33';
+    return `<div style="background:#eee;border-radius:6px;overflow:hidden;height:9px;width:100%;"><div style="background:${color};height:100%;width:${shownPct}%;"></div></div>`;
+  }
+  function renderDashboardTab(body, container) {
+    const fy = currentFY();
+    const budgetRowsFy = budgetsCache.filter(b => b.FYYear === fy);
+    const budgetTotals = budgetRowsFy.reduce((acc, b) => {
+      const info = budgetInfoFor(b.Category, fy);
+      acc.total += info.total; acc.consumed += info.consumed;
+      return acc;
+    }, { total: 0, consumed: 0 });
+    const remaining = budgetTotals.total - budgetTotals.consumed;
+    const utilizationPct = budgetTotals.total > 0 ? Math.round((budgetTotals.consumed / budgetTotals.total) * 100) : 0;
+
+    const pendingApprovalAll = requestsCache.filter(r => r.Status === 'PendingApproval');
+    const pendingApprovalSpend = pendingApprovalAll.filter(r => r.RequestType !== 'PaymentRequest').length;
+    const pendingApprovalPayment = pendingApprovalAll.filter(r => r.RequestType === 'PaymentRequest').length;
+
+    const needsExpenseEntryCount = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r)).length;
+    const needsCorrectionCount = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection').length;
+    const pendingTreasurerCount = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer').length;
+    const pendingPaymentRows = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
+    const awaitingDisbursementAmount = pendingPaymentRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+
+    const now = new Date();
+    const paidThisMonthRows = requestsCache.filter(r => {
+      if (r.DisbursementStage !== 'Paid' || !r.PaymentDate) return false;
+      const d = new Date(r.PaymentDate);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    });
+    const paidThisMonthAmount = paidThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+
+    // Oldest pending — every request still open (see isRequestTerminal,
+    // which already covers every stage: PendingApproval, NeedsExpenseEntry,
+    // NeedsCorrection, PendingTreasurer, PendingPayment), ranked by how
+    // long it's sat since it last moved (or since submission if it never
+    // has), oldest first. Deliberately reuses displayStatus() rather than
+    // the approvals-dependent stageBadgeHtml/stageDescription — those need
+    // an extra sheet read (FinanceApprovals) this dashboard doesn't
+    // otherwise need, and displayStatus's coarser label is plenty for a
+    // glance-only widget.
+    const oldestPending = requestsCache.filter(r => !isRequestTerminal(r))
+      .map(r => {
+        const sinceDate = r.StageEnteredAt || r.RequestedDate;
+        const daysPending = sinceDate ? Math.floor((now - new Date(sinceDate)) / 86400000) : 0;
+        return Object.assign({}, r, { daysPending });
+      })
+      .sort((a, b) => b.daysPending - a.daysPending)
+      .slice(0, 8);
+
+    // Recent activity — last few actually paid, last few applied budget
+    // revisions, last few contracts (no CreatedDate on Contracts, so
+    // StartDate is the closest available proxy for "recently added").
+    const recentPaid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
+      .sort((a, b) => (b.PaymentDate || b.ClosedDate || '').localeCompare(a.PaymentDate || a.ClosedDate || ''))
+      .slice(0, 5);
+    const recentRevisions = budgetRevisionsCache.filter(r => r.Status === 'Applied')
+      .sort((a, b) => (b.AppliedDate || b.RequestedDate || '').localeCompare(a.AppliedDate || a.RequestedDate || ''))
+      .slice(0, 5);
+    const recentContracts = contractsCache.slice()
+      .sort((a, b) => (b.StartDate || '').localeCompare(a.StartDate || ''))
+      .slice(0, 5);
+
+    body.innerHTML = `
+      <div class="mvoa-row" style="flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+        ${dashboardStatTileHtml(`FY ${escapeHtml(fy)} Budget`, formatAmount(budgetTotals.total))}
+        ${dashboardStatTileHtml('Spent', formatAmount(budgetTotals.consumed), `${utilizationPct}% of budget`, utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33')}
+        ${dashboardStatTileHtml('Remaining', formatAmount(remaining), null, remaining < 0 ? '#b3261e' : '#1e6b33')}
+        ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpend} spend · ${pendingApprovalPayment} payment`)}
+        ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`)}
+        ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`)}
+      </div>
+
+      <div class="card" style="margin-bottom:16px;">
+        <h3 style="margin-top:0;">📊 Budget Utilization — FY ${escapeHtml(fy)}</h3>
+        ${budgetRowsFy.length ? budgetRowsFy.map(b => {
+          const info = budgetInfoFor(b.Category, fy);
+          const pct = info.total > 0 ? Math.round((info.consumed / info.total) * 100) : 0;
+          return `
+            <div style="margin-bottom:10px;">
+              <div class="mvoa-row" style="margin-bottom:3px;">
+                <span style="font-size:0.85rem;">${escapeHtml(b.Category)}</span>
+                <span class="muted" style="font-size:0.78rem;">${formatAmount(info.consumed)} / ${formatAmount(info.total)} (${pct}%)</span>
+              </div>
+              ${dashboardBarHtml(info.consumed, info.total)}
+            </div>`;
+        }).join('') : `<p class="muted">No budget lines set up yet for FY ${escapeHtml(fy)} — see the 📊 Budget tab.</p>`}
+      </div>
+
+      <div class="card" style="margin-bottom:16px;">
+        <h3 style="margin-top:0;">🔄 Approval &amp; Payment Pipeline</h3>
+        <div class="mvoa-row" style="flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+          <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Pending Approval — ${pendingApprovalAll.length}</span>
+          <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Needs Expense Entry — ${needsExpenseEntryCount}</span>
+          <span class="mvoa-badge" style="background:#fbeaea;color:#a32d2d;">Needs Correction — ${needsCorrectionCount}</span>
+          <span class="mvoa-badge" style="background:#fdf1cf;color:#8a6d00;">Pending Treasurer Review — ${pendingTreasurerCount}</span>
+          <span class="mvoa-badge" style="background:#e6f1fb;color:#185fa5;">Pending Disbursement — ${pendingPaymentRows.length}</span>
+        </div>
+        <p class="muted" style="font-size:0.8rem;margin-bottom:6px;">Oldest still-open requests, across every stage:</p>
+        ${oldestPending.length ? `
+          <table class="mvoa-table">
+            <thead><tr><th>Category</th><th>Amount</th><th>Requested By</th><th>Status</th><th>Days Pending</th></tr></thead>
+            <tbody>
+              ${oldestPending.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.Category)}${r.Vendor ? ` <span class="muted">(${escapeHtml(r.Vendor)})</span>` : ''}</td>
+                  <td>${formatAmount(r.Amount)}</td>
+                  <td>${escapeHtml(r.RequestedBy)}</td>
+                  <td>${displayStatus(r)}</td>
+                  <td style="font-weight:700;color:${r.daysPending >= 14 ? '#b3261e' : r.daysPending >= 7 ? '#8a6d00' : 'inherit'};">${r.daysPending}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>` : `<p class="muted">Nothing currently open — every request is either Paid or Rejected.</p>`}
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">🕘 Recent Activity</h3>
+        <div class="mvoa-row" style="flex-wrap:wrap;gap:16px;align-items:flex-start;">
+          <div style="flex:1 1 240px;min-width:220px;">
+            <strong style="font-size:0.85rem;">💰 Recently Paid</strong>
+            ${recentPaid.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentPaid.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.PaymentDate || r.ClosedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
+          </div>
+          <div style="flex:1 1 240px;min-width:220px;">
+            <strong style="font-size:0.85rem;">🔄 Recent Budget Revisions</strong>
+            ${recentRevisions.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentRevisions.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.CurrentBudget)} → ${formatAmount(r.ProposedBudget)} — ${formatDate(r.AppliedDate || r.RequestedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None applied yet.</p>`}
+          </div>
+          <div style="flex:1 1 240px;min-width:220px;">
+            <strong style="font-size:0.85rem;">📄 Recent Contracts</strong>
+            ${recentContracts.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentContracts.map(c => `${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)} — ${formatDate(c.StartDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   // ───────────────────────────────────────────────────────────
