@@ -2145,8 +2145,8 @@ const FinanceModule = (function () {
     const utilizationPct = budgetTotals.total > 0 ? Math.round((budgetTotals.consumed / budgetTotals.total) * 100) : 0;
 
     const pendingApprovalAll = requestsCache.filter(r => r.Status === 'PendingApproval');
-    const pendingApprovalSpend = pendingApprovalAll.filter(r => r.RequestType !== 'PaymentRequest').length;
-    const pendingApprovalPayment = pendingApprovalAll.filter(r => r.RequestType === 'PaymentRequest').length;
+    const pendingApprovalSpendRows = pendingApprovalAll.filter(r => r.RequestType !== 'PaymentRequest');
+    const pendingApprovalPaymentRows = pendingApprovalAll.filter(r => r.RequestType === 'PaymentRequest');
 
     const needsExpenseEntryRows = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
     const needsCorrectionRows = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
@@ -2159,7 +2159,8 @@ const FinanceModule = (function () {
     // toggled by dashboardBadgeHtml's click handler further down). Keyed
     // object so the click handler can look the row list back up by key.
     const drilldownGroups = {
-      pendingApproval: { label: 'Pending Approval', rows: pendingApprovalAll },
+      pendingApprovalSpend: { label: 'Pending Approval to Spend', rows: pendingApprovalSpendRows },
+      pendingApprovalPayment: { label: 'Pending Approval — Payment', rows: pendingApprovalPaymentRows },
       needsExpenseEntry: { label: 'Needs Expense Entry', rows: needsExpenseEntryRows },
       needsCorrection: { label: 'Needs Correction', rows: needsCorrectionRows },
       pendingTreasurer: { label: 'Pending Treasurer Review', rows: pendingTreasurerRows },
@@ -2227,7 +2228,7 @@ const FinanceModule = (function () {
         ${dashboardStatTileHtml(`FY ${escapeHtml(fy)} Budget`, formatAmount(budgetTotals.total))}
         ${dashboardStatTileHtml('Spent (vs Budget)', formatAmount(budgetTotals.consumed), budgetRowsFy.length ? `${utilizationPct}% of budget` : 'no FY budget set yet', utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33')}
         ${dashboardStatTileHtml('Remaining (Budget)', formatAmount(remaining), budgetRowsFy.length ? null : 'no FY budget set yet', remaining < 0 ? '#b3261e' : '#1e6b33')}
-        ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpend} spend · ${pendingApprovalPayment} payment`)}
+        ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpendRows.length} spend · ${pendingApprovalPaymentRows.length} payment`)}
         ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`)}
         ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`)}
       </div>
@@ -2251,7 +2252,8 @@ const FinanceModule = (function () {
       <div class="card" style="margin-bottom:16px;width:100%;box-sizing:border-box;">
         <h3 style="margin-top:0;">🔄 Approval &amp; Payment Pipeline</h3>
         <div style="display:flex;flex-wrap:wrap;justify-content:flex-start;gap:8px;margin-bottom:14px;">
-          ${dashboardBadgeHtml('pendingApproval', 'Pending Approval', pendingApprovalAll.length, '#fdf1cf', '#8a6d00')}
+          ${dashboardBadgeHtml('pendingApprovalSpend', 'Pending Approval to Spend', pendingApprovalSpendRows.length, '#fdf1cf', '#8a6d00')}
+          ${dashboardBadgeHtml('pendingApprovalPayment', 'Pending Approval — Payment', pendingApprovalPaymentRows.length, '#f0e6fb', '#6a3fa0')}
           ${dashboardBadgeHtml('needsExpenseEntry', 'Needs Expense Entry', needsExpenseEntryRows.length, '#fdf1cf', '#8a6d00')}
           ${dashboardBadgeHtml('needsCorrection', 'Needs Correction', needsCorrectionRows.length, '#fbeaea', '#a32d2d')}
           ${dashboardBadgeHtml('pendingTreasurer', 'Pending Treasurer Review', pendingTreasurerRows.length, '#fdf1cf', '#8a6d00')}
