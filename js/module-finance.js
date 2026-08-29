@@ -2271,6 +2271,19 @@ const FinanceModule = (function () {
     });
     const paidThisMonthAmount = paidThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
 
+    // Petty Cash Expense settles the moment it's Approved (see
+    // isPettyCashExpense's header comment) — StageEnteredAt is stamped at
+    // that exact moment (falling back to RequestedDate for older rows from
+    // before StageEnteredAt existed), same "this month" convention as
+    // Paid This Month above.
+    const pettyCashSpendThisMonthRows = requestsCache.filter(r => {
+      if (!isPettyCashExpense(r) || r.Status !== 'Approved') return false;
+      const d = new Date(r.StageEnteredAt || r.RequestedDate);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    });
+    const pettyCashSpendThisMonthAmount = pettyCashSpendThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+    const pettyCashBalance = computeFloatBalance();
+
     // Oldest pending — every request still open (see isRequestTerminal,
     // which already covers every stage: PendingApproval, NeedsExpenseEntry,
     // NeedsCorrection, PendingTreasurer, PendingPayment), ranked by how
@@ -2301,7 +2314,6 @@ const FinanceModule = (function () {
     const recentPaid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
       .sort((a, b) => (b.PaymentDate || b.ClosedDate || '').localeCompare(a.PaymentDate || a.ClosedDate || ''))
       .slice(0, 5);
-    const pettyCashBalance = computeFloatBalance();
 
     // The .card divs below get an explicit width:100%;box-sizing:border-box
     // — the shared .card class shrink-wraps to its own content's natural
@@ -2327,6 +2339,8 @@ const FinanceModule = (function () {
         ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpendRows.length} spend · ${pendingApprovalPaymentRows.length} payment`)}
         ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`)}
         ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`)}
+        ${dashboardStatTileHtml('Petty Cash Spend This Month', formatAmount(pettyCashSpendThisMonthAmount), `${pettyCashSpendThisMonthRows.length} entr${pettyCashSpendThisMonthRows.length === 1 ? 'y' : 'ies'}`)}
+        ${dashboardStatTileHtml('Petty Cash Balance (with FM)', formatAmount(pettyCashBalance), `of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below minimum' : ''}`, pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : '#1e6b33')}
       </div>
 
       <div class="card" style="margin-bottom:16px;width:100%;box-sizing:border-box;">
@@ -2385,11 +2399,6 @@ const FinanceModule = (function () {
           <div>
             <strong style="font-size:0.85rem;">💰 Recently Paid</strong>
             ${recentPaid.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentPaid.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.PaymentDate || r.ClosedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
-          </div>
-          <div>
-            <strong style="font-size:0.85rem;">💵 Current Petty Cash Balance (with FM)</strong>
-            <div style="font-size:1.15rem;font-weight:700;margin-top:4px;color:${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : '#1e6b33'};">${formatAmount(pettyCashBalance)}</div>
-            <div class="muted" style="font-size:0.75rem;margin-top:2px;">of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below operational minimum' : ''}</div>
           </div>
         </div>
       </div>
