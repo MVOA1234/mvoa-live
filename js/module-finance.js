@@ -1177,23 +1177,37 @@ const FinanceModule = (function () {
       // an explicit left offset per column, same technique used for
       // Attendance's Name/Agency columns) while the rest of the row
       // scrolls horizontally underneath — and the header row pins to the
-      // top the same way — so a long contracts list scrolls both ways
-      // inside its own box without losing track of which row/column is
-      // which. The two sticky columns need a FIXED pixel width (not just
-      // min-width) so the second column's left offset is a reliable
-      // constant rather than drifting with content length.
-      const VENDOR_COL_W = 170, CATEGORY_COL_W = 150;
+      // top the same way. Every column gets matching width/min-width/
+      // max-width plus white-space:normal so long text (a long Vendor
+      // name, a wordy Nature description) wraps onto a 2nd/3rd line
+      // inside its own column instead of forcing the table wider — that's
+      // what keeps this usable on a phone, where without it Vendor+
+      // Category alone used to eat the whole visible width before you
+      // ever reached Nature.
+      // NOTE: deliberately NOT table-layout:fixed (with or without a
+      // <colgroup>) — tested in isolation and found to badly corrupt
+      // column widths specifically when combined with position:sticky
+      // (Chromium rendering bug: the column right after two consecutive
+      // sticky columns renders with a phantom gap and character-by-
+      // character wrapping). Default (auto) table layout plus explicit
+      // width on every cell achieves the identical fixed-width, wrapped
+      // look without tripping that bug. box-sizing:border-box makes the
+      // declared width the actual rendered width (padding/border
+      // included) so the left offsets below line up exactly.
+      const VENDOR_COL_W = 100, CATEGORY_COL_W = 100, NATURE_COL_W = 150,
+            VALIDTO_COL_W = 80, STATUS_COL_W = 75, ACTION_COL_W = 64;
+      const colCell = (w) => `box-sizing:border-box;width:${w}px;min-width:${w}px;max-width:${w}px;white-space:normal;word-break:break-word;overflow-wrap:anywhere;`;
       body.querySelector('#fin-contracts-table').innerHTML = `
         <div style="overflow:auto;max-height:65vh;border:1px solid #e0e0e0;border-radius:8px;">
-        <table class="mvoa-table" style="border-collapse:collapse;min-width:720px;">
+        <table class="mvoa-table" style="border-collapse:collapse;">
           <thead>
             <tr>
-              <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:${VENDOR_COL_W}px;min-width:${VENDOR_COL_W}px;">Vendor</th>
-              <th style="position:sticky;top:0;left:${VENDOR_COL_W}px;z-index:3;background:#eef2f6;width:${CATEGORY_COL_W}px;min-width:${CATEGORY_COL_W}px;">Category</th>
-              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Nature</th>
-              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Valid To</th>
-              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Status</th>
-              ${currentSectionCanEdit ? '<th style="position:sticky;top:0;z-index:2;background:#eef2f6;"></th>' : ''}
+              <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;${colCell(VENDOR_COL_W)}">Vendor</th>
+              <th style="position:sticky;top:0;left:${VENDOR_COL_W}px;z-index:3;background:#eef2f6;${colCell(CATEGORY_COL_W)}">Category</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;${colCell(NATURE_COL_W)}">Nature</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;${colCell(VALIDTO_COL_W)}">Valid To</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;${colCell(STATUS_COL_W)}">Status</th>
+              ${currentSectionCanEdit ? `<th style="position:sticky;top:0;z-index:2;background:#eef2f6;${colCell(ACTION_COL_W)}"></th>` : ''}
             </tr>
           </thead>
           <tbody>
@@ -1201,12 +1215,12 @@ const FinanceModule = (function () {
               const expired = c.EndDate && new Date(c.EndDate) < today;
               const terminated = String(c.Status).toLowerCase() === 'terminated';
               return `<tr>
-                <td style="position:sticky;left:0;z-index:1;background:#fff;width:${VENDOR_COL_W}px;min-width:${VENDOR_COL_W}px;">${escapeHtml(c.Vendor)}</td>
-                <td style="position:sticky;left:${VENDOR_COL_W}px;z-index:1;background:#fff;width:${CATEGORY_COL_W}px;min-width:${CATEGORY_COL_W}px;">${escapeHtml(c.Category)}</td>
-                <td>${escapeHtml(c.Nature)}</td>
-                <td style="white-space:nowrap;">${c.EndDate ? escapeHtml(c.EndDate) : 'Open-ended'}</td>
-                <td style="white-space:nowrap;color:${(expired || terminated) ? '#b3261e' : 'green'};font-weight:600;">${terminated ? 'Terminated' : expired ? 'Expired' : 'Active'}</td>
-                ${currentSectionCanEdit ? `<td><button class="btn-secondary fin-edit-contract-btn" data-contract-id="${escapeHtml(c.ContractID)}" style="font-size:0.75rem;padding:4px 10px;">✏️ Edit</button></td>` : ''}
+                <td style="position:sticky;left:0;z-index:1;background:#fff;${colCell(VENDOR_COL_W)}">${escapeHtml(c.Vendor)}</td>
+                <td style="position:sticky;left:${VENDOR_COL_W}px;z-index:1;background:#fff;${colCell(CATEGORY_COL_W)}">${escapeHtml(c.Category)}</td>
+                <td style="${colCell(NATURE_COL_W)}">${escapeHtml(c.Nature)}</td>
+                <td style="${colCell(VALIDTO_COL_W)}">${c.EndDate ? escapeHtml(c.EndDate) : 'Open-ended'}</td>
+                <td style="${colCell(STATUS_COL_W)}color:${(expired || terminated) ? '#b3261e' : 'green'};font-weight:600;">${terminated ? 'Terminated' : expired ? 'Expired' : 'Active'}</td>
+                ${currentSectionCanEdit ? `<td style="${colCell(ACTION_COL_W)}text-align:center;"><button class="btn-secondary fin-edit-contract-btn" data-contract-id="${escapeHtml(c.ContractID)}" style="font-size:0.7rem;padding:4px 6px;">✏️ Edit</button></td>` : ''}
               </tr>`;
             }).join('')}
           </tbody>
