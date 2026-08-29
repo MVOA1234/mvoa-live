@@ -1185,7 +1185,7 @@ const FinanceModule = (function () {
     contractsSubView = 'form';
     const p = contractFormPrefill || {};
     const isEdit = !!p.rowNumber;
-    const categories = selectableCategories(); // same live list New Request already uses, from FinanceApprovalRules
+    const categories = contractCategories(); // every real spend-approval category, PLUS the Contracts-only "Salaries" option — see contractCategories()
     body.innerHTML = `
       <button id="fin-contract-back-btn" class="btn-secondary" style="margin-bottom:12px;">← Back to Contracts</button>
       <div class="card" style="max-width:560px;margin:0;">
@@ -1359,6 +1359,23 @@ const FinanceModule = (function () {
   // ───────────────────────────────────────────────────────────
   function selectableCategories() {
     return [...new Set(rulesCache.filter(r => r.RuleID !== 'R03').map(r => r.ExpenseCategory))].sort((a, b) => a.localeCompare(b));
+  }
+
+  // Categories offered on the Contracts form specifically — everything
+  // selectableCategories() offers (so a Contract can still be registered
+  // against any real spend-approval category, e.g. an AMC), PLUS a fixed
+  // "Salaries" option that deliberately has NO row in FinanceApprovalRules.
+  // Salaries is for registering a per-person staffing/payroll agreement as
+  // a Contract only — it must never appear as a raisable Spend Approval
+  // category, so it's added here in code rather than via a sheet row.
+  // Once registered, these show up as ordinary Contracts (Category =
+  // "Salaries") that the Payment Request form's "Link to an existing
+  // Contract" picker can surface per-person — wire a Payment Type's
+  // SpendCategory (FinancePaymentRules) to "Salaries" to have it filter to
+  // just these when processing a salary payment.
+  const CONTRACT_ONLY_CATEGORIES = ['Salaries'];
+  function contractCategories() {
+    return [...new Set([...selectableCategories(), ...CONTRACT_ONLY_CATEGORIES])].sort((a, b) => a.localeCompare(b));
   }
 
   function budgetStatusOptionsFor(category) {
