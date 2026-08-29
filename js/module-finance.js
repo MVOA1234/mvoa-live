@@ -385,6 +385,27 @@ const FinanceModule = (function () {
     return { total, consumed, available: total - consumed, fy };
   }
 
+  // Which contracts are actually worth a "no lapse in coverage" warning —
+  // the critical operational/safety services where an expired contract
+  // means the service genuinely stops (maintenance, security, sewage,
+  // garbage, pool) — not every one-off repair job (Repairs & Maintenance
+  // one-time jobs like a kerb-wall repair or a well-maintenance callout
+  // don't recur on a contract cycle, so their "expiry" isn't meaningful the
+  // same way). Matched case-insensitively since Category is free text.
+  const CONTRACT_EXPIRY_ALERT_CATEGORIES = [
+    'maintenance & housekeeping services', 'security services',
+    'swimming pool maintenance', 'sewage removal',
+    'garbage removal', 'garbage collection'
+  ];
+  function isContractExpiryAlertEligible(c) {
+    if (CONTRACT_EXPIRY_ALERT_CATEGORIES.includes(String(c.Category || '').toLowerCase().trim())) return true;
+    // AMCs (DG Set AMC, Lift AMC, etc.) can sit under several different
+    // Categories rather than having one Category of their own — "AMC" is
+    // what actually gets typed into Nature (see that field's own
+    // placeholder: "e.g. Annual AMC - DG Set"), so match there instead.
+    if (/\bamc\b/i.test(c.Nature || '')) return true;
+    return false;
+  }
   // Contracts within CONTRACT_EXPIRY_LEAD_DAYS of their EndDate (or already
   // past it) — mirrors the same "Contract Expiring Soon" pattern already
   // built for Plant Rounds' AMC & Compliance, just with a 30-day lead
@@ -392,11 +413,13 @@ const FinanceModule = (function () {
   // trusted from the stored Status column (which is only meant for a
   // manual override like "Terminated" — see FinanceContracts design notes).
   // A blank EndDate means an open-ended commitment (e.g. a utility account
-  // with no fixed expiry) — never flagged.
+  // with no fixed expiry) — never flagged. Restricted to
+  // isContractExpiryAlertEligible categories — see there for why.
   function computeExpiringContracts() {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return contractsCache
       .filter(c => c.EndDate && String(c.Status).toLowerCase() !== 'terminated')
+      .filter(isContractExpiryAlertEligible)
       .map(c => {
         const end = new Date(c.EndDate);
         const daysLeft = Math.round((end - today) / 86400000);
@@ -1150,24 +1173,45 @@ const FinanceModule = (function () {
     });
     if (rows.length) {
       const today = new Date(); today.setHours(0, 0, 0, 0);
+      // Vendor and Category stay pinned on the left (position:sticky with
+      // an explicit left offset per column, same technique used for
+      // Attendance's Name/Agency columns) while the rest of the row
+      // scrolls horizontally underneath — and the header row pins to the
+      // top the same way — so a long contracts list scrolls both ways
+      // inside its own box without losing track of which row/column is
+      // which. The two sticky columns need a FIXED pixel width (not just
+      // min-width) so the second column's left offset is a reliable
+      // constant rather than drifting with content length.
+      const VENDOR_COL_W = 170, CATEGORY_COL_W = 150;
       body.querySelector('#fin-contracts-table').innerHTML = `
-        <table class="mvoa-table">
-          <thead><tr><th>Vendor</th><th>Category</th><th>Nature</th><th>Valid To</th><th>Status</th>${currentSectionCanEdit ? '<th></th>' : ''}</tr></thead>
+        <div style="overflow:auto;max-height:65vh;border:1px solid #e0e0e0;border-radius:8px;">
+        <table class="mvoa-table" style="border-collapse:collapse;min-width:720px;">
+          <thead>
+            <tr>
+              <th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:${VENDOR_COL_W}px;min-width:${VENDOR_COL_W}px;">Vendor</th>
+              <th style="position:sticky;top:0;left:${VENDOR_COL_W}px;z-index:3;background:#eef2f6;width:${CATEGORY_COL_W}px;min-width:${CATEGORY_COL_W}px;">Category</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Nature</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Valid To</th>
+              <th style="position:sticky;top:0;z-index:2;background:#eef2f6;">Status</th>
+              ${currentSectionCanEdit ? '<th style="position:sticky;top:0;z-index:2;background:#eef2f6;"></th>' : ''}
+            </tr>
+          </thead>
           <tbody>
             ${rows.map(c => {
               const expired = c.EndDate && new Date(c.EndDate) < today;
               const terminated = String(c.Status).toLowerCase() === 'terminated';
               return `<tr>
-                <td>${escapeHtml(c.Vendor)}</td>
-                <td>${escapeHtml(c.Category)}</td>
+                <td style="position:sticky;left:0;z-index:1;background:#fff;width:${VENDOR_COL_W}px;min-width:${VENDOR_COL_W}px;">${escapeHtml(c.Vendor)}</td>
+                <td style="position:sticky;left:${VENDOR_COL_W}px;z-index:1;background:#fff;width:${CATEGORY_COL_W}px;min-width:${CATEGORY_COL_W}px;">${escapeHtml(c.Category)}</td>
                 <td>${escapeHtml(c.Nature)}</td>
-                <td>${c.EndDate ? escapeHtml(c.EndDate) : 'Open-ended'}</td>
-                <td style="color:${(expired || terminated) ? '#b3261e' : 'green'};font-weight:600;">${terminated ? 'Terminated' : expired ? 'Expired' : 'Active'}</td>
+                <td style="white-space:nowrap;">${c.EndDate ? escapeHtml(c.EndDate) : 'Open-ended'}</td>
+                <td style="white-space:nowrap;color:${(expired || terminated) ? '#b3261e' : 'green'};font-weight:600;">${terminated ? 'Terminated' : expired ? 'Expired' : 'Active'}</td>
                 ${currentSectionCanEdit ? `<td><button class="btn-secondary fin-edit-contract-btn" data-contract-id="${escapeHtml(c.ContractID)}" style="font-size:0.75rem;padding:4px 10px;">✏️ Edit</button></td>` : ''}
               </tr>`;
             }).join('')}
           </tbody>
-        </table>`;
+        </table>
+        </div>`;
       if (currentSectionCanEdit) body.querySelectorAll('.fin-edit-contract-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           const c = contractsCache.find(x => x.ContractID === btn.dataset.contractId);
