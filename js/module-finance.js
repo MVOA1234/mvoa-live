@@ -116,7 +116,20 @@ const FinanceModule = (function () {
     // order) — distinguishes Petty Cash's two internal request types
     // (Expense / Replenishment) since they share one ExpenseCategory but
     // need different approval routing. Blank for every other category.
-    'PettyCashType'];
+    'PettyCashType',
+    // 'Yes' marks a category (e.g. "Online Purchase") where the ACTUAL
+    // buying is done by the Disbursement Officer, who pays at the moment
+    // of purchase — not a vendor who invoices the Association afterward.
+    // Once such a request is fully Approved it does NOT go straight to the
+    // Accountant's expense-entry queue like every other category; it goes
+    // to the Disbursement Officer's "Approved — awaiting purchase" queue
+    // instead (see disbursementStageOnApproval / DisbursementStage
+    // 'PendingProcurement'), and only reaches the Accountant once the
+    // Disbursement Officer has recorded the invoice + payment reference
+    // (see submitProcurement). Must be set on EVERY FinanceApprovalRules
+    // row for that category — this is looked up by RuleID, and a category
+    // can have more than one row (one per amount tier).
+    'ProcuredByDisbursement'];
 
   const REQUEST_COLS = ['RequestID','RuleID','Category','BudgetStatus','Amount','Vendor',
     'Description','RequestedBy','RequestedDate','RequestType','AttachmentURL_1','AttachmentURL_2',
@@ -197,7 +210,16 @@ const FinanceModule = (function () {
     // paymentReferenceLineHtml so whoever approves the payment sees the
     // reason for the overage right alongside the linked ATS reference,
     // not just a bare number mismatch.
-    'OverageJustification'];
+    'OverageJustification',
+    // Populated by the Disbursement Officer via submitProcurement() —
+    // only used for categories flagged ProcuredByDisbursement (e.g.
+    // "Online Purchase"), where they buy the item themselves and pay at
+    // that moment, rather than a vendor invoicing the Association
+    // afterward. ProcurementRef being set is also how treasurerApprove()
+    // knows this request's payment already happened, so its approval of
+    // the Expense Sheet entry should close the request straight to Paid
+    // instead of routing to a separate "Release Payment" step.
+    'ProcurementInvoiceURL','ProcurementBank','ProcurementRef','ProcurementDate','ProcuredBy'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -578,6 +600,26 @@ const FinanceModule = (function () {
   // stored Status — My Requests, the Payments/Accountant queue — would
   // never see it, since nothing would ever trigger the write. Called from
   // computeQueueCards on every loadAll() so this can't happen silently.
+  // Looks up the specific FinanceApprovalRules tier-row a given Schedule
+  // A/B/C request was actually approved against (by RuleID, stamped at
+  // submit time) — used at approval-completion time to decide whether it
+  // should route to the Disbursement Officer for procurement instead of
+  // straight to the Accountant. Returns {} (not undefined) for a
+  // PaymentRequest/Petty Cash/anything with no matching row, so callers
+  // can read .ProcuredByDisbursement off the result unconditionally.
+  function ruleForRequest(req) {
+    return rulesCache.find(r => r.RuleID === req.RuleID) || {};
+  }
+  // 'PendingProcurement' routes a just-Approved request to the
+  // Disbursement Officer's queue (see renderPayments) instead of leaving
+  // DisbursementStage blank (the Accountant's queue) — only for
+  // categories explicitly flagged ProcuredByDisbursement in
+  // FinanceApprovalRules (e.g. "Online Purchase"). Blank for every other
+  // category, same as before this feature existed.
+  function disbursementStageOnApproval(rule) {
+    return (rule && rule.ProcuredByDisbursement === 'Yes') ? 'PendingProcurement' : '';
+  }
+
   async function settleFullyApproved(req, extraFields) {
     if (req.Status !== 'PendingApproval') return; // already settled, or something else — nothing to do
     const now = new Date().toISOString();
@@ -612,7 +654,10 @@ const FinanceModule = (function () {
         continue;
       }
       const state = computeRequestState(req, approvals);
-      if (state.fullyApproved) { await settleFullyApproved(req, { ECApprovalCount: state.ecCount }); continue; }
+      if (state.fullyApproved) {
+        await settleFullyApproved(req, { ECApprovalCount: state.ecCount, DisbursementStage: disbursementStageOnApproval(ruleForRequest(req)) });
+        continue;
+      }
       if (state.rejected) continue;
       let eligible = false;
       if (state.stage === 'Administrative' || state.stage === 'Financial') {
@@ -2032,6 +2077,7 @@ const FinanceModule = (function () {
     }
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
+      case 'PendingProcurement': return { text: `Approved — awaiting purchase (Disbursement Officer)${sinceText(request)}`, cls: 'approved' };
       case 'PendingTreasurer': return { text: `Awaiting Treasurer review (payment release)${sinceText(request)}`, cls: 'approved' };
       case 'NeedsCorrection': return { text: `Sent back by Treasurer for correction — waiting on Accountant${sinceText(request)}`, cls: 'rejected' };
       case 'PendingPayment': return { text: `Treasurer approved — awaiting Disbursement Officer${sinceText(request)}`, cls: 'approved' };
@@ -2245,6 +2291,7 @@ const FinanceModule = (function () {
     const pendingApprovalPaymentRows = pendingApprovalAll.filter(r => r.RequestType === 'PaymentRequest');
 
     const needsExpenseEntryRows = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
+    const pendingProcurementRows = requestsCache.filter(r => r.DisbursementStage === 'PendingProcurement');
     const needsCorrectionRows = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
     const pendingTreasurerRows = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
     const pendingPaymentRows = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
@@ -2257,6 +2304,7 @@ const FinanceModule = (function () {
     const drilldownGroups = {
       pendingApprovalSpend: { label: 'Pending Approval to Spend', rows: pendingApprovalSpendRows },
       pendingApprovalPayment: { label: 'Pending Approval — Payment', rows: pendingApprovalPaymentRows },
+      pendingProcurement: { label: 'Awaiting Purchase (Disbursement Officer)', rows: pendingProcurementRows },
       needsExpenseEntry: { label: 'Needs Expense Entry', rows: needsExpenseEntryRows },
       needsCorrection: { label: 'Needs Correction', rows: needsCorrectionRows },
       pendingTreasurer: { label: 'Pending Treasurer Review', rows: pendingTreasurerRows },
@@ -2364,6 +2412,7 @@ const FinanceModule = (function () {
         <div style="display:flex;flex-wrap:wrap;justify-content:flex-start;gap:8px;margin-bottom:14px;">
           ${dashboardBadgeHtml('pendingApprovalSpend', 'Pending Approval to Spend', pendingApprovalSpendRows.length, '#fdf1cf', '#8a6d00')}
           ${dashboardBadgeHtml('pendingApprovalPayment', 'Pending Approval — Payment', pendingApprovalPaymentRows.length, '#f0e6fb', '#6a3fa0')}
+          ${dashboardBadgeHtml('pendingProcurement', 'Awaiting Purchase', pendingProcurementRows.length, '#fdf1cf', '#8a6d00')}
           ${dashboardBadgeHtml('needsExpenseEntry', 'Needs Expense Entry', needsExpenseEntryRows.length, '#fdf1cf', '#8a6d00')}
           ${dashboardBadgeHtml('needsCorrection', 'Needs Correction', needsCorrectionRows.length, '#fbeaea', '#a32d2d')}
           ${dashboardBadgeHtml('pendingTreasurer', 'Pending Treasurer Review', pendingTreasurerRows.length, '#fdf1cf', '#8a6d00')}
@@ -2460,6 +2509,7 @@ const FinanceModule = (function () {
   // there's nothing meaningful about linking both at once.
   let selectedLinkedSpendRequestId = '';
   let sentBackPendingAttachments = {}; // { [requestId]: pendingAttachment[] } — see renderSentBack
+  let procurementPendingAttachments = {}; // { [requestId]: pendingAttachment[] } — see renderPayments' "awaiting purchase" section / submitProcurement
   let paymentIsGoodsProcurement = false;
 
   // Which Schedule A/B/C spend Category(ies) a Payment Type is paid
@@ -3596,7 +3646,8 @@ const FinanceModule = (function () {
       AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
       Status: initialStatus, QuorumRequired: rule.QuorumOverride || '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
-      NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
+      NotifiedAt: '', ReminderSentAt: '',
+      DisbursementStage: initialStatus === 'Approved' ? disbursementStageOnApproval(rule) : '', ExpenseTab: '', ExpenseRow: '',
       StageEnteredAt: now, StageOpenedAt: '', PettyCashType: category === 'Petty Cash' ? pettyCashType : ''
     }, prFields, csFields);
 
@@ -3647,7 +3698,7 @@ const FinanceModule = (function () {
             const state = computeRequestState(freshRow, autoApprovals);
             const now2 = new Date().toISOString();
             const updated = state.fullyApproved
-              ? Object.assign({}, freshRow, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now2, StageOpenedAt: '' })
+              ? Object.assign({}, freshRow, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now2, StageOpenedAt: '', DisbursementStage: disbursementStageOnApproval(rule) })
               : Object.assign({}, freshRow, { StageEnteredAt: now2, StageOpenedAt: '' });
             await MVOA.sheetsUpdateRow(TAB_REQUESTS, freshRow.rowNumber, objToRow(REQUEST_COLS, updated));
           }
@@ -4242,10 +4293,15 @@ const FinanceModule = (function () {
         const freshApprovals = await loadApprovalsFor(requestId, true);
         const state = computeAnyRequestState(req, freshApprovals);
         if (state.fullyApproved) {
-          // Now entering the payment-release chain — DisbursementStage starts
-          // blank (Accountant's "needs an Expense Sheet entry" queue), and
-          // StageEnteredAt marks the moment of full approval.
-          const updated = Object.assign({}, req, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now, StageOpenedAt: '' });
+          // Now entering the payment-release chain — DisbursementStage
+          // starts blank (Accountant's "needs an Expense Sheet entry"
+          // queue) UNLESS this category is flagged ProcuredByDisbursement
+          // (e.g. "Online Purchase"), in which case it routes to the
+          // Disbursement Officer's "awaiting purchase" queue instead —
+          // see disbursementStageOnApproval. Never applies to a Payment
+          // Request (no RuleID/rulesCache row to match), so ruleForRequest
+          // harmlessly returns {} for those and this is a no-op.
+          const updated = Object.assign({}, req, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now, StageOpenedAt: '', DisbursementStage: disbursementStageOnApproval(ruleForRequest(req)) });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = 'Approved';
           // Offer to register this as a contract so future payments can
@@ -4522,7 +4578,10 @@ const FinanceModule = (function () {
       add(requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection'));
     }
     if (isTres || isAdminUser) add(requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer'));
-    if (isDisb || isAdminUser) add(requestsCache.filter(r => r.DisbursementStage === 'PendingPayment'));
+    if (isDisb || isAdminUser) {
+      add(requestsCache.filter(r => r.DisbursementStage === 'PendingProcurement'));
+      add(requestsCache.filter(r => r.DisbursementStage === 'PendingPayment'));
+    }
     return list;
   }
 
@@ -4555,6 +4614,7 @@ const FinanceModule = (function () {
     }
 
     const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
+    const pendingProcurement = requestsCache.filter(r => r.DisbursementStage === 'PendingProcurement');
     const needsCorrection = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
     const pendingTreasurer = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
     const pendingPayment = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
@@ -4587,6 +4647,8 @@ const FinanceModule = (function () {
         ${pendingTreasurer.length ? '<div id="fin-pay-treasurer"></div>' : '<p class="muted">Nothing awaiting your review.</p>'}
       ` : ''}
       ${(isDisb || isAdminUser) ? `
+        <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">🛒 Approved — awaiting purchase</h3>
+        ${pendingProcurement.length ? '<div id="fin-pay-procurement"></div>' : '<p class="muted">Nothing awaiting purchase.</p>'}
         <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Ready for payment</h3>
         ${pendingPayment.length ? '<div id="fin-pay-disburse"></div>' : '<p class="muted">Nothing awaiting payment.</p>'}
       ` : ''}
@@ -4727,6 +4789,51 @@ const FinanceModule = (function () {
         el.innerHTML = `<p class="error-text">Could not display items awaiting review: ${escapeHtml(e.message)}. Try ↻ Refresh, or open the browser console for details.</p>`;
       }
     }
+    if ((isDisb || isAdminUser) && pendingProcurement.length) {
+      const el = body.querySelector('#fin-pay-procurement');
+      const [newOnes, openOnes] = [pendingProcurement.filter(isItemNew), pendingProcurement.filter(r => !isItemNew(r))];
+      el.innerHTML = newOnes.map(req => newItemCardHtml(req, req.Description ? `<p class="muted" style="margin:4px 0;">${escapeHtml(req.Description)}</p>` : '')).join('')
+        + openOnes.map(req => `
+        <div class="mvoa-list-item" data-request-id="${escapeHtml(req.RequestID)}">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
+            <span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Approved — go ahead and buy this</span>
+          </div>
+          ${req.Description ? `<p class="muted" style="margin:4px 0;">${escapeHtml(req.Description)}</p>` : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested by ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
+          ${attachmentLinksHtml(req)}
+          ${currentSectionCanEdit ? `
+          <div style="margin-top:8px;">
+            <p class="muted" style="margin:0 0 4px;font-size:0.85rem;">Once you've made the purchase, attach the invoice and the payment details:</p>
+            <div class="fin-proc-attachment-chips" data-request-id="${escapeHtml(req.RequestID)}"></div>
+            <div class="fin-proc-attachment-btns" data-request-id="${escapeHtml(req.RequestID)}" style="display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 6px;"></div>
+            <select class="fin-proc-bank-select" data-request-id="${escapeHtml(req.RequestID)}" style="width:100%;margin-bottom:6px;">
+              <option value="">— Select Bank used for this payment —</option>
+              <option value="HDFC">HDFC</option>
+              <option value="IOB">IOB</option>
+            </select>
+            <input type="text" class="fin-proc-ref" data-request-id="${escapeHtml(req.RequestID)}" placeholder="Payment reference (UTR / Order ID / Card txn ref)" style="width:100%;margin-bottom:6px;box-sizing:border-box;">
+            <label class="muted" style="font-size:0.8rem;">Date paid
+              <input type="date" class="fin-proc-date" data-request-id="${escapeHtml(req.RequestID)}" style="width:100%;margin-bottom:6px;box-sizing:border-box;">
+            </label>
+            <button class="btn-primary fin-proc-submit-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Invoice to Accountant</button>
+          </div>
+          <p class="error-text fin-proc-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
+          ` : `<p class="muted" style="margin:8px 0 0 0;">👁️ Read only — you can't record this purchase.</p>`}
+        </div>`).join('');
+      wireNewItemCards(el, refreshPayments);
+      procurementPendingAttachments = {};
+      if (currentSectionCanEdit) openOnes.forEach(req => {
+        procurementPendingAttachments[req.RequestID] = [];
+        renderDocAttachmentPicker(el,
+          `.fin-proc-attachment-chips[data-request-id="${req.RequestID}"]`,
+          `.fin-proc-attachment-btns[data-request-id="${req.RequestID}"]`,
+          procurementPendingAttachments[req.RequestID], ['Vendor Invoice'], 1);
+      });
+      if (currentSectionCanEdit) el.querySelectorAll('.fin-proc-submit-btn').forEach(btn => {
+        btn.addEventListener('click', () => runOnce(btn, 'Saving…', () => submitProcurement(btn.dataset.requestId, el, container)));
+      });
+    }
     if ((isDisb || isAdminUser) && pendingPayment.length) {
       const el = body.querySelector('#fin-pay-disburse');
       const [newOnes, openOnes] = [pendingPayment.filter(isItemNew), pendingPayment.filter(r => !isItemNew(r))];
@@ -4793,6 +4900,15 @@ const FinanceModule = (function () {
         <button id="fin-exp-cancel-top" class="btn-secondary" style="position:sticky;top:0;float:right;z-index:1;">✕ Close</button>
         <h3>${isCorrection ? 'Edit' : 'Log'} Expense Entry — ${escapeHtml(req.Category)}</h3>
         ${attachmentLinksHtml(req) || '<p class="muted" style="margin:0 0 8px;">No attachments were submitted with this Payment Request.</p>'}
+        ${req.ProcurementInvoiceURL ? `
+          <div class="mvoa-list-item" style="margin:0 0 10px;">
+            <p style="margin:0 0 4px;font-weight:600;">🛒 Purchase details (from Disbursement Officer)</p>
+            <p class="muted" style="margin:2px 0;"><a href="${escapeHtml(req.ProcurementInvoiceURL)}" target="_blank" rel="noopener">📄 View Invoice</a></p>
+            <p class="muted" style="margin:2px 0;">Paid via ${escapeHtml(req.ProcurementBank || '—')} · Ref: ${escapeHtml(req.ProcurementRef || '—')} · ${formatDate(req.ProcurementDate)}</p>
+            <p class="muted" style="margin:2px 0;">Procured by ${escapeHtml(req.ProcuredBy || '—')}</p>
+            <p class="muted" style="margin:2px 0;font-size:0.8rem;">This payment has already been made — approving this entry (Treasurer) will close the request directly, with no separate Release Payment step.</p>
+          </div>
+        ` : ''}
         <label>Month (Expense Sheet tab)
           <select id="fin-exp-tab" ${isCorrection ? 'disabled' : ''}>
             ${tabs.map(t => `<option value="${t}" ${req.ExpenseTab === t ? 'selected' : ''}>${t.replace(EXPENSE_TAB_PREFIX,'')}</option>`).join('')}
@@ -4886,7 +5002,13 @@ const FinanceModule = (function () {
       TDS: Number(val('#fin-exp-tds')) || 0, LessAdd: Number(val('#fin-exp-lessadd')) || 0,
       NetAmount: Number(val('#fin-exp-net')) || gross,
       NelsonCheck: (existing && existing.row.NelsonCheck) || '', LakshmanCheck: (existing && existing.row.LakshmanCheck) || '',
-      ApprovedBy: (existing && existing.row.ApprovedBy) || '', PassedBy: passedByStamp, UDNumber: '', Date: ''
+      ApprovedBy: (existing && existing.row.ApprovedBy) || '', PassedBy: passedByStamp, UDNumber: '', Date: '',
+      // Carries the Disbursement Officer's already-recorded Bank straight
+      // into the entry (see submitProcurement) for a ProcuredByDisbursement
+      // request — payment already happened, so there's nothing left for
+      // this field to wait on. Blank for every normal request, same as
+      // before this feature existed.
+      Bank: (existing && existing.row.Bank) || req.ProcurementBank || ''
     };
 
     try {
@@ -4928,10 +5050,35 @@ const FinanceModule = (function () {
       // is left untouched here.
       const approvalStamp = `${user.name} · ${new Date().toLocaleDateString()}`;
       const updatedEntry = Object.assign({}, entry.row, { ApprovedBy: approvalStamp });
+      // A ProcurementRef on the request means this went through the
+      // Disbursement-Officer-procured path (e.g. Online Purchase) — the
+      // Disbursement Officer already paid and recorded the reference
+      // BEFORE the Accountant ever logged this entry (see
+      // submitProcurement), so there's nothing left for a separate
+      // "Release Payment" step to do. Finish the Expense Sheet entry with
+      // that already-known reference and settle the request straight to
+      // Paid, instead of routing it to PendingPayment.
+      const alreadyPaid = !!req.ProcurementRef;
+      if (alreadyPaid) {
+        updatedEntry.UDNumber = req.ProcurementRef;
+        updatedEntry.Date = formatDate(req.ProcurementDate);
+        updatedEntry.Bank = req.ProcurementBank || entry.row.Bank || '';
+      }
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
-      const updatedReq = Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber, StageEnteredAt: new Date().toISOString(), StageOpenedAt: '' });
+      const now = new Date().toISOString();
+      const updatedReq = alreadyPaid
+        ? Object.assign({}, req, {
+            DisbursementStage: 'Paid', ExpenseRow: entry.rowNumber,
+            PaymentStatus: 'Paid', PaymentDate: req.ProcurementDate || now, PaymentRef: req.ProcurementRef,
+            ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now, StageOpenedAt: ''
+          })
+        : Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber, StageEnteredAt: now, StageOpenedAt: '' });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
-      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Treasurer approved', comment: '', statusAfter: 'PendingPayment' });
+      await MVOA.logAudit({
+        module: 'Finance', requestId,
+        eventType: alreadyPaid ? 'Treasurer approved — payment already made, closed' : 'Treasurer approved',
+        comment: '', statusAfter: alreadyPaid ? 'Paid' : 'PendingPayment'
+      });
       await loadAll(true);
       render(container);
     } catch (e) {
@@ -4991,6 +5138,55 @@ const FinanceModule = (function () {
       render(container);
     } catch (e) {
       if (errEl) errEl.textContent = 'Could not release payment: ' + e.message;
+    }
+  }
+
+  // ─── Disbursement Officer: record a Disbursement-Officer-procured
+  // purchase (e.g. "Online Purchase") once it's been bought and paid for
+  // — see ProcuredByDisbursement / DisbursementStage 'PendingProcurement'.
+  // Unlike disbursePayment() above (the LAST step of the normal
+  // pipeline), this is a MIDDLE step: it hands the invoice and payment
+  // details to the Accountant so they can log the Expense Sheet entry —
+  // the actual "Paid" close-out happens later, at treasurerApprove(),
+  // reusing the reference recorded here.
+  async function submitProcurement(requestId, scopeEl, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    const errEl = scopeEl.querySelector(`.fin-proc-error[data-request-id="${requestId}"]`);
+    const bankSelect = scopeEl.querySelector(`.fin-proc-bank-select[data-request-id="${requestId}"]`);
+    const refInput = scopeEl.querySelector(`.fin-proc-ref[data-request-id="${requestId}"]`);
+    const dateInput = scopeEl.querySelector(`.fin-proc-date[data-request-id="${requestId}"]`);
+    const bank = bankSelect ? bankSelect.value : '';
+    const ref = refInput ? refInput.value.trim() : '';
+    const dateVal = dateInput ? dateInput.value : '';
+    const attachments = procurementPendingAttachments[requestId] || [];
+    if (!attachments.length) { if (errEl) errEl.textContent = 'Please attach the vendor invoice.'; return; }
+    if (!bank) { if (errEl) errEl.textContent = 'Please select which Bank this was paid from.'; return; }
+    if (!ref) { if (errEl) errEl.textContent = 'Please enter a payment reference (UTR / Order ID / Card txn ref).'; return; }
+    if (!dateVal) { if (errEl) errEl.textContent = 'Please enter the date this was paid.'; return; }
+    try {
+      const user = MVOA.getUser();
+      const att = attachments[0];
+      const invoiceUrl = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_invoice_${att.name}`);
+      const now = new Date().toISOString();
+      // DisbursementStage goes back to blank — the exact same value that
+      // routes any other Approved request to the Accountant's "needs an
+      // Expense Sheet entry" queue (see needsExpenseEntry/needsExpenseEntryRows).
+      // No special-casing needed there: this request now looks, to the
+      // Accountant, just like any other Approved request — plus the
+      // procurement details attached below, which openExpenseEntryDialog
+      // surfaces to them.
+      const updated = Object.assign({}, req, {
+        ProcurementInvoiceURL: invoiceUrl, ProcurementBank: bank, ProcurementRef: ref,
+        ProcurementDate: dateVal, ProcuredBy: user.name,
+        DisbursementStage: '', StageEnteredAt: now, StageOpenedAt: ''
+      });
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Online purchase recorded — sent to Accountant', comment: `${bank} · ${ref}`, statusAfter: '' });
+      await loadAll(true);
+      render(container);
+    } catch (e) {
+      if (errEl) errEl.textContent = 'Could not save: ' + e.message;
     }
   }
 
