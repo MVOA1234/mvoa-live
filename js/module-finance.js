@@ -4259,7 +4259,24 @@ const FinanceModule = (function () {
   function attachmentLinksHtml(r) {
     const urls = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3];
     const links = urls.filter(Boolean).map((url, i) => `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>`).join(' · ');
-    return links ? `<p class="muted" style="font-size:0.8rem;">${links}</p>` : '';
+    // On Line Procurement (or any ProcuredByDisbursement category) never
+    // has a vendor invoice among AttachmentURL_1-3 — at submission time
+    // only the written Rationale is required, no file. The real invoice
+    // only exists once the Disbursement Officer buys the item and attaches
+    // it via submitProcurement(), landing in ProcurementInvoiceURL instead.
+    // Bug found in testing: the Treasurer's "Awaiting your review" card
+    // read this function and, finding AttachmentURL_1-3 all blank, told
+    // the Treasurer "No attachments were submitted" — even though the
+    // actual invoice the Accountant used to prepare the Expense Sheet
+    // entry existed and just wasn't being surfaced here. Since every
+    // caller of attachmentLinksHtml() ultimately wants "show me whatever
+    // proof-of-purchase exists for this request", folding it in here (once)
+    // fixes the Treasurer view and every other attachment listing at once,
+    // rather than patching each call site separately.
+    const procurementLink = r.ProcurementInvoiceURL
+      ? `<a href="${r.ProcurementInvoiceURL}" target="_blank" rel="noopener">🧾 Vendor Invoice (Disbursement Officer)</a>` : '';
+    const all = [links, procurementLink].filter(Boolean).join(' · ');
+    return all ? `<p class="muted" style="font-size:0.8rem;">${all}</p>` : '';
   }
 
   // The linked Contract or Approval-to-Spend reference for a Payment
