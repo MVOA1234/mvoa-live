@@ -3824,11 +3824,22 @@ const FinanceModule = (function () {
           : `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Payment in progress — see linked Payment Request ${escapeHtml(active.RequestID)}</p>`;
     } else if (request.Status === 'Approved' && !isPettyCashExpense(request)) {
       const stage = request.DisbursementStage;
-      const steps = [
-        { done: !!stage, label: 'Expense Sheet entry logged (Accountant)' },
-        { done: stage === 'PendingPayment' || stage === 'Paid', label: 'Treasurer review' },
-        { done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}` }
-      ];
+      // Categories flagged ProcuredByDisbursement (e.g. "On Line
+      // Procurement") route through the Disbursement Officer FIRST —
+      // stage sits at 'PendingProcurement' right after approval, before
+      // the Accountant ever sees it. Bug found in testing: this checklist
+      // never showed that step at all, and worse, its old `!!stage` check
+      // for "Expense Sheet entry logged" read 'PendingProcurement' as
+      // truthy and showed the Accountant step as already done before the
+      // purchase had even happened. Both fixed below.
+      const isProcurementFlow = ruleForRequest(request).ProcuredByDisbursement === 'Yes';
+      const steps = [];
+      if (isProcurementFlow) {
+        steps.push({ done: !!request.ProcuredBy, label: `Purchase made & invoice attached (Disbursement Officer)${request.ProcuredBy ? ' — ' + escapeHtml(request.ProcuredBy) : ''}` });
+      }
+      steps.push({ done: !!stage && stage !== 'PendingProcurement', label: 'Expense Sheet entry logged (Accountant)' });
+      steps.push({ done: stage === 'PendingPayment' || stage === 'Paid', label: 'Treasurer review' });
+      steps.push({ done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}` });
       paymentsTrailHtml = `
         <p style="margin:10px 0 3px;font-weight:600;">Payment release:</p>
         ${stage === 'NeedsCorrection' ? '<p style="margin:3px 0;color:#b3261e;">🔁 Sent back by Treasurer for correction — waiting on Accountant</p>' : ''}
