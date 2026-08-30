@@ -617,7 +617,17 @@ const FinanceModule = (function () {
   // FinanceApprovalRules (e.g. "Online Purchase"). Blank for every other
   // category, same as before this feature existed.
   function disbursementStageOnApproval(rule) {
-    return (rule && rule.ProcuredByDisbursement === 'Yes') ? 'PendingProcurement' : '';
+    // Bug found in testing: a fresh On Line Procurement request, approved
+    // AFTER the confirmed-live deploy, still landed with DisbursementStage
+    // blank in FinanceRequests column AF — despite FinanceApprovalRules
+    // column P (R04) genuinely reading "Yes" and matching correctly by
+    // RuleID. The likely cause is a hand-typed cell value that isn't an
+    // EXACT byte-for-byte match to the string literal 'Yes' (a trailing
+    // space, a different case, a stray non-breaking space from a paste) —
+    // === is unforgiving of any of that. Trim + lowercase-compare instead,
+    // so "Yes", "yes ", " YES", etc. all correctly flag the category.
+    const flag = String((rule && rule.ProcuredByDisbursement) || '').trim().toLowerCase();
+    return flag === 'yes' ? 'PendingProcurement' : '';
   }
 
   async function settleFullyApproved(req, extraFields) {
