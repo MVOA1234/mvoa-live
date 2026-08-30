@@ -4212,6 +4212,18 @@ const FinanceModule = (function () {
       // instead of a live Approve button once this user has a recorded
       // Approved decision at the CURRENT stage.
       const alreadyVoted = !!(state.stage && approvals.some(a => a.Stage === state.stage && a.Decision === 'Approved' && a.ApproverName === user.name));
+      // Bug found in testing: a requester who ALSO happens to hold an
+      // approving role can end up reviewing their own request (small-org
+      // reality — the same person often wears both hats). Approving it
+      // themselves is fine (and already an accepted pattern elsewhere in
+      // this module — see the auto-approval-on-submit path). But Send
+      // Back makes no sense directed at yourself: at the very first
+      // required stage it dumps the request into "With Requester" —
+      // which IS them — leaving it sitting there waiting on the same
+      // person to "resubmit" to themselves, a confusing dead end that's
+      // exactly what happened to the Sewage Removal Payments test case.
+      // Per explicit instruction: "Originator cannot send back."
+      const isOwnRequest = req.RequestedBy === user.name;
       const div = document.createElement('div');
       div.className = 'mvoa-list-item';
       div.innerHTML = `
@@ -4228,9 +4240,10 @@ const FinanceModule = (function () {
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
         ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
         ${!currentSectionCanEdit ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">👁️ Read only — you can't approve, send back, or reject.</p>` : ''}
+        ${currentSectionCanEdit && isOwnRequest ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">🔁 Send Back isn't available on your own request — you can Approve or Reject it.</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           ${!currentSectionCanEdit ? '' : alreadyVoted ? '' : `<button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>`}
-          ${currentSectionCanEdit ? `<button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>` : ''}
+          ${currentSectionCanEdit && !isOwnRequest ? `<button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>` : ''}
           ${currentSectionCanEdit && state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-queue-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}"`)}
         </div>
@@ -4347,6 +4360,16 @@ const FinanceModule = (function () {
     let justApprovedForContractPrompt = null;
     try {
       const req = requestsCache.find(r => r.RequestID === requestId);
+      // Server-side (well, function-side) backstop for the same rule the
+      // Approval Queue UI already enforces by hiding the button — belt and
+      // suspenders, since the UI check alone can't be trusted against a
+      // stale page. See the Approval Queue card's isOwnRequest comment for
+      // why: a requester sending their own request back can leave it
+      // permanently waiting on themselves to resubmit to themselves.
+      if (decision === 'SentBack' && req && req.RequestedBy === user.name) {
+        if (errEl) errEl.textContent = "Send Back isn't available on your own request — Approve or Reject instead.";
+        return;
+      }
       const priorApprovals = await loadApprovalsFor(requestId, true); // BEFORE this decision is appended, for stage comparison below
       const priorState = computeAnyRequestState(req, priorApprovals);
 
