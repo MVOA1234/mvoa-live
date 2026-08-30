@@ -5277,7 +5277,7 @@ const FinanceModule = (function () {
           </select>
         </label>
       </div>
-      <div id="fin-exp-browser-table" style="overflow-x:auto;"></div>
+      <div id="fin-exp-browser-table"></div>
     `;
     body.querySelector('#fin-exp-browser-back').addEventListener('click', () => renderPayments(body, container));
     const monthSel = body.querySelector('#fin-exp-browser-month');
@@ -5315,14 +5315,40 @@ const FinanceModule = (function () {
         if (PERSON_DATE_COLS.has(h) && raw) return String(raw).split(' · ').map(escapeHtml).join('<br>');
         return escapeHtml(raw || '');
       };
+      // Requested: keep the header row visible while scrolling down through
+      // many months' worth of entries, and keep SlNo + Vendor visible while
+      // scrolling right through the rest of the (wide) row — otherwise you
+      // lose track of which row/vendor you're looking at. `position:sticky`
+      // needs 3 things to actually work here: a bounded, scrollable ancestor
+      // (the wrapping div below, not just overflow-x on the old flat div),
+      // an explicit `left` offset for the 2nd sticky column (computed from
+      // the 1st column's fixed width — sticky offsets aren't automatic),
+      // and a solid background on every sticky cell (unstyled/transparent
+      // sticky cells let the scrolled-under content show through). The
+      // top-left corner cells (SlNo/Vendor header) stick in BOTH directions
+      // at once and need the highest z-index so they stay above cells that
+      // are only sticky one way.
+      const STICKY_COL_WIDTH = { SlNo: 60, Vendor: 150 };
+      const stickyLeftFor = (h) => h === 'SlNo' ? 0 : h === 'Vendor' ? STICKY_COL_WIDTH.SlNo : null;
+      const cellStyle = (h, isHeader) => {
+        const left = stickyLeftFor(h);
+        const width = STICKY_COL_WIDTH[h] ? `width:${STICKY_COL_WIDTH[h]}px;` : '';
+        if (left === null) return `text-align:center;${width}${isHeader ? 'position:sticky;top:0;z-index:2;background:#eef1f5;' : ''}`;
+        // Sticky column (SlNo/Vendor): header cells stick top+left (z-index 3,
+        // above everything); body cells stick left only (z-index 1, above
+        // plain scrolling cells but below the sticky header).
+        return `text-align:center;${width}position:sticky;left:${left}px;${isHeader ? 'top:0;z-index:3;background:#eef1f5;' : 'z-index:1;background:#fff;'}`;
+      };
       tableEl.innerHTML = `
-        <table class="mvoa-table" style="min-width:900px;text-align:center;">
-          <thead><tr>${header.map(h => `<th style="text-align:center;">${h}</th>`).join('')}</tr></thead>
-          <tbody>${rows.slice(1).map(r => {
-            const obj = rowToObj(EXPENSE_COLS, r, 0);
-            return `<tr>${header.map(h => `<td style="text-align:center;">${cellHtml(h, obj[h])}</td>`).join('')}</tr>`;
-          }).join('')}</tbody>
-        </table>`;
+        <div style="max-height:70vh;overflow:auto;">
+          <table class="mvoa-table" style="min-width:900px;text-align:center;border-collapse:separate;border-spacing:0;">
+            <thead><tr>${header.map(h => `<th style="${cellStyle(h, true)}">${h}</th>`).join('')}</tr></thead>
+            <tbody>${rows.slice(1).map(r => {
+              const obj = rowToObj(EXPENSE_COLS, r, 0);
+              return `<tr>${header.map(h => `<td style="${cellStyle(h, false)}">${cellHtml(h, obj[h])}</td>`).join('')}</tr>`;
+            }).join('')}</tbody>
+          </table>
+        </div>`;
     };
     monthSel.addEventListener('change', loadMonth);
     loadMonth();
