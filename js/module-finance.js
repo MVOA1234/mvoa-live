@@ -1572,14 +1572,20 @@ const FinanceModule = (function () {
   // combined with something else (a quote, a comparative statement),
   // that other item still needs a real attachment.
   function isJustificationOnly(docs) {
-    // Only a PURE justification requirement qualifies — "FM Justification"
-    // or "Emergency Justification Note" write straight into Description.
-    // A doc like "Quote / Justification" (R02) mentions justification too,
-    // but the "/" pairs it with something that genuinely needs attaching —
-    // bug found in testing: this used to match on "justification" alone
-    // and silently skipped the required quote attachment.
-    return docs.length === 1 && /justification/i.test(docs[0]) &&
-      !/quote|invoice|comparative|purchase request|rationale|receipt/i.test(docs[0]);
+    // Only a PURE justification/rationale requirement qualifies — "FM
+    // Justification", "Emergency Justification Note", or "Rationale for
+    // purchase" (R04, On Line Procurement) all write straight into
+    // Description, no attachment needed. A doc like "Quote / Justification"
+    // (R02) or "Min. Two Quotes or rationale in case of one quote" (R06)
+    // mentions justification/rationale too, but pairs it with something
+    // that genuinely needs attaching — bug found in testing: this used to
+    // match on "justification" alone and silently skipped the required
+    // quote attachment. "Rationale" was previously excluded outright
+    // (to protect R06), which wrongly also blocked R04's pure "Rationale
+    // for purchase" — R06 is still correctly excluded below on "quote"
+    // alone, so excluding "rationale" specifically is no longer needed.
+    return docs.length === 1 && /justification|rationale/i.test(docs[0]) &&
+      !/quote|invoice|comparative|purchase request|receipt/i.test(docs[0]);
   }
   // Petty Cash Replenishment's requirement ("Original Documents Submitted
   // to Accountant") isn't a file to attach OR text to type — it's a
