@@ -832,12 +832,42 @@ const FinanceModule = (function () {
         { key: 'budget', label: '📊 Budget' },
         { key: 'contracts', label: '📄 Contracts' }
       ];
+      // Requested: a "something landed here" alert right on the home
+      // screen's top-level buttons, so a user doesn't have to open every
+      // section just to find out where a new item is waiting — mirrors
+      // the same 🆕-new styling already used one level down (e.g. "✅ My
+      // Approvals (🆕 2 new)"), just surfaced a level higher. All of these
+      // counts are already computed above, unconditionally, at the top of
+      // render() — they don't depend on currentTopTab, so they're valid
+      // even while sitting on the home screen. "New" here specifically
+      // means "not yet opened since it moved" (see StageOpenedAt /
+      // isItemNew) for Spend/Payment; Budget Revisions has no such
+      // per-item tracking today, so it's shown as a plain pending count
+      // in a different (amber, not red) color rather than mislabeled
+      // "new"; Contracts reuses the expiring-soon count already computed
+      // for the banner above. Dashboard has no queue of its own.
+      const topTabAlert = {
+        dashboard: null,
+        spend: (queueCountsSpend.newCount + mineCountsSpend.newCount + myApprovalsNewNoteCounts.spend) || null,
+        payment: (queueCountsPayment.newCount + mineCountsPayment.newCount + paymentsCounts.newCount + myApprovalsNewNoteCounts.payment) || null,
+        budget: pendingBudgetRevisionsCount || null,
+        contracts: expiringContracts.length || null
+      };
+      const topTabAlertHtml = (key) => {
+        const n = topTabAlert[key];
+        if (!n) return '';
+        const isNew = key === 'spend' || key === 'payment';
+        const color = isNew || key === 'contracts' ? '#b3261e' : '#8a6d00';
+        const bg = isNew || key === 'contracts' ? '#fbeaea' : '#fdf1cf';
+        const text = isNew ? `🆕 ${n} new` : key === 'contracts' ? `⚠️ ${n} expiring` : `${n} pending`;
+        return ` <span style="color:${color};background:${bg};border-radius:10px;padding:1px 7px;font-size:0.8rem;font-weight:600;">${text}</span>`;
+      };
       const visibleTopTabs = ALL_TOP_TABS.filter(t => MVOA.canViewFinanceSection(FINANCE_TOP_TAB_SECTION[t.key], user));
       container.innerHTML = `
         ${headerHtml}
         ${visibleTopTabs.length ? `
           <div class="ops-tabs">
-            ${visibleTopTabs.map(t => `<button data-toptab="${t.key}" class="ops-tab-btn">${t.label}</button>`).join('')}
+            ${visibleTopTabs.map(t => `<button data-toptab="${t.key}" class="ops-tab-btn">${t.label}${topTabAlertHtml(t.key)}</button>`).join('')}
           </div>` : `<p class="muted">You don't have access to any part of the Finance Application. Contact an admin if this seems wrong.</p>`}`;
       container.querySelectorAll('.ops-tab-btn[data-toptab]').forEach(btn => {
         btn.addEventListener('click', () => {
