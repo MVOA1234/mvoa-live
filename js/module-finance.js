@@ -2996,7 +2996,22 @@ const FinanceModule = (function () {
 
     try {
       await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
+    } catch (e) {
+      errEl.textContent = 'Could not save request: ' + e.message;
+      clearBtnBusy(submitBtn, 'Submit Payment Request');
+      return;
+    }
+    // Audit logging is best-effort and deliberately kept OUT of the try/catch
+    // below — the request row itself is already safely saved at this point.
+    // Same fix as doSubmitRequest above (root-caused 31-Aug-2026): a
+    // transient Audit Log write failure here must never be reported as
+    // "Could not save request" (it wasn't) and must never skip the
+    // auto-approval/render logic below that shows the requester their new
+    // Payment Request.
+    try {
       await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Payment Request Submitted', comment: `${paymentType} — ${formatAmount(amount)}`, statusAfter: initialStatus });
+    } catch (e) { /* best-effort — the request itself is already safely saved either way */ }
+    try {
       // FM Verification (Receipt/Service Verification) isn't a separate
       // approval-queue hop requiring someone to log in and click Approve
       // — per Governance Note 3, it's satisfied by the photographic/
@@ -3699,12 +3714,24 @@ const FinanceModule = (function () {
 
     try {
       await MVOA.sheetsAppend(TAB_REQUESTS, objToRow(REQUEST_COLS, row));
-      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Submitted', comment: `${category} — ${formatAmount(amount)}`, statusAfter: initialStatus });
     } catch (e) {
       errEl.textContent = 'Could not save request: ' + e.message;
       clearBtnBusy(submitBtn, 'Submit Request');
       return;
     }
+    // Audit logging is best-effort and deliberately kept OUT of the try/catch
+    // above — the request row itself is already safely saved at this point,
+    // so a transient failure writing to the Audit Log tab must never be
+    // reported to the requester as "Could not save request" (which it
+    // wasn't) and must never skip the loadAll()/render('mine') below that
+    // shows them their new request. Root-caused 31-Aug-2026: a Secretary's
+    // submission never appeared in their own My Requests or the Treasurer's
+    // Approval Queue even though the row had genuinely saved to
+    // FinanceRequests, because logAudit throwing here was previously inside
+    // the same try block and short-circuited everything after it.
+    try {
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Submitted', comment: `${category} — ${formatAmount(amount)}`, statusAfter: initialStatus });
+    } catch (e) { /* best-effort — the request itself is already safely saved either way */ }
 
     // Bug found in testing: if the person submitting is ALSO the sole
     // required approver for the Administrative (and/or Financial) stage
