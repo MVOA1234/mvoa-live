@@ -48,7 +48,17 @@ const HSModule = (function () {
   const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan', 'Group', 'LayoutImage'];
-  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay', 'ShowZoneOfDay', 'FailTaskCategory', 'RoundBased', 'CustomScreen'];
+  const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay', 'ShowZoneOfDay', 'FailTaskCategory', 'RoundBased', 'CustomScreen', 'FloorWise'];
+  // FloorWise (added 31-Aug-2026): TRUE only for templates whose items are
+  // organized as "Floor - Item" (e.g. "Ground Floor - House Keeping"),
+  // where each floor should be fillable and submittable on its own instead
+  // of requiring every floor's items to be answered before any submit is
+  // possible (e.g. Club House Monthly). Deliberately an explicit opt-in
+  // flag rather than auto-detected from CheckItem text, so this never
+  // silently changes behavior for any other Weekly/Monthly/BiMonthly
+  // template that happens to use a "-" in its item names for an unrelated
+  // reason. See detectFloorGroups() below for how floors are derived once
+  // this flag is set.
   const ITEM_COLS = ['ItemID', 'TemplateID', 'SeqNo', 'CheckItem', 'Requirement', 'InputType', 'ShiftApplicability', 'Active', 'Unit', 'FailThreshold', 'FailDirection', 'Required', 'AssetPrefix', 'TypicalValue', 'DayApplicability'];
   const OPTION_COLS = ['ItemID', 'OptionValue', 'OptionOrder'];
   const LOG_COLS = ['LogID', 'TemplateID', 'PerformedBy', 'Timestamp', 'Shift', 'Status', 'Notes', 'AssetID', 'AssetName'];
@@ -76,6 +86,7 @@ const HSModule = (function () {
   let currentScan = null;    // { assetId, assetName, category, qrTarget }
   let currentTemplate = null;
   let currentShift = '';     // '1st' | '2nd' | '3rd' — Daily only
+  let currentFloor = '';     // e.g. 'Ground Floor' — FloorWise templates only, see detectFloorGroups()
   let pendingResults = {};   // ItemID -> { result, remarks }
   let pendingPerformedBy = ''; // editable "who's filling this in" — defaults to logged-in user, but
                                 // editable since a technician sometimes enters on behalf of the AMC vendor
@@ -3637,6 +3648,7 @@ const HSModule = (function () {
         if (t && t.CustomScreen === 'InOutLog') { renderInOutLog(container); return; }
         currentTemplate = t;
         currentShift = '';
+        currentFloor = '';
         pendingResults = {};
         pendingPerformedBy = MVOA.getUser().name;
         renderChecklistForm(container);
@@ -3686,6 +3698,49 @@ const HSModule = (function () {
   }
 
   // ───────────────────────────────────────────────────────────
+  // FLOOR-WISE SUBMISSION (FloorWise=TRUE templates only, e.g. Club House
+  // Monthly) — added 31-Aug-2026. Each floor/section is filled and
+  // submitted independently instead of requiring every floor's items to
+  // be answered before any submit is possible. A floor's identity comes
+  // from its items' CheckItem text, which is written "Floor - Item" (e.g.
+  // "Ground Floor - House Keeping", "Ground Floor - Rest Room - Lights" —
+  // only the text before the FIRST " - " is taken as the floor name, so
+  // an item name with a second " - " further in, like the Rest Room
+  // example, still groups correctly under "Ground Floor"). Uses the
+  // template's existing per-day duplicate-submission log (HSChecklistLog,
+  // reusing its AssetName column to record which floor a log row covers,
+  // same as AssetName already does for QR-scanned multi-asset templates)
+  // rather than a new sheet column.
+  function floorNameOf(checkItem) {
+    const idx = (checkItem || '').indexOf(' - ');
+    if (idx === -1) return null;
+    const floor = checkItem.slice(0, idx).trim();
+    return floor || null;
+  }
+  // Returns null (meaning "render as one flat list, unchanged") unless
+  // EVERY item has a detectable floor prefix and there's more than one
+  // distinct floor — a template with only one floor, or any item that
+  // doesn't follow the "Floor - Item" naming, falls back to the original
+  // combined form rather than showing a half-broken floor picker.
+  function detectFloorGroups(items) {
+    if (!items.length) return null;
+    const order = [];
+    const byFloor = new Map();
+    for (const item of items) {
+      const floor = floorNameOf(item.CheckItem);
+      if (!floor) return null;
+      if (!byFloor.has(floor)) { byFloor.set(floor, []); order.push(floor); }
+      byFloor.get(floor).push(item);
+    }
+    if (order.length < 2) return null;
+    return order.map(floor => ({ floor, items: byFloor.get(floor) }));
+  }
+  function hasSubmittedTodayForFloor(templateId, floor) {
+    const todayStr = new Date().toDateString();
+    return logsCache.some(l => l.TemplateID === templateId && l.AssetName === floor && new Date(l.Timestamp).toDateString() === todayStr);
+  }
+
+  // ───────────────────────────────────────────────────────────
   // IN-PROGRESS ROUND DRAFT — saved to localStorage so a checklist round
   // survives the page getting reloaded mid-round. This exists for a real
   // field issue reported for Security's Daily Rounds (Photo/
@@ -3723,7 +3778,7 @@ const HSModule = (function () {
         const { photoFile, ...rest } = pendingResults[itemId];
         results[itemId] = rest;
       });
-      localStorage.setItem(draftKey(currentTemplate.TemplateID, currentShift), JSON.stringify({
+      localStorage.setItem(draftKey(currentTemplate.TemplateID, currentFloor || currentShift), JSON.stringify({
         performedBy: pendingPerformedBy, results
       }));
     } catch (e) { /* best-effort — a full/unavailable localStorage should never block the round itself */ }
@@ -3962,25 +4017,6 @@ const HSModule = (function () {
       return;
     }
 
-    // RESTORE IN-PROGRESS DRAFT — if this exact round/shift was already
-    // partway filled in before the page got reloaded (see the IN-
-    // PROGRESS ROUND DRAFT block above hasSubmittedToday), pick it back
-    // up here instead of starting blank. Only fires when pendingResults
-    // is genuinely empty, which only happens right when a fresh round
-    // starts (template-card click resets it) — normal navigation within
-    // an already-in-progress round (tapping Pass/Fail, capturing a
-    // photo, etc.) never re-runs this function's top-level body in a way
-    // that could clobber answers currently being edited.
-    let restoredDraft = false;
-    if (Object.keys(pendingResults).length === 0) {
-      const draft = loadDraft(currentTemplate.TemplateID, currentShift);
-      if (draft && draft.results && Object.keys(draft.results).length) {
-        pendingResults = draft.results;
-        if (draft.performedBy) pendingPerformedBy = draft.performedBy;
-        restoredDraft = true;
-      }
-    }
-
     const items = itemsCache
       .filter(i => i.TemplateID === currentTemplate.TemplateID)
       .filter(i => !isDaily || i.ShiftApplicability === 'Both' || i.ShiftApplicability === currentShift ||
@@ -4003,19 +4039,73 @@ const HSModule = (function () {
       .filter(i => !(isShiftBased && /diesel level (before|after) top up/i.test(i.CheckItem)))
       .sort((a, b) => (parseInt(a.SeqNo, 10) || 0) - (parseInt(b.SeqNo, 10) || 0));
 
+    // FLOOR PICKER — FloorWise=TRUE templates only (e.g. Club House
+    // Monthly). Shows one button per floor instead of one combined form,
+    // so each floor can be filled and submitted on its own. Falls through
+    // to the normal combined form below if the flag isn't set, or if
+    // detectFloorGroups can't cleanly split these items into 2+ floors.
+    const isFloorWise = currentTemplate.FloorWise === 'TRUE' || currentTemplate.FloorWise === 'true';
+    const floorGroups = isFloorWise ? detectFloorGroups(items) : null;
+    if (floorGroups && !currentFloor) {
+      const floorBtn = (floor) => {
+        if (hasSubmittedTodayForFloor(currentTemplate.TemplateID, floor)) {
+          return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${escapeHtml(floor)} — Already submitted today</button>`;
+        }
+        return `<button class="btn-primary hs-floor-btn" data-floor="${escapeHtml(floor)}" style="width:100%;margin-bottom:8px;">${escapeHtml(floor)}</button>`;
+      };
+      container.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="hs-back-scan" class="btn-secondary">← Back</button>
+          <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        </div>
+        <div class="card" style="max-width:420px;margin:0;">
+          <p class="muted" style="margin:0 0 10px;">Which floor/section is this for? Each one can be filled in and submitted on its own, with its own notes.</p>
+          ${floorGroups.map(g => floorBtn(g.floor)).join('')}
+        </div>
+      `;
+      container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
+      container.querySelectorAll('.hs-floor-btn').forEach(btn => {
+        btn.addEventListener('click', () => { currentFloor = btn.dataset.floor; pendingResults = {}; renderChecklistForm(container); });
+      });
+      return;
+    }
+    // Once a floor is chosen (or this isn't a FloorWise template at all),
+    // the rest of the form works exactly as before, just scoped to that
+    // floor's items when floorGroups is set.
+    const floorItems = (floorGroups && currentFloor) ? items.filter(i => floorNameOf(i.CheckItem) === currentFloor) : items;
+
+    // RESTORE IN-PROGRESS DRAFT — if this exact round/shift/floor was
+    // already partway filled in before the page got reloaded (see the IN-
+    // PROGRESS ROUND DRAFT block above hasSubmittedToday), pick it back
+    // up here instead of starting blank. Only fires when pendingResults
+    // is genuinely empty, which only happens right when a fresh round
+    // starts (template-card / floor-button click resets it) — normal
+    // navigation within an already-in-progress round (tapping Pass/Fail,
+    // capturing a photo, etc.) never re-runs this function's top-level
+    // body in a way that could clobber answers currently being edited.
+    let restoredDraft = false;
+    if (Object.keys(pendingResults).length === 0) {
+      const draft = loadDraft(currentTemplate.TemplateID, currentFloor || currentShift);
+      if (draft && draft.results && Object.keys(draft.results).length) {
+        pendingResults = draft.results;
+        if (draft.performedBy) pendingPerformedBy = draft.performedBy;
+        restoredDraft = true;
+      }
+    }
+
     // Preload the last recorded reading for any running-hours meter on
     // this template, so the live backwards-reading guard below has it
     // ready the moment the technician starts typing. (Diesel Level
     // Before Top Up used to be preloaded here too, back when it was
     // force-included on this form — no longer relevant now that it's
     // excluded above.)
-    await Promise.all(items.filter(i => /running hours/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
+    await Promise.all(floorItems.filter(i => /running hours/i.test(i.CheckItem)).map(i => loadLastReadingFor(i.ItemID)));
 
     const showZone = currentTemplate.ShowZoneOfDay === 'TRUE' || currentTemplate.ShowZoneOfDay === 'true';
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="hs-back-scan" class="btn-secondary">← Back</button>
-        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : isRoundBased ? ' — ' + shiftLabel(currentShift) : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
+        <strong>${FREQUENCY_LABEL[currentTemplate.Frequency]}${isShiftBased ? ' (' + shiftLabel(currentShift) + ' shift)' : isRoundBased ? ' — ' + shiftLabel(currentShift) : currentFloor ? ' — ' + escapeHtml(currentFloor) : ''} — ${escapeHtml(categoryLabel(currentScan.qrTarget))}</strong>
       </div>
       ${showZone ? `<div class="card" style="max-width:600px;margin:0 0 12px 0;background:#eef6fb;"><p style="margin:0;font-weight:700;color:var(--mvoa-blue);">📍 Today's Zone: ${escapeHtml(landscapeZoneForToday())}</p></div>` : ''}
       ${restoredDraft ? `<div class="card" style="max-width:600px;margin:0 0 12px 0;background:#fff8e1;"><p style="margin:0;font-weight:700;color:#8a6d00;">↺ Restored your progress from before the app closed — anything already filled in or photographed is still here.</p></div>` : ''}
@@ -4030,22 +4120,25 @@ const HSModule = (function () {
         <label>Overall Notes ${currentTemplate.RequireOverallNotes === 'TRUE' || currentTemplate.RequireOverallNotes === 'true' ? '(required)' : '(optional)'}
           <textarea id="hs-overall-notes" rows="2"></textarea>
         </label>`}
-        <button id="hs-submit-btn" class="btn-primary" style="width:100%;margin-top:8px;">Submit Checklist</button>
+        <button id="hs-submit-btn" class="btn-primary" style="width:100%;margin-top:8px;">Submit${currentFloor ? ' ' + escapeHtml(currentFloor) : ''} Checklist</button>
         <p class="error-text" id="hs-form-error"></p>
       </div>
     `;
     container.querySelector('#hs-performed-by').addEventListener('input', (e) => { pendingPerformedBy = e.target.value; saveDraftDebounced(); });
-    container.querySelector('#hs-back-scan').addEventListener('click', () => { currentShift = ''; renderScanResult(container); });
+    container.querySelector('#hs-back-scan').addEventListener('click', () => {
+      if (floorGroups) { currentFloor = ''; pendingResults = {}; renderChecklistForm(container); }
+      else { currentShift = ''; renderScanResult(container); }
+    });
 
     const listEl = container.querySelector('#hs-items-list');
-    if (!items.length) {
+    if (!floorItems.length) {
       listEl.innerHTML = `<p class="muted">No checklist items set up for this template${isShiftBased ? ' / shift' : ''}.</p>`;
     } else {
-      listEl.innerHTML = items.map(item => renderItemRow(item)).join('');
-      wireItemInputs(listEl, items);
+      listEl.innerHTML = floorItems.map(item => renderItemRow(item)).join('');
+      wireItemInputs(listEl, floorItems);
     }
 
-    container.querySelector('#hs-submit-btn').addEventListener('click', () => submitChecklist(container, items));
+    container.querySelector('#hs-submit-btn').addEventListener('click', () => submitChecklist(container, floorItems, !!floorGroups));
   }
 
   function renderItemRow(item) {
@@ -4433,7 +4526,7 @@ const HSModule = (function () {
   // Daily Ops task (assigned to Facility Manager) for every Fail.
   // ───────────────────────────────────────────────────────────
   let isSubmittingChecklist = false;
-  async function submitChecklist(container, items) {
+  async function submitChecklist(container, items, isFloorWise) {
     if (isSubmittingChecklist) return;
     const errEl = container.querySelector('#hs-form-error');
     // Guard against racing an in-flight photo upload (started by
@@ -4446,10 +4539,18 @@ const HSModule = (function () {
     }
     const isShiftBased = currentTemplate.ShiftBased === 'TRUE' || currentTemplate.ShiftBased === 'true';
     const isRoundBased = currentTemplate.RoundBased === 'TRUE' || currentTemplate.RoundBased === 'true';
-    // Authoritative re-check right before writing — the shift-selection
-    // screen already hides an already-done shift, but re-verify here in
-    // case of a stale cache or two tabs racing each other.
-    if (hasSubmittedToday(currentTemplate.TemplateID, (isShiftBased || isRoundBased) ? currentShift : null)) {
+    // Authoritative re-check right before writing — the shift/floor-
+    // selection screen already hides an already-done shift/floor, but
+    // re-verify here in case of a stale cache or two tabs racing each
+    // other. FloorWise templates check per-floor (via AssetName on the
+    // log row) instead of per-template, since a different floor is a
+    // legitimate separate submission on the same day.
+    if (isFloorWise) {
+      if (hasSubmittedTodayForFloor(currentTemplate.TemplateID, currentFloor)) {
+        errEl.textContent = `${currentFloor} has already been submitted today for this checklist.`;
+        return;
+      }
+    } else if (hasSubmittedToday(currentTemplate.TemplateID, (isShiftBased || isRoundBased) ? currentShift : null)) {
       errEl.textContent = (isShiftBased || isRoundBased)
         ? `${shiftLabel(currentShift)} has already been submitted today for this checklist.`
         : 'This checklist has already been submitted today.';
@@ -4567,8 +4668,11 @@ const HSModule = (function () {
         // Carries which physical instance this log belongs to, for
         // categories with multiple scannable units sharing one template
         // (e.g. 18 Distribution Panels) — blank for single-instance
-        // categories (DG Set etc.), same as always.
-        AssetID: currentScan.assetId || '', AssetName: currentScan.assetName || ''
+        // categories (DG Set etc.), same as always. FloorWise templates
+        // (e.g. Club House Monthly) reuse this same column to carry which
+        // floor this particular log row covers, since a FloorWise
+        // template is never also a multi-asset QR-scanned one.
+        AssetID: currentScan.assetId || '', AssetName: isFloorWise ? currentFloor : (currentScan.assetName || '')
       })[c]);
       await MVOA.sheetsAppend(MVOA.TABS.hsLog, logRow);
 
@@ -4688,10 +4792,18 @@ const HSModule = (function () {
         }
       }
 
-      clearDraft(currentTemplate.TemplateID, currentShift); // round is fully saved now — no reason to keep the in-progress copy around
-      await loadAll(); // refresh due-status cache for the next scan
-      currentTemplate = null; currentShift = ''; pendingResults = {};
-      renderScanResult(container);
+      clearDraft(currentTemplate.TemplateID, currentFloor || currentShift); // round is fully saved now — no reason to keep the in-progress copy around
+      await loadAll(); // refresh due-status cache for the next scan/floor
+      if (isFloorWise) {
+        // Back to the floor picker (not out to the scan screen) — that
+        // floor now shows as submitted, and the technician can carry
+        // straight on to the next floor without re-scanning.
+        currentFloor = ''; pendingResults = {};
+        renderChecklistForm(container);
+      } else {
+        currentTemplate = null; currentShift = ''; pendingResults = {};
+        renderScanResult(container);
+      }
     } catch (e) {
       errEl.textContent = 'Could not submit: ' + e.message;
       submitBtn.disabled = false;
