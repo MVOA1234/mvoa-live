@@ -323,11 +323,21 @@ const MVOA = (function () {
 
   async function sheetsAppend(sheetName, row) {
     const token = await getServiceAccountToken();
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+    // Anchored to !A1 rather than the bare sheet name — see the comment on
+    // sheetsAppendMany below for why. Root-caused 31-Aug-2026 against a live
+    // FinanceRequests sheet: multiple genuine submissions landed as real
+    // rows but with every value shifted dozens of columns right of column A
+    // (and the shift grew with each successive append), leaving column A
+    // blank on every one — which made rowToObj() read RequestID as empty
+    // and silently filter every one of those rows out everywhere in the
+    // app (My Requests, Approval Queue), even though the data was never
+    // lost, just misplaced.
+    const anchoredRange = sheetName + '!A1';
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(anchoredRange)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
     const r = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-      body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: [row] })
+      body: JSON.stringify({ range: anchoredRange, majorDimension: 'ROWS', values: [row] })
     });
     if (!r.ok) throw new Error(`Sheets append error (${sheetName}): ${r.status}`);
     clearReadCache(sheetName);
@@ -338,11 +348,20 @@ const MVOA = (function () {
   async function sheetsAppendMany(sheetName, rows) {
     if (!rows.length) return;
     const token = await getServiceAccountToken();
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+    // IMPORTANT: anchor the append range to column A explicitly
+    // ("Sheet!A1"), never just the bare sheet name. Google's values:append
+    // auto-detects "the table" to append below when given a bare sheet
+    // name, and on a sheet with a very wide header row that detection can
+    // mis-locate the table's left edge — silently writing new rows dozens
+    // of columns right of A, with the drift compounding further on every
+    // subsequent append (root-caused 31-Aug-2026, see sheetsAppend above).
+    // Anchoring to !A1 removes the ambiguity entirely.
+    const anchoredRange = sheetName + '!A1';
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CFG.sheetId}/values/${encodeURIComponent(anchoredRange)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
     const r = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-      body: JSON.stringify({ range: sheetName, majorDimension: 'ROWS', values: rows })
+      body: JSON.stringify({ range: anchoredRange, majorDimension: 'ROWS', values: rows })
     });
     if (!r.ok) throw new Error(`Sheets append error (${sheetName}): ${r.status}`);
     clearReadCache(sheetName);
