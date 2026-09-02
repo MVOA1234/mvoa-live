@@ -1184,8 +1184,11 @@
     const daysInMonth = daysInMonthFor(month);
     const capDay = capDayFor(month);
     const [y, m] = month.split('-').map(Number);
+    // Plain day numbers (1, 2, 3…) rather than ordinals (1st, 2nd, 3rd…) —
+    // shorter text lets the print CSS below shrink these columns
+    // considerably, freeing width for the Agency/Staff Name columns.
     const dayHeaders = [];
-    for (let d = 1; d <= daysInMonth; d++) dayHeaders.push(ordinalDay(d));
+    for (let d = 1; d <= daysInMonth; d++) dayHeaders.push(String(d));
     const today = new Date(); today.setHours(0, 0, 0, 0);
 
     let lastAgency = null;
@@ -1539,13 +1542,19 @@
             /* Attendance Record (P/A grid): the generic first-two-column
                rule above (70px each) split evenly between Agency and Staff
                Name, so a name like "Srikanth Nagalingam" had nowhere to
-               break except mid-word. Give Agency less and Staff Name more
-               so the first name fits on one line and only a second word
-               wraps to a second line; the day columns (P/A, one character
-               each) shrink automatically since table-layout:fixed divides
-               the remaining width across them. */
-            .att-pa-grid th:first-child, .att-pa-grid td:first-child { width: 34px; }
-            .att-pa-grid th:nth-child(2), .att-pa-grid td:nth-child(2) { width: 92px; }
+               break except mid-word. Give Agency and Staff Name enough
+               room to fit on one line (or wrap cleanly to two whole words)
+               and squeeze every day column down to just what a 1-2 digit
+               day number plus the P/A/🚩 mark needs — day headers are now
+               plain numbers (1, 2, 3…) rather than ordinals (1st, 2nd,
+               3rd…), so they no longer need the wider column ordinals did.
+               !important is needed on all three because table-layout:fixed
+               sizes columns from the header cells' inline width="" hints
+               (80px/140px/36px, set for the on-screen scrollable view),
+               which would otherwise outrank these plain class rules. */
+            .att-pa-grid th:first-child, .att-pa-grid td:first-child { width: 70px !important; }
+            .att-pa-grid th:nth-child(2), .att-pa-grid td:nth-child(2) { width: 190px !important; }
+            .att-pa-grid th:nth-child(n+3), .att-pa-grid td:nth-child(n+3) { width: 15px !important; }
             /* Weekly Off Compliance: same narrow-Agency/wider-Name split as
                the Attendance Record grid above — only a handful of week
                columns per month, so they don't need shrinking. */
