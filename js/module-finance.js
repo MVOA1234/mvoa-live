@@ -63,12 +63,20 @@
 //
 // Approval routing is data-driven from FinanceApprovalRules (the DoFA
 // matrix), not hardcoded — see resolveRule() and the approver-matching
-// helpers below. Petty Cash is one category ("Petty Cash") with an
-// internal Type toggle — Expense (deducted live from a ₹15,000 float,
-// settles as soon as Approved, never enters Payments/Disbursement) vs
-// Replenishment (Secretary admin approval → Payments tab: Accountant
-// logs → Treasurer reviews → Disbursement Officer pays out). See
-// computeFloatBalance() / isPettyCashExpense().
+// helpers below. Petty Cash draws against a ₹15,000 float (see
+// computeFloatBalance) via two Payment Types on "New Payment Request":
+// "Petty Cash Replenishment" (tops the float back up — Secretary →
+// Treasurer → Accountant logs → Treasurer reviews → Disbursement
+// Officer actually pays it out) and "Petty Cash Payment" (settles a
+// spend against the float — same chain, but the second Treasurer
+// approval closes it straight to Paid by adjusting the float, no
+// Disbursement Officer step). For spends over ₹1,000, a Secretary &
+// Treasurer Approval-to-Spend (Category "Petty Cash", the internal
+// PettyCashType "Expense") is required BEFORE spending, and the "Petty
+// Cash Payment" Payment Request is then submitted linked to it — see
+// isPettyCashExpense() and isPettyCashPaymentRequest(). Spends of
+// ₹1,000 or under skip that pre-approval and go straight to a
+// (LinkedSpendRequestID-less) "Petty Cash Payment" Payment Request.
 // ═══════════════════════════════════════════════════════════════
 
 MVOA.registerModule('finance', {
@@ -1646,6 +1654,18 @@ const FinanceModule = (function () {
   const PETTY_CASH_FLOAT_TARGET = 15000;
   const PETTY_CASH_OPERATIONAL_MIN = 2000;
   const PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE = 'Petty Cash Replenishment';
+  // The back-half settlement Payment Type for BOTH Petty Cash tiers
+  // (≤₹1,000, submitted directly with no prior Spend Approval; >₹1,000,
+  // linked via LinkedSpendRequestID to an existing Approval-to-Spend).
+  // Added Sept 2026 per the Petty Cash redesign — previously any Petty
+  // Cash Expense settled instantly on Spend Approval alone (see the old
+  // isPettyCashExpense comment, kept below for history); now settlement
+  // always happens off a Payment Request of this type, same pipeline as
+  // every other payment (FM → Secretary → Treasurer → Accountant Expense
+  // Sheet → Treasurer review again → settle), just skipping the
+  // Disbursement Officer at the very end since no real bank payment
+  // happens — see the isPettyCashSettlement branch in treasurerApprove.
+  const PETTY_CASH_PAYMENT_TYPE = 'Petty Cash Payment';
   // Matches a Replenishment either the OLD way (Category='Petty Cash',
   // PettyCashType='Replenishment' — pre-existing rows from before this
   // moved into Payment Requests) or the NEW way (a genuine Payment
@@ -1656,35 +1676,60 @@ const FinanceModule = (function () {
     return (r.Category === 'Petty Cash' && r.PettyCashType === 'Replenishment') ||
       (r.RequestType === 'PaymentRequest' && r.Category === PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE);
   }
+  // A genuine "Petty Cash Payment" Payment Request — the settlement
+  // request that actually draws down the float (see computeFloatBalance).
+  // There's no "old way" to recognize here (unlike Replenishment) — this
+  // Payment Type is new.
+  function isPettyCashPaymentRequest(r) {
+    return r.RequestType === 'PaymentRequest' && r.Category === PETTY_CASH_PAYMENT_TYPE;
+  }
+  // Float only moves once real settlement happens: a "Petty Cash Payment"
+  // Payment Request deducts, a Replenishment adds back, and BOTH only
+  // count once actually paid out (DisbursementStage === 'Paid') — for a
+  // Petty Cash Payment that "paid out" moment is the Treasurer's second
+  // approval (of the Expense Sheet entry), which settles it straight to
+  // 'Paid' by adjusting the float rather than routing to a Disbursement
+  // Officer (see treasurerApprove's isPettyCashSettlement branch).
   function computeFloatBalance() {
     const expenseSum = requestsCache
-      .filter(r => r.Category === 'Petty Cash' && r.PettyCashType === 'Expense' && r.Status === 'Approved')
+      .filter(r => isPettyCashPaymentRequest(r) && r.Status === 'Approved' && r.DisbursementStage === 'Paid')
       .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
     const replenishedSum = requestsCache
       .filter(r => isReplenishmentRequest(r) && r.Status === 'Approved' && r.DisbursementStage === 'Paid')
       .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
     return PETTY_CASH_FLOAT_TARGET - expenseSum + replenishedSum;
   }
-  // A Petty Cash Expense is fully settled the moment it's Approved — the
-  // FM already paid it out of the float, so unlike every other category
-  // it never enters the Payments/Disbursement pipeline. (Replenishment
-  // requests DO go through Payments as normal — this only excludes
-  // Expense.)
+  // A Schedule A/B/C Spend-Approval row for Petty Cash's >₹1,000 tier
+  // (Category='Petty Cash', PettyCashType='Expense') — this is ONLY the
+  // pre-spend Approval-to-Spend step now (Secretary & Treasurer sign off
+  // BEFORE the FM spends); it is Approved just like any other
+  // Approval-to-Spend and then waits for the FM to submit a linked
+  // "Petty Cash Payment" Payment Request (see isSupersededByPaymentRequest)
+  // — it no longer settles by itself. (Kept the old name since it's
+  // still widely used as a structural check — e.g. to keep it out of the
+  // Accountant's direct "log Expense Sheet entry" queue, since a Petty
+  // Cash entry always comes in via its linked Payment Request instead.)
+  //
+  // Before Sept 2026 this used to mean "fully settled the instant it's
+  // Approved" — if any already-Approved-but-unlinked Petty Cash Expense
+  // rows exist from before this change, submit a "Petty Cash Payment"
+  // Payment Request (linked to each) to carry them through the new
+  // settlement pipeline; computeFloatBalance no longer counts them until
+  // that happens.
   function isPettyCashExpense(r) {
     return r.Category === 'Petty Cash' && r.PettyCashType === 'Expense';
   }
   // A request is fully "done" — nothing further will ever happen to it —
-  // once it's Rejected, settled as a Petty Cash Expense, or has actually
-  // been paid out (PaymentStatus/DisbursementStage both get set to 'Paid'
-  // together, see releasePayment — checking either is belt-and-braces).
-  // Used to keep "done" items out of the "N open" tab-count badges (see
-  // countNewOpen) — being fully resolved is a different thing from being
-  // "not new", and conflating the two made completed/Paid requests read
-  // as if they still needed attention.
+  // once it's Rejected, or has actually been paid out (PaymentStatus/
+  // DisbursementStage both get set to 'Paid' together, see releasePayment
+  // and treasurerApprove's isPettyCashSettlement branch — checking either
+  // is belt-and-braces). Used to keep "done" items out of the "N open"
+  // tab-count badges (see countNewOpen) — being fully resolved is a
+  // different thing from being "not new", and conflating the two made
+  // completed/Paid requests read as if they still needed attention.
   function isRequestTerminal(r) {
     if (r.Status === 'Rejected') return true;
     if (r.Status !== 'Approved') return false;
-    if (isPettyCashExpense(r)) return true;
     return r.DisbursementStage === 'Paid' || r.PaymentStatus === 'Paid';
   }
   // An Approval-to-Spend (RequestType !== 'PaymentRequest') that has since
@@ -2091,9 +2136,6 @@ const FinanceModule = (function () {
       if (state.stage === 'AGM') return { text: `Awaiting AGM approval${sinceText(request)}`, cls: 'pending' };
       return { text: `Pending approval${sinceText(request)}`, cls: 'pending' };
     }
-    // Petty Cash Expense is fully settled the moment it's Approved — no
-    // Payments/Disbursement chain follows (already paid from the float).
-    if (isPettyCashExpense(request)) return { text: 'Approved — adjusted against Petty Cash Float', cls: 'paid' };
     // An Approval-to-Spend that's been superseded by a linked Payment
     // Request (see isSupersededByPaymentRequest) never gets its OWN
     // DisbursementStage set — the actual expense-sheet entry and payout
@@ -2120,6 +2162,15 @@ const FinanceModule = (function () {
         return { text: `Linked Payment Request ${active.RequestID} submitted — awaiting its own approvals`, cls: 'pending' };
       }
       return { text: `Payment in progress — see linked Payment Request ${active.RequestID}`, cls: 'approved' };
+    }
+    // A Petty Cash Expense Approval-to-Spend (>₹1,000 tier) that's
+    // Approved but has no Payment Request linked yet — never enters the
+    // Accountant's direct queue (see isPettyCashExpense), so without this
+    // it would otherwise fall into the generic "awaiting Expense Sheet
+    // entry" default below, which isn't true until the FM actually
+    // submits the linked Payment Request.
+    if (isPettyCashExpense(request)) {
+      return { text: `Approved — awaiting linked "${PETTY_CASH_PAYMENT_TYPE}" Payment Request (FM)${sinceText(request)}`, cls: 'approved' };
     }
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
@@ -2365,14 +2416,13 @@ const FinanceModule = (function () {
     });
     const paidThisMonthAmount = paidThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
 
-    // Petty Cash Expense settles the moment it's Approved (see
-    // isPettyCashExpense's header comment) — StageEnteredAt is stamped at
-    // that exact moment (falling back to RequestedDate for older rows from
-    // before StageEnteredAt existed), same "this month" convention as
-    // Paid This Month above.
+    // Petty Cash now settles off a "Petty Cash Payment" Payment Request's
+    // Treasurer-approved PaymentDate (see computeFloatBalance) rather than
+    // the moment its Spend Approval — if any — is granted, same "this
+    // month" convention as Paid This Month above.
     const pettyCashSpendThisMonthRows = requestsCache.filter(r => {
-      if (!isPettyCashExpense(r) || r.Status !== 'Approved') return false;
-      const d = new Date(r.StageEnteredAt || r.RequestedDate);
+      if (!isPettyCashPaymentRequest(r) || r.Status !== 'Approved' || r.DisbursementStage !== 'Paid' || !r.PaymentDate) return false;
+      const d = new Date(r.PaymentDate);
       return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
     });
     const pettyCashSpendThisMonthAmount = pettyCashSpendThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
@@ -3912,7 +3962,9 @@ const FinanceModule = (function () {
         ${stage === 'NeedsCorrection' ? '<p style="margin:3px 0;color:#b3261e;">🔁 Sent back by Treasurer for correction — waiting on Accountant</p>' : ''}
         ${steps.map(s => `<p style="margin:3px 0;color:${s.done ? 'green' : 'inherit'};" class="${s.done ? '' : 'muted'}">${s.done ? '✅' : '⏳'} ${s.label}</p>`).join('')}`;
     } else if (isPettyCashExpense(request) && request.Status === 'Approved') {
-      paymentsTrailHtml = `<p style="margin:10px 0 3px;color:green;">✅ Adjusted against Petty Cash Float — no separate payment release needed</p>`;
+      // Approved (Secretary & Treasurer, pre-spend) but no Payment
+      // Request linked yet — see stageDescription's matching branch.
+      paymentsTrailHtml = `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Approved to spend — awaiting a linked "${PETTY_CASH_PAYMENT_TYPE}" Payment Request from the FM</p>`;
     }
 
     return `
@@ -3927,8 +3979,8 @@ const FinanceModule = (function () {
 
   function displayStatus(request) {
     if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
-    if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge('Settled — Petty Cash Float', 'paid');
     if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return statusBadge('Paid', 'paid');
+    if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge(`Approved — awaiting linked Payment Request${sinceText(request)}`, 'approved');
     if (request.Status === 'Approved') return statusBadge(`Approved — awaiting payment${sinceText(request)}`, 'approved');
     return statusBadge(`Pending approval${sinceText(request)}`, 'pending');
   }
@@ -5188,6 +5240,16 @@ const FinanceModule = (function () {
         updatedEntry.Date = formatDate(req.ProcurementDate);
         updatedEntry.Bank = req.ProcurementBank || entry.row.Bank || '';
       }
+      // A "Petty Cash Payment" Payment Request settles by adjusting the
+      // float, not by an actual bank/cheque disbursement — no UD Number
+      // or Bank to collect, so skip the Disbursement Officer step
+      // entirely and close the request straight to Paid on this second
+      // Treasurer approval, same as every other payment except for that
+      // one skipped step. computeFloatBalance() picks up the deduction
+      // the moment DisbursementStage flips to 'Paid', exactly the way a
+      // Replenishment's amount is only added back once ITS
+      // DisbursementStage is 'Paid'.
+      const isPettyCashSettlement = !alreadyPaid && isPettyCashPaymentRequest(req);
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
       const now = new Date().toISOString();
       const updatedReq = alreadyPaid
@@ -5196,12 +5258,18 @@ const FinanceModule = (function () {
             PaymentStatus: 'Paid', PaymentDate: req.ProcurementDate || now, PaymentRef: req.ProcurementRef,
             ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now, StageOpenedAt: ''
           })
+        : isPettyCashSettlement
+        ? Object.assign({}, req, {
+            DisbursementStage: 'Paid', ExpenseRow: entry.rowNumber,
+            PaymentStatus: 'Paid', PaymentDate: now, PaymentRef: 'Adjusted against Petty Cash Float',
+            ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now, StageOpenedAt: ''
+          })
         : Object.assign({}, req, { DisbursementStage: 'PendingPayment', ExpenseRow: entry.rowNumber, StageEnteredAt: now, StageOpenedAt: '' });
       await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updatedReq));
       await MVOA.logAudit({
         module: 'Finance', requestId,
-        eventType: alreadyPaid ? 'Treasurer approved — payment already made, closed' : 'Treasurer approved',
-        comment: '', statusAfter: alreadyPaid ? 'Paid' : 'PendingPayment'
+        eventType: alreadyPaid ? 'Treasurer approved — payment already made, closed' : isPettyCashSettlement ? 'Treasurer approved — settled against Petty Cash Float' : 'Treasurer approved',
+        comment: '', statusAfter: (alreadyPaid || isPettyCashSettlement) ? 'Paid' : 'PendingPayment'
       });
       await loadAll(true);
       render(container);
