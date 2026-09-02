@@ -1231,20 +1231,28 @@
     // through a full month of day columns (same sticky pattern as the
     // Attendance Log/Agencies/Staff tables). table-layout:fixed was tried
     // here to lock in the sticky columns' widths, but this table's first
-    // <thead> row is a single colspan title cell with no per-column width
-    // of its own — with fixed layout, browsers don't reliably fall back to
-    // the second row (the real column headers) to size each column from,
-    // so every column collapsed to near-zero width and the day numbers
-    // rendered on top of the Agency/Name text instead of beside it. Left
-    // at the default auto layout (same as the working Check-in/Check-out
-    // Times grid below, which has the identical title-row shape and was
-    // never broken), the browser sizes columns from actual cell content —
-    // the inline `width` hints still apply as sizing hints, close enough
-    // to keep the two sticky columns' left:0/80px offsets lined up.
+    // <thead> row USED TO BE a single colspan title cell with no per-column
+    // width of its own — with fixed layout, browsers don't reliably fall
+    // back to the second row (the real column headers) to size each column
+    // from, so every column collapsed to near-zero width and the day
+    // numbers rendered on top of the Agency/Name text instead of beside it.
+    // On-screen this stayed at the default auto layout (harmless), but the
+    // print CSS below forces table-layout:fixed to keep a full month on one
+    // printable page width — and hit exactly that same collapse, breaking
+    // "Agency"/"Staff Name" mid-word even after widening their print
+    // column-width rules, because those rules target the SECOND row's
+    // cells while the fixed-layout algorithm was reading (and failing to
+    // use) the title row's single colspan cell as row one. Moving the
+    // title into a <caption> — which isn't a row at all — makes the real
+    // header row (Agency/Staff Name/days) the actual first row, so
+    // table-layout:fixed sizes every column from ITS cell widths exactly
+    // as the print CSS's th:first-child/th:nth-child(2)/th:nth-child(n+3)
+    // rules intend. Purely visual on-screen (auto layout doesn't care
+    // whether the title is a caption or a row), so nothing there changes.
     return `
       <table class="mvoa-table att-pa-grid">
+        <caption style="caption-side:top;text-align:center;font-weight:600;padding:4px 0 8px;">Attendance Record for the Month of ${escapeHtml(monthLabel)}</caption>
         <thead>
-          <tr><th colspan="${2 + daysInMonth}" style="text-align:center;">Attendance Record for the Month of ${escapeHtml(monthLabel)}</th></tr>
           <tr><th style="position:sticky;top:0;left:0;z-index:3;background:#eef2f6;width:80px;">Agency</th><th style="position:sticky;top:0;left:80px;z-index:3;background:#eef2f6;width:140px;">Staff Name</th>${dayHeaders.map(h => `<th style="position:sticky;top:0;z-index:2;background:#eef2f6;width:36px;text-align:center;">${h}</th>`).join('')}</tr>
         </thead>
         <tbody>
