@@ -4987,6 +4987,7 @@ const FinanceModule = (function () {
               <option value="">— Select Bank used for this payment —</option>
               <option value="HDFC">HDFC</option>
               <option value="IOB">IOB</option>
+              <option value="Amazon Pay Balance">Amazon Pay Balance</option>
             </select>
             <input type="text" class="fin-proc-ref" data-request-id="${escapeHtml(req.RequestID)}" placeholder="Payment reference (UTR / Order ID / Card txn ref)" style="width:100%;margin-bottom:6px;box-sizing:border-box;">
             <label class="muted" style="font-size:0.8rem;">Date paid
@@ -5027,6 +5028,7 @@ const FinanceModule = (function () {
               <option value="">— Select Bank —</option>
               <option value="HDFC">HDFC</option>
               <option value="IOB">IOB</option>
+              <option value="Amazon Pay Balance">Amazon Pay Balance</option>
             </select>
             <input type="text" class="fin-ud-number" data-request-id="${escapeHtml(req.RequestID)}" placeholder="UD Number / Cheque / UTR" style="width:100%;margin-bottom:6px;">
             <button class="btn-primary fin-disburse-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Release Payment</button>
