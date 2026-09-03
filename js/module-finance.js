@@ -4038,6 +4038,16 @@ const FinanceModule = (function () {
           ${req && req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
           ${a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : ''}
+          ${
+            // "Visible to the previous level" (Sept 2026 instruction, when
+            // Send Back was removed): this approver's OWN decision here was
+            // Approved, but the request was later Rejected by someone else
+            // further down the chain — surface that outcome right on this
+            // card instead of leaving it discoverable only via View
+            // Details, so a previous-stage approver actually sees it
+            // without having to go looking.
+            ok && req && req.Status === 'Rejected' ? rejectionDetailHtml(req, allApprovals.filter(x => x.RequestID === a.RequestID)) : ''
+          }
           ${req && hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
           ${req ? notesButtonHtml(req, noteCount, 'fin-myapproval-notes-toggle', `data-idx="${i}" style="margin-top:6px;"`) : ''}
@@ -4291,18 +4301,20 @@ const FinanceModule = (function () {
       // instead of a live Approve button once this user has a recorded
       // Approved decision at the CURRENT stage.
       const alreadyVoted = !!(state.stage && approvals.some(a => a.Stage === state.stage && a.Decision === 'Approved' && a.ApproverName === user.name));
-      // Bug found in testing: a requester who ALSO happens to hold an
-      // approving role can end up reviewing their own request (small-org
-      // reality — the same person often wears both hats). Approving it
-      // themselves is fine (and already an accepted pattern elsewhere in
-      // this module — see the auto-approval-on-submit path). But Send
-      // Back makes no sense directed at yourself: at the very first
-      // required stage it dumps the request into "With Requester" —
-      // which IS them — leaving it sitting there waiting on the same
-      // person to "resubmit" to themselves, a confusing dead end that's
-      // exactly what happened to the Sewage Removal Payments test case.
-      // Per explicit instruction: "Originator cannot send back."
-      const isOwnRequest = req.RequestedBy === user.name;
+      // Send Back was removed per explicit instruction (Sept 2026 —
+      // "as these transactions are not too many, better we remove the
+      // send back option and keep only approve or reject"). Every
+      // approval stage now only ever offers Approve or Reject — no
+      // partial "kick it back one level" option. A requester who also
+      // holds an approving role can still Approve or Reject their own
+      // request (an accepted small-org pattern elsewhere in this
+      // module), so isOwnRequest no longer needs to gate anything here.
+      // NOTE: walkStageChain/walkAtsStageChain/computePaymentRequestState
+      // still know how to interpret a HISTORICAL 'SentBack' approval row
+      // (e.g. any request already sent back before this change shipped)
+      // — that logic was deliberately left in place so those in-flight
+      // requests keep resolving correctly; only the buttons that could
+      // CREATE a new SentBack decision were removed.
       const div = document.createElement('div');
       div.className = 'mvoa-list-item';
       div.innerHTML = `
@@ -4318,11 +4330,9 @@ const FinanceModule = (function () {
         ${attachmentLinksHtml(req)}
         ${state.stage === 'EC' ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">${state.ecCount} of ${state.quorum} EC approvals so far</p>` : ''}
         ${hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
-        ${!currentSectionCanEdit ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">👁️ Read only — you can't approve, send back, or reject.</p>` : ''}
-        ${currentSectionCanEdit && isOwnRequest ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">🔁 Send Back isn't available on your own request — you can Approve or Reject it.</p>` : ''}
+        ${!currentSectionCanEdit ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">👁️ Read only — you can't approve or reject.</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           ${!currentSectionCanEdit ? '' : alreadyVoted ? '' : `<button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>`}
-          ${currentSectionCanEdit && !isOwnRequest ? `<button class="btn-secondary fin-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">🔁 Send Back</button>` : ''}
           ${currentSectionCanEdit && state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-queue-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}"`)}
         </div>
@@ -4353,12 +4363,6 @@ const FinanceModule = (function () {
     // "alreadyVoted" state) takes its place.
     cardsEl.querySelectorAll('.fin-approve-btn').forEach(btn => {
       btn.addEventListener('click', () => runOnce(btn, 'Approving…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Approved', container)));
-    });
-    cardsEl.querySelectorAll('.fin-sendback-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const comment = prompt('Reason for sending this back one level (required) — e.g. "need one more quotation", "please clarify the invoice date":');
-        if (comment && comment.trim()) runOnce(btn, 'Sending…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'SentBack', container, comment.trim()));
-      });
     });
     cardsEl.querySelectorAll('.fin-reject-btn').forEach(btn => {
       btn.addEventListener('click', () => {
