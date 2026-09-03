@@ -736,7 +736,7 @@ const FinanceModule = (function () {
   // MVOA.canViewFinanceSection/canEditFinanceSection) — one per top-level
   // tab. Must match exactly what an admin types as the "Section" for that
   // tab's rows in the PermissionsMatrix_Finance sheet.
-  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard' };
+  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard', pettycash: 'Petty Cash' };
   // Recomputed at the top of render() for whichever top-level tab is
   // currently open — 'Edit' lets every action through exactly as before;
   // 'ReadOnly' (a Title with an explicit Read Only row for this tab) hides
@@ -775,7 +775,7 @@ const FinanceModule = (function () {
     ];
     return [];
   }
-  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard' };
+  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard', pettycash: 'pettycash' };
 
   function render(container) {
     const user = MVOA.getUser();
@@ -837,6 +837,7 @@ const FinanceModule = (function () {
         { key: 'dashboard', label: '📈 Dashboard' },
         { key: 'spend', label: '📝 Spend Approval' },
         { key: 'payment', label: '💵 Payment Approval' },
+        { key: 'pettycash', label: '💰 Petty Cash' },
         { key: 'budget', label: '📊 Budget' },
         { key: 'contracts', label: '📄 Contracts' }
       ];
@@ -896,7 +897,7 @@ const FinanceModule = (function () {
     // hiding that tab from the nav.
     if (!currentSectionCanEdit && (currentView === 'submit' || currentView === 'payreq')) currentView = 'mine';
     const subTabs = subTabsFor(currentTopTab, currentSectionCanEdit);
-    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : '📄 Contracts';
+    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'pettycash' ? '💰 Petty Cash' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : '📄 Contracts';
     const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
     const tabLabelHtml = (t) => t.view === 'myapprovals'
       ? `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`
@@ -946,7 +947,107 @@ const FinanceModule = (function () {
     }
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
     else if (currentView === 'dashboard') renderDashboardTab(body, container);
+    else if (currentView === 'pettycash') renderPettyCashLedger(body, container);
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Petty Cash Ledger tab — monthly Sr No/Date/Description/Expenses/
+  // Replenishments/Balance itemization, with an Opening/Total/Closing
+  // summary. See pettyCashSettledRows()/pettyCashAvailableMonths() above
+  // for exactly which transactions this counts and why.
+  // ───────────────────────────────────────────────────────────
+  function renderPettyCashLedger(body, container) {
+    const months = pettyCashAvailableMonths(); // newest first
+    if (!pettyCashSelectedMonth || !months.includes(pettyCashSelectedMonth)) pettyCashSelectedMonth = months[0];
+    const month = pettyCashSelectedMonth;
+    const monthLabelFor = (m) => {
+      const [y, mm] = m.split('-').map(Number);
+      return new Date(y, mm - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+    };
+    const monthLabel = monthLabelFor(month);
+    const isCurrentMonth = month === currentMonthStr();
+
+    const settled = pettyCashSettledRows();
+    const before = settled.filter(r => r.PaymentDate.slice(0, 7) < month);
+    const inMonth = settled.filter(r => r.PaymentDate.slice(0, 7) === month)
+      .sort((a, b) => a.PaymentDate.localeCompare(b.PaymentDate));
+    const expenseSum = (list) => list.filter(r => isPettyCashPaymentRequest(r)).reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+    const replenishSum = (list) => list.filter(r => isReplenishmentRequest(r)).reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+
+    const openingBalance = PETTY_CASH_FLOAT_TARGET - expenseSum(before) + replenishSum(before);
+    const monthExpense = expenseSum(inMonth);
+    const monthReplenish = replenishSum(inMonth);
+    // For the ongoing month specifically, Closing Balance is pinned to the
+    // live computeFloatBalance() — the actual current balance with the FM
+    // — per explicit instruction, rather than a value derived only from
+    // this month's own rows. (For a fully-elapsed past month the two are
+    // mathematically identical anyway, since computeFloatBalance() is just
+    // the running total across every settled transaction ever — this only
+    // matters as an explicit, unambiguous anchor for "today".)
+    const closingBalance = isCurrentMonth ? computeFloatBalance() : (openingBalance + monthReplenish - monthExpense);
+
+    let running = openingBalance;
+    const rowsHtml = inMonth.map((r, i) => {
+      const isExpense = isPettyCashPaymentRequest(r);
+      const amt = Number(r.Amount) || 0;
+      running += isExpense ? -amt : amt;
+      const desc = r.Description || (isExpense ? 'Petty Cash Payment' : 'Petty Cash Replenishment');
+      return `<tr>
+        <td style="text-align:center;">${i + 1}</td>
+        <td>${formatDate(r.PaymentDate)}</td>
+        <td>${escapeHtml(desc)}${r.Vendor ? ` <span class="muted">— ${escapeHtml(r.Vendor)}</span>` : ''}</td>
+        <td style="text-align:right;color:#b3261e;">${isExpense ? formatAmount(amt) : ''}</td>
+        <td style="text-align:right;color:#1e6b33;">${!isExpense ? formatAmount(amt) : ''}</td>
+        <td style="text-align:right;font-weight:600;">${formatAmount(running)}</td>
+      </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="card">
+        <div class="mvoa-row" style="margin-bottom:14px;flex-wrap:wrap;gap:10px;align-items:center;">
+          <h3 style="margin:0;">💰 Petty Cash Ledger — ${escapeHtml(monthLabel)}</h3>
+          <label style="margin:0;">Month
+            <select id="pc-month-select">
+              ${months.map(m => `<option value="${m}" ${m === month ? 'selected' : ''}>${escapeHtml(monthLabelFor(m))}${m === months[0] ? ' (current)' : ''}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="mvoa-table">
+            <thead>
+              <tr>
+                <th>Sr No</th><th>Date</th><th>Description</th>
+                <th style="text-align:right;">Expenses</th><th style="text-align:right;">Replenishments</th><th style="text-align:right;">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || `<tr><td colspan="6" class="muted" style="text-align:center;">No Petty Cash transactions settled in ${escapeHtml(monthLabel)}.</td></tr>`}
+            </tbody>
+            <tfoot>
+              <tr style="font-weight:600;border-top:2px solid #ccc;">
+                <td colspan="3">Opening Balance</td>
+                <td></td><td></td><td style="text-align:right;">${formatAmount(openingBalance)}</td>
+              </tr>
+              <tr>
+                <td colspan="3">Total for ${escapeHtml(monthLabel)}</td>
+                <td style="text-align:right;color:#b3261e;">${formatAmount(monthExpense)}</td>
+                <td style="text-align:right;color:#1e6b33;">${formatAmount(monthReplenish)}</td>
+                <td></td>
+              </tr>
+              <tr style="font-weight:600;border-top:2px solid #ccc;">
+                <td colspan="3">Closing Balance${isCurrentMonth ? ' — current balance with FM, as of today' : ''}</td>
+                <td></td><td></td><td style="text-align:right;">${formatAmount(closingBalance)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    `;
+    body.querySelector('#pc-month-select').addEventListener('change', (e) => {
+      pettyCashSelectedMonth = e.target.value;
+      renderPettyCashLedger(body, container);
+    });
   }
 
   // ─── Budget Status — Category × FY: Total / Consumed / Available ─
@@ -1759,6 +1860,38 @@ const FinanceModule = (function () {
     return requestsCache.find(r => isReplenishmentRequest(r) &&
       r.Status !== 'Rejected' && !(r.Status === 'Approved' && r.DisbursementStage === 'Paid'));
   }
+
+  // ───────────────────────────────────────────────────────────
+  // Petty Cash Ledger (Sept 2026) — a monthly, itemized Sr No/Date/
+  // Description/Expenses/Replenishments/Balance view, built entirely from
+  // the same settled transactions computeFloatBalance() already sums, so
+  // this ledger's running balance always agrees with the float shown
+  // everywhere else in the app. "Settled" means Status='Approved' AND
+  // DisbursementStage='Paid' — a Petty Cash Payment reaches that the
+  // moment the Treasurer's second approval adjusts the float (see
+  // treasurerApprove's isPettyCashSettlement branch); a Replenishment
+  // reaches it once the Disbursement Officer actually releases the cash.
+  // ───────────────────────────────────────────────────────────
+  function currentMonthStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+  function pettyCashSettledRows() {
+    return requestsCache.filter(r =>
+      (isPettyCashPaymentRequest(r) || isReplenishmentRequest(r)) &&
+      r.Status === 'Approved' && r.DisbursementStage === 'Paid' && r.PaymentDate);
+  }
+  // Every month that has at least one settled transaction, plus the
+  // current calendar month always (so the ledger has somewhere to land
+  // even before the very first Petty Cash Payment/Replenishment of a
+  // fresh month has settled) — newest first, so the current/most recent
+  // month is what the dropdown defaults to.
+  function pettyCashAvailableMonths() {
+    const months = new Set(pettyCashSettledRows().map(r => r.PaymentDate.slice(0, 7)));
+    months.add(currentMonthStr());
+    return [...months].sort().reverse();
+  }
+  let pettyCashSelectedMonth = null; // 'YYYY-MM' — sticky across re-renders of this tab, reset to current month on first open
 
   // ───────────────────────────────────────────────────────────
   // Approver matching — parses strings like "Secretary & President"
