@@ -2758,6 +2758,26 @@ const FinanceModule = (function () {
       .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
   }
 
+  // Total already committed against a single Approval-to-Spend, across
+  // EVERY Payment Request linked to it (an ATS can legitimately back more
+  // than one payment — installments, a multi-year AMC's cycles — see
+  // eligibleSpendRequestsForLinking's comment). Sept 2026 fix: the
+  // "exceeds approved spend" flag used to compare only ONE payment
+  // request's own amount against the ATS amount, so two ₹15,000 payments
+  // against a ₹20,000 approval each individually looked fine and the
+  // ₹10,000 cumulative overrun went completely unflagged. Now every
+  // check sums ALL non-Rejected linked payments (a still-approving one
+  // already represents an intended draw, so it counts before it's even
+  // finished its own chain) — `excludeRequestId` lets an EXISTING payment
+  // request leave itself out of "the others" when it re-adds its own
+  // amount back in, so it isn't counted twice.
+  function totalPaymentsAgainstSpend(atsRequestId, excludeRequestId) {
+    return requestsCache
+      .filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === atsRequestId &&
+        p.Status !== 'Rejected' && p.RequestID !== excludeRequestId)
+      .reduce((sum, p) => sum + (Number(p.Amount) || 0), 0);
+  }
+
   function renderPaymentRequestForm(body, container) {
     if (!paymentRulesCache.length) {
       body.innerHTML = `<p class="muted">Payment Requests aren't set up yet — add rows to the <strong>FinancePaymentRules</strong> sheet (one per Schedule D Payment Type) to enable this.</p>`;
@@ -2971,22 +2991,25 @@ const FinanceModule = (function () {
       }
       // Shows the linked Approval-to-Spend's own approved amount right
       // next to the Amount field, and flags it plainly when this payment
-      // is asking for more than that — the requester (and whoever
-      // approves it) should see the mismatch before submitting, not
-      // discover it later reconciling budget consumption against actual
-      // spend. Only meaningful for the direct Approval-to-Spend link —
-      // a Contract is an ongoing agreement, not a single fixed amount to
-      // compare against.
+      // — ADDED TO every other payment already linked to the same ATS —
+      // would push the running total past that approved amount. The
+      // requester (and whoever approves it) should see the cumulative
+      // mismatch before submitting, not discover it later reconciling
+      // budget consumption against actual spend. Only meaningful for the
+      // direct Approval-to-Spend link — a Contract is an ongoing
+      // agreement, not a single fixed amount to compare against.
       const spendNoteEl = body.querySelector('#pr-spend-amount-note');
       const justWrap = body.querySelector('#pr-overage-justification-wrap');
       if (spendNoteEl) {
         const linkedAts = selectedLinkedSpendRequestId ? requestsCache.find(r => r.RequestID === selectedLinkedSpendRequestId) : null;
         if (linkedAts) {
           const atsAmount = Number(linkedAts.Amount) || 0;
-          const over = amount > 0 && amount > atsAmount;
+          const alreadyLinked = totalPaymentsAgainstSpend(linkedAts.RequestID);
+          const cumulativeTotal = alreadyLinked + amount;
+          const over = amount > 0 && cumulativeTotal > atsAmount;
           spendNoteEl.innerHTML = `
-            <p class="muted" style="margin:4px 0;">Approved to Spend (${escapeHtml(linkedAts.RequestID)}): <strong>${formatAmount(atsAmount)}</strong></p>
-            ${over ? `<p class="error-text" style="margin:4px 0;">⚠️ This payment request (${formatAmount(amount)}) is higher than the approved spend (${formatAmount(atsAmount)} — ${escapeHtml(linkedAts.RequestID)}).</p>` : ''}
+            <p class="muted" style="margin:4px 0;">Approved to Spend (${escapeHtml(linkedAts.RequestID)}): <strong>${formatAmount(atsAmount)}</strong>${alreadyLinked > 0 ? ` — already committed by other payment request(s): <strong>${formatAmount(alreadyLinked)}</strong>` : ''}</p>
+            ${over ? `<p class="error-text" style="margin:4px 0;">⚠️ Adding this payment request (${formatAmount(amount)}) brings the total against this approval to ${formatAmount(cumulativeTotal)}, exceeding the approved spend (${formatAmount(atsAmount)} — ${escapeHtml(linkedAts.RequestID)}).</p>` : ''}
           `;
           // Only (re)built the moment "over" actually changes — see the
           // overageJustificationVisible comment above. Rebuilding this on
@@ -3123,10 +3146,11 @@ const FinanceModule = (function () {
     // not optional: a payment that knowingly exceeds what was approved
     // needs an explanation on record, not just a number in a cell.
     const linkedAtsForSubmit = selectedLinkedSpendRequestId ? requestsCache.find(r => r.RequestID === selectedLinkedSpendRequestId) : null;
-    const isOverApprovedSpend = !!(linkedAtsForSubmit && amount > (Number(linkedAtsForSubmit.Amount) || 0));
+    const isOverApprovedSpend = !!(linkedAtsForSubmit &&
+      (totalPaymentsAgainstSpend(linkedAtsForSubmit.RequestID) + amount) > (Number(linkedAtsForSubmit.Amount) || 0));
     const overageJustification = isOverApprovedSpend ? (body.querySelector('#pr-overage-justification')?.value || '').trim() : '';
     if (isOverApprovedSpend && !overageJustification) {
-      errEl.textContent = 'This payment is higher than the approved spend — please enter a justification before submitting.';
+      errEl.textContent = 'This payment, combined with other payment requests already linked to the same approval, is higher than the approved spend — please enter a justification before submitting.';
       return;
     }
 
@@ -4555,9 +4579,16 @@ const FinanceModule = (function () {
     }
     if (req.LinkedSpendRequestID) {
       const r = requestsCache.find(x => x.RequestID === req.LinkedSpendRequestID);
-      const overAmount = r && Number(req.Amount) > (Number(r.Amount) || 0);
+      // Cumulative across EVERY payment request linked to this same ATS
+      // (see totalPaymentsAgainstSpend) — not just this one's own amount.
+      // Every payment request tied to an over-limit ATS shows the SAME
+      // total and the SAME flag here, regardless of which one happened to
+      // push it over — that's deliberate: the overage is a property of
+      // the approval as a whole, not of whichever payment came last.
+      const cumulativeTotal = r ? totalPaymentsAgainstSpend(r.RequestID, req.RequestID) + (Number(req.Amount) || 0) : 0;
+      const overAmount = r && cumulativeTotal > (Number(r.Amount) || 0);
       return `<p style="margin:4px 0;font-size:0.8rem;">🔗 Approval to Spend: <strong>${escapeHtml(req.LinkedSpendRequestID)}</strong>${r ? ` — ${escapeHtml(r.Category)} — ${escapeHtml(r.Vendor || '')} — ${formatAmount(r.Amount)} (approved ${formatDate(r.RequestedDate)})` : ''}</p>${
-        overAmount ? `<p style="margin:4px 0;font-size:0.8rem;color:#b3261e;">⚠️ This payment (${formatAmount(req.Amount)}) exceeds the approved spend (${formatAmount(r.Amount)})${req.OverageJustification ? ` — <strong>Justification:</strong> ${escapeHtml(req.OverageJustification)}` : ' — no justification on file.'}</p>` : ''
+        overAmount ? `<p style="margin:4px 0;font-size:0.8rem;color:#b3261e;">⚠️ Payments against this approval now total ${formatAmount(cumulativeTotal)}, exceeding the approved spend (${formatAmount(r.Amount)})${req.OverageJustification ? ` — <strong>Justification:</strong> ${escapeHtml(req.OverageJustification)}` : ' — no justification on file.'}</p>` : ''
       }`;
     }
     return `<p style="margin:4px 0;font-size:0.8rem;color:#b3261e;">⚠️ No linked Contract or Approval to Spend on file.</p>`;
