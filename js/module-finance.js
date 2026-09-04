@@ -1531,6 +1531,22 @@ const FinanceModule = (function () {
     const d = new Date(iso);
     return isNaN(d) ? iso : d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
+  // Explicit dd-mm-yyyy, independent of whoever's browser is doing the
+  // formatting. Used for the Expense Sheet's "Approved By"/"Passed By"/
+  // "Date" stamps specifically — those get written ONCE, as plain text,
+  // at the moment someone clicks a button, and toLocaleDateString() with
+  // no locale argument silently follows THAT PERSON's own browser
+  // settings. That's exactly why "Approved By" and "Passed By" on the
+  // same Expense Sheet row could show two different date orderings for
+  // the same day (e.g. "2/9/2026" vs "9/2/2026") — not a display
+  // preference difference, a genuine ambiguity baked into the sheet.
+  // Pass a Date object (or nothing, for "now") — never an already-
+  // formatted string.
+  function formatStampDate(date) {
+    const d = date || new Date();
+    if (isNaN(d)) return '';
+    return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+  }
   function formatKB(bytes) {
     return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round((bytes||0) / 1024) + ' KB';
   }
@@ -5338,7 +5354,7 @@ const FinanceModule = (function () {
     // the Accountant. "Approved By" is a separate sign-off, populated only
     // when the Treasurer approves it (see treasurerApprove below).
     const preparer = MVOA.getUser();
-    const passedByStamp = `${preparer.name} · ${new Date().toLocaleDateString()}`;
+    const passedByStamp = `${preparer.name} · ${formatStampDate()}`;
     const entryRow = {
       RequestID: req.RequestID,
       SlNo: (existing && existing.row.SlNo) || '',
@@ -5394,7 +5410,7 @@ const FinanceModule = (function () {
       // Treasurer's approval of the Expense Sheet entry auto-populates
       // "Approved By" — "Passed By" (the Accountant who logged the entry)
       // is left untouched here.
-      const approvalStamp = `${user.name} · ${new Date().toLocaleDateString()}`;
+      const approvalStamp = `${user.name} · ${formatStampDate()}`;
       const updatedEntry = Object.assign({}, entry.row, { ApprovedBy: approvalStamp });
       // A ProcurementRef on the request means this went through the
       // Disbursement-Officer-procured path (e.g. Online Purchase) — the
@@ -5407,7 +5423,7 @@ const FinanceModule = (function () {
       const alreadyPaid = !!req.ProcurementRef;
       if (alreadyPaid) {
         updatedEntry.UDNumber = req.ProcurementRef;
-        updatedEntry.Date = formatDate(req.ProcurementDate);
+        updatedEntry.Date = req.ProcurementDate ? formatStampDate(new Date(req.ProcurementDate)) : '';
         updatedEntry.Bank = req.ProcurementBank || entry.row.Bank || '';
       }
       // A "Petty Cash Payment" Payment Request settles by adjusting the
@@ -5493,7 +5509,7 @@ const FinanceModule = (function () {
     try {
       const entry = await readExpenseRow(req.ExpenseTab, requestId);
       if (!entry) throw new Error('Expense Sheet entry not found');
-      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: new Date().toLocaleDateString(), Bank: bank });
+      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: formatStampDate(), Bank: bank });
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
       await markPaid(requestId, udNumber);
       await loadAll(true);
