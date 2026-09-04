@@ -534,7 +534,7 @@ const FinanceModule = (function () {
     // re-entering the module, which forces a genuinely fresh load. Every
     // internal loadAll() call after a mutation now also passes true.
     try {
-      queueCardsCache = await computeQueueCards(force);
+      queueCardsCache = await computeQueueCards(force, effectiveUser());
     } catch (e) {
       queueCardsCache = []; // fail closed on the count rather than showing a wrong number
     }
@@ -546,15 +546,15 @@ const FinanceModule = (function () {
     // heuristic — same underlying data the tab itself displays, so
     // count and content can't disagree.
     try {
-      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(force);
+      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(force, effectiveUser());
     } catch (e) {
       myApprovalsNewNoteCounts = { spend: 0, payment: 0 };
     }
     updateBadge();
   }
 
-  async function computeMyApprovalsNewNoteCounts(force) {
-    const user = MVOA.getUser();
+  async function computeMyApprovalsNewNoteCounts(force, identityOverride) {
+    const user = identityOverride || MVOA.getUser();
     const [approvalRows, noteRows] = await Promise.all([
       MVOA.sheetsRead(TAB_APPROVALS, force),
       MVOA.sheetsRead(TAB_NOTES, force)
@@ -579,7 +579,7 @@ const FinanceModule = (function () {
   // panel the person just opened to trigger this in the first place.
   async function refreshMyApprovalsBadge(container) {
     try {
-      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(true);
+      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(true, effectiveUser());
     } catch (e) {
       return; // leave the badge as-is if this fails — best-effort
     }
@@ -649,8 +649,8 @@ const FinanceModule = (function () {
     } catch (e) { /* best-effort — will retry on the next loadAll() */ }
   }
 
-  async function computeQueueCards(force) {
-    const user = MVOA.getUser();
+  async function computeQueueCards(force, identityOverride) {
+    const user = identityOverride || MVOA.getUser();
     const person = rolesCache.find(p => p.Name === user.name) || {};
     const pending = requestsCache.filter(r => r.Status === 'PendingApproval');
     if (!pending.length) return [];
@@ -714,6 +714,11 @@ const FinanceModule = (function () {
     // "← Back to Finance Application" button) still behaves as before.
     currentTopTab = 'home';
     currentView = 'mine';
+    // Every fresh open from Home also drops any View As in progress —
+    // an admin who was looking through someone else's eyes last time
+    // they had Finance open shouldn't silently still be in that mode
+    // (and not see their own "Logged in as" reality) on the next visit.
+    viewAsPerson = null;
     container.innerHTML = `<p class="muted">Loading…</p>`;
     // Separate try/catch from the main load below — the
     // PermissionsMatrix_Finance sheet tab may not exist yet (it's a new,
@@ -778,7 +783,15 @@ const FinanceModule = (function () {
   const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard', pettycash: 'pettycash' };
 
   function render(container) {
-    const user = MVOA.getUser();
+    const realUser = MVOA.getUser();
+    // "My stuff" identity for every identity-scoped filter below (My
+    // Requests, Sent Back, My Approvals, Approval Queue eligibility, the
+    // Finance Permissions Matrix lookups) — swaps to the impersonated
+    // person while View As is active (see effectiveUser()). Every write
+    // action still goes through realUser, and is disabled outright below
+    // (currentSectionCanEdit) while viewing as someone else.
+    const user = effectiveUser();
+    const realPerson = currentPerson();
     const myRequests = requestsCache.filter(r => r.RequestedBy === user.name);
     // Tab-count badge only reflects requests still actually in flight —
     // a fully Paid/Rejected/settled one showing "(N open)" reads as if it
@@ -804,6 +817,19 @@ const FinanceModule = (function () {
       return { open: 0, newCount: 0 };
     };
 
+    // "View As" control — only offered to admins (isAdmin(realPerson)),
+    // and always keyed off the REAL login, never the identity currently
+    // being impersonated (so switching to a non-admin person doesn't
+    // hide the dropdown you'd need to switch back). Lists everyone else
+    // in the Roles sheet; "— Myself —" clears it.
+    const viewAsControlHtml = isAdmin(realPerson) ? `
+      <span style="font-size:0.85rem;">
+        👁️ View as:
+        <select id="fin-viewas-select" style="font-size:0.85rem;">
+          <option value="">— Myself —</option>
+          ${rolesCache.filter(p => p.Name && p.Name !== realUser.name).map(p => `<option value="${escapeHtml(p.Name)}" ${viewAsPerson && viewAsPerson.Name === p.Name ? 'selected' : ''}>${escapeHtml(p.Name)}</option>`).join('')}
+        </select>
+      </span>` : '';
     const headerHtml = `
       ${expiringContracts.length ? `
         <div class="mvoa-list-item" style="border:1px solid #b3261e;margin-bottom:12px;">
@@ -813,9 +839,14 @@ const FinanceModule = (function () {
           `).join('')}
         </div>` : ''}
       <div class="mvoa-row" style="margin-bottom:6px;">
-        <span></span>
-        <span class="muted" style="font-size:0.85rem;">Logged in as: <strong>${escapeHtml(user.name)}</strong>${user.role ? ` (${escapeHtml(user.role)})` : ''}</span>
-      </div>`;
+        <span>${viewAsControlHtml}</span>
+        <span class="muted" style="font-size:0.85rem;">Logged in as: <strong>${escapeHtml(realUser.name)}</strong>${realUser.role ? ` (${escapeHtml(realUser.role)})` : ''}</span>
+      </div>
+      ${isViewingAs() ? `
+        <div class="mvoa-list-item" style="border:1px solid #185fa5;background:#e6f1fb;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span>👁️ Viewing as <strong>${escapeHtml(viewAsPerson.Name)}</strong>${viewAsPerson.Role ? ` (${escapeHtml(viewAsPerson.Role)})` : ''} — read only. My Requests, Sent Back, My Approvals and Approval Queue show what they'd see; nothing can be submitted, approved, rejected, or added as a note while viewing as someone else.</span>
+          <button id="fin-viewas-exit-btn" class="btn-secondary" style="margin:0;">Exit view as</button>
+        </div>` : ''}`;
 
     // Finance Permissions Matrix — see shared.js. A Title with "No access"
     // on the current top-level tab never even lands here (mount() always
@@ -887,10 +918,20 @@ const FinanceModule = (function () {
           render(container);
         });
       });
+      wireViewAsControls(container);
       return;
     }
 
     currentSectionCanEdit = MVOA.canEditFinanceSection(FINANCE_TOP_TAB_SECTION[currentTopTab], user);
+    // View As is always read-only, regardless of what the impersonated
+    // person's own edit rights would normally be — this is the one line
+    // that actually enforces "read only" for View As: every write action
+    // in the module (submit, approve/reject, resubmit, log/edit an
+    // Expense Sheet entry, release payment, set/revise a budget, add a
+    // contract) is already gated on currentSectionCanEdit via the
+    // Finance Permissions Matrix "Read Only" feature, so forcing it false
+    // here disables all of them at once, no matter which section is open.
+    if (isViewingAs()) currentSectionCanEdit = false;
     // A Read Only Title landing on a view that only exists to submit
     // something new (there is no read-only "form" to fall back to) gets
     // bounced to My Requests instead, same as subTabsFor() already
@@ -921,6 +962,7 @@ const FinanceModule = (function () {
       });
     });
     container.querySelector('#fin-back-btn').addEventListener('click', () => { currentTopTab = 'home'; render(container); });
+    wireViewAsControls(container);
     container.querySelector('#fin-refresh-btn').addEventListener('click', async () => {
       const btn = container.querySelector('#fin-refresh-btn');
       const original = btn.textContent;
@@ -949,6 +991,39 @@ const FinanceModule = (function () {
     else if (currentView === 'dashboard') renderDashboardTab(body, container);
     else if (currentView === 'pettycash') renderPettyCashLedger(body, container);
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
+  }
+
+  // Wires the "View as" dropdown and the "Exit view as" banner button —
+  // called from both render() branches (home screen and the sub-tab
+  // screen) since headerHtml is injected in both places. Either control
+  // may be absent from the current markup (dropdown only renders for
+  // admins; the exit button only while isViewingAs()), so both lookups
+  // are optional.
+  function wireViewAsControls(container) {
+    const sel = container.querySelector('#fin-viewas-select');
+    if (sel) sel.addEventListener('change', () => handleViewAsChange(sel.value || null, container));
+    const exitBtn = container.querySelector('#fin-viewas-exit-btn');
+    if (exitBtn) exitBtn.addEventListener('click', () => handleViewAsChange(null, container));
+  }
+
+  // Switches (or clears) the impersonated identity and refreshes the two
+  // caches that are computed ahead of render() rather than during it
+  // (queueCardsCache, myApprovalsNewNoteCounts) so Approval Queue and the
+  // My Approvals badge immediately reflect the new identity too, not just
+  // My Requests/Sent Back/My Approvals' own filters. Safe to recompute
+  // repeatedly — computeQueueCards() only ever settles a request that's
+  // still genuinely PendingApproval in requestsCache, and marks it
+  // Approved in place the first time, so a second pass for a different
+  // identity just skips it. Doesn't touch currentTopTab/currentView —
+  // render() already bounces to Home on its own if the newly-impersonated
+  // person can't view whatever section is currently open.
+  async function handleViewAsChange(name, container) {
+    viewAsPerson = name ? (rolesCache.find(p => p.Name === name) || null) : null;
+    try {
+      queueCardsCache = await computeQueueCards(false, effectiveUser());
+      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(false, effectiveUser());
+    } catch (e) { /* best-effort — worst case these two catch up on the next Refresh */ }
+    render(container);
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1949,6 +2024,44 @@ const FinanceModule = (function () {
   }
   function isAdmin(person) {
     return String(person.AdminAccess || '').toLowerCase() === 'true' || (person.Role || '').toUpperCase() === 'DEV';
+  }
+
+  // ─── "View As" (read-only) ────────────────────────────────────
+  // Lets an admin browse the Finance Application exactly as another
+  // named person would see it — My Requests, Sent Back, My Approvals,
+  // Approval Queue — without needing that person's own login. Built to
+  // diagnose "why isn't X showing up for so-and-so" (those four views
+  // are all filtered by literal identity, not role, so an admin's own
+  // login never sees someone else's items there). Deliberately
+  // read-only: render() forces currentSectionCanEdit false for as long
+  // as this is active, which already gates every write action across
+  // the whole module (submit, approve/reject, resubmit, log an Expense
+  // Sheet entry, release payment, set/revise a budget, add a contract —
+  // see the Finance Permissions Matrix "Read Only" feature this reuses),
+  // and every renderNotesThread() call site is switched to
+  // canWrite:!isViewingAs() so a note can't be posted under someone
+  // else's name either. Holds the FULL rolesCache row of the
+  // impersonated person (Name/Role/Title/etc.), or null when nobody is
+  // being impersonated.
+  let viewAsPerson = null;
+  function isViewingAs() { return !!viewAsPerson; }
+  // The identity to filter "my stuff" views by — the impersonated
+  // person while View As is active, otherwise whoever is actually
+  // logged in. NEVER use this for anything that writes to the sheet;
+  // writes must always be attributed to the real MVOA.getUser(), and
+  // are disabled outright while impersonating (see above).
+  function effectiveUser() {
+    if (!viewAsPerson) return MVOA.getUser();
+    // Field names are lowercase here (name/role/title) to match the
+    // shape MVOA.getUser() itself returns — shared.js's own login/roles
+    // cache uses lowercase keys, whereas this module's OWN rolesCache
+    // (viewAsPerson, built via rowToObj against the finance COLS arrays)
+    // uses capitalized ones (Name/Role/Title). Includes title so
+    // MVOA.canViewFinanceSection/canEditFinanceSection's displayTitle()
+    // lookup uses the impersonated person's actual Title (e.g.
+    // "Secretary") against the Permissions Matrix, not just a generic
+    // role-code label.
+    return { name: viewAsPerson.Name, role: viewAsPerson.Role || '', title: viewAsPerson.Title || '' };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -4166,7 +4279,7 @@ const FinanceModule = (function () {
   // as My Requests, but from the approver's side of the transaction.
   // ───────────────────────────────────────────────────────────
   async function renderMyApprovals(body, container, filterMode) {
-    const user = MVOA.getUser();
+    const user = effectiveUser();
     body.innerHTML = `<p class="muted">Loading your approval history…</p>`;
     let allApprovals = [];
     let allNotes = [];
@@ -4259,13 +4372,13 @@ const FinanceModule = (function () {
         const isHidden = notesBody.classList.contains('hidden');
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
         notesBody.classList.remove('hidden');
-        await renderNotesThread(notesBody, mine[idx].RequestID, btn, true, container);
+        await renderNotesThread(notesBody, mine[idx].RequestID, btn, !isViewingAs(), container);
       });
     });
   }
 
   async function renderMine(body, container, filterMode) {
-    const user = MVOA.getUser();
+    const user = effectiveUser();
     const list = requestsCache.filter(r => r.RequestedBy === user.name)
       .filter(r => !filterMode || (filterMode === 'spend' ? r.RequestType !== 'PaymentRequest' : r.RequestType === 'PaymentRequest'))
       .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
@@ -4345,7 +4458,7 @@ const FinanceModule = (function () {
         const isHidden = notesBody.classList.contains('hidden');
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
         notesBody.classList.remove('hidden');
-        await renderNotesThread(notesBody, id, btn, true, container);
+        await renderNotesThread(notesBody, id, btn, !isViewingAs(), container);
       });
     });
   }
@@ -4452,7 +4565,7 @@ const FinanceModule = (function () {
     } catch (e) { /* notes flag just won't show if this fails, non-critical */ }
 
     const cardsEl = body.querySelector('#fin-queue-cards');
-    const user = MVOA.getUser();
+    const user = effectiveUser();
     const newCards = cards.filter(c => isItemNew(c.req));
     const openCards = cards.filter(c => !isItemNew(c.req));
     cardsEl.innerHTML = newCards.map(({ req, state }) =>
@@ -4550,7 +4663,7 @@ const FinanceModule = (function () {
         const isHidden = notesBody.classList.contains('hidden');
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Ask a question'; return; }
         notesBody.classList.remove('hidden');
-        await renderNotesThread(notesBody, id, btn, true, container);
+        await renderNotesThread(notesBody, id, btn, !isViewingAs(), container);
       });
     });
   }
@@ -4762,7 +4875,7 @@ const FinanceModule = (function () {
   // 'payment') mirrors the Approval Queue split.
   // ───────────────────────────────────────────────────────────
   async function renderSentBack(body, container, filterMode) {
-    const user = MVOA.getUser();
+    const user = effectiveUser();
     body.innerHTML = `<p class="muted">Loading…</p>`;
     let allApprovals = [];
     try {
@@ -5097,7 +5210,7 @@ const FinanceModule = (function () {
           const isHidden = notesBody.classList.contains('hidden');
           if (!isHidden) { notesBody.classList.add('hidden'); return; }
           notesBody.classList.remove('hidden');
-          await renderNotesThread(notesBody, id, btn, true, container);
+          await renderNotesThread(notesBody, id, btn, !isViewingAs(), container);
         });
       });
     }
