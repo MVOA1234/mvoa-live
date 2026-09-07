@@ -1070,18 +1070,17 @@ const HSModule = (function () {
   const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails', 'BackfilledAt'];
   // weeklyMin: null means "frequency not defined" per the spec — no
   // Fail concept at all for that type, logging only.
-  // allowBackfill: ADDED Sept 2026 — only Sewage Disposal and Water
-  // Tanker require a photo (needsPhoto:true), which is exactly the case
-  // that can't be logged at all when there's no signal to take/upload
-  // one — Garbage/Garden Waste don't need a photo so a plain text
-  // append almost always still goes through even on a weak connection.
-  // Per explicit instruction, "Add Missed Entry" is offered only for
-  // these two.
+  // allowBackfill: ADDED Sept 2026, originally Sewage Disposal/Water
+  // Tanker only (the two photo-required types, where a connectivity
+  // drop can block logging entirely) — WIDENED Sept 2026 per explicit
+  // instruction to all four types, so a missed Garbage/Garden Waste
+  // entry (plain text append that still failed, or was simply never
+  // attempted) can be backfilled too.
   const IN_OUT_TYPES = [
     { key: 'Sewage Disposal', needsPhoto: true, weeklyMin: 2, allowBackfill: true },
-    { key: 'Garbage Disposal', needsPhoto: false, weeklyMin: 3, allowBackfill: false },
+    { key: 'Garbage Disposal', needsPhoto: false, weeklyMin: 3, allowBackfill: true },
     { key: 'Water Tanker', needsPhoto: true, weeklyMin: null, allowBackfill: true },
-    { key: 'Garden Waste Disposal', needsPhoto: false, weeklyMin: null, allowBackfill: false }
+    { key: 'Garden Waste Disposal', needsPhoto: false, weeklyMin: null, allowBackfill: true }
   ];
   // "Within 7 days of current date", per explicit instruction — inclusive
   // of today, so the earliest selectable date is 6 days before today.
