@@ -1056,15 +1056,36 @@ const HSModule = (function () {
   // network dropped mid-save (see logInOutEntry / openManualVehicleEntry)
   // — its presence is also what tells the live list and Monthly Report
   // this was a deliberate manual log, not a missing/failed photo.
-  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails'];
+  // ADDED Sept 2026 — 'BackfilledAt': blank on every normal entry (live,
+  // photo-backed OR the same-moment "no signal" manual fallback above —
+  // both record Timestamp as the actual moment they were saved). Set
+  // ONLY by the "Add Missed Entry" flow (see openBackfillEntry) to the
+  // real moment that entry was actually typed in, which is genuinely
+  // different from its Timestamp (a past date/time the guard/supervisor
+  // picked after the fact, for a round that happened but was never
+  // logged digitally at the time — a full connectivity miss, not just a
+  // failed photo upload). This is what the live list/Monthly Report use
+  // to mark a "✏️ Backfilled" entry distinctly from a "📝 manual
+  // (no signal)" one, even though both can have VehicleDetails set.
+  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails', 'BackfilledAt'];
   // weeklyMin: null means "frequency not defined" per the spec — no
   // Fail concept at all for that type, logging only.
+  // allowBackfill: ADDED Sept 2026 — only Sewage Disposal and Water
+  // Tanker require a photo (needsPhoto:true), which is exactly the case
+  // that can't be logged at all when there's no signal to take/upload
+  // one — Garbage/Garden Waste don't need a photo so a plain text
+  // append almost always still goes through even on a weak connection.
+  // Per explicit instruction, "Add Missed Entry" is offered only for
+  // these two.
   const IN_OUT_TYPES = [
-    { key: 'Sewage Disposal', needsPhoto: true, weeklyMin: 2 },
-    { key: 'Garbage Disposal', needsPhoto: false, weeklyMin: 3 },
-    { key: 'Water Tanker', needsPhoto: true, weeklyMin: null },
-    { key: 'Garden Waste Disposal', needsPhoto: false, weeklyMin: null }
+    { key: 'Sewage Disposal', needsPhoto: true, weeklyMin: 2, allowBackfill: true },
+    { key: 'Garbage Disposal', needsPhoto: false, weeklyMin: 3, allowBackfill: false },
+    { key: 'Water Tanker', needsPhoto: true, weeklyMin: null, allowBackfill: true },
+    { key: 'Garden Waste Disposal', needsPhoto: false, weeklyMin: null, allowBackfill: false }
   ];
+  // "Within 7 days of current date", per explicit instruction — inclusive
+  // of today, so the earliest selectable date is 6 days before today.
+  const BACKFILL_MAX_DAYS_AGO = 6;
 
   async function renderInOutLog(container) {
     container.innerHTML = `
@@ -1136,8 +1157,9 @@ const HSModule = (function () {
             <button class="btn-secondary hs-inout-btn" data-type="${escapeHtml(t.key)}" data-direction="OUT" data-photo="${t.needsPhoto}" style="flex:1;" ${!currentlyIn ? 'disabled' : ''}>Log OUT</button>
           </div>
           ${currentlyIn ? `<p class="muted" style="margin:0 0 8px;font-size:0.8rem;">Currently IN — log OUT before logging IN again.</p>` : ''}
+          ${t.allowBackfill ? `<button class="btn-secondary hs-backfill-btn" data-type="${escapeHtml(t.key)}" style="width:100%;margin-bottom:8px;">✏️ Add Missed Entry (past ${BACKFILL_MAX_DAYS_AGO + 1} days)</button>` : ''}
           <p class="muted" style="margin:0 0 4px;font-size:0.8rem;font-weight:600;">Today:</p>
-          ${entries.length ? entries.map(e => `<p class="muted" style="margin:2px 0;font-size:0.85rem;">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}${e.VehicleDetails ? ` · 🚚 ${escapeHtml(e.VehicleDetails)} (manual entry — no signal)` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
+          ${entries.length ? entries.map(e => `<p class="${e.BackfilledAt ? '' : 'muted'}" style="margin:2px 0;font-size:0.85rem;${e.BackfilledAt ? 'color:#8a6d00;font-weight:600;' : ''}">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}${e.BackfilledAt ? ` · ✏️ ${escapeHtml(e.VehicleDetails || '')} (backfilled — added ${formatDate(e.BackfilledAt)})` : e.VehicleDetails ? ` · 🚚 ${escapeHtml(e.VehicleDetails)} (manual entry — no signal)` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
         </div>
       `;
     }).join('');
@@ -1152,6 +1174,10 @@ const HSModule = (function () {
         bodyEl.querySelectorAll('.hs-inout-btn').forEach(b => b.disabled = true);
         logInOutEntry(btn.dataset.type, btn.dataset.direction, btn.dataset.photo === 'true', container);
       });
+    });
+
+    bodyEl.querySelectorAll('.hs-backfill-btn').forEach(btn => {
+      btn.addEventListener('click', () => openBackfillEntry(btn.dataset.type, container));
     });
   }
 
@@ -1287,6 +1313,150 @@ const HSModule = (function () {
         await renderInOutLog(container); // fresh render creates its own enabled buttons
       } catch (e) {
         errEl.textContent = 'Still could not save: ' + e.message + ' — try again once you have signal.';
+        isSaving = false;
+      }
+    });
+  }
+
+  // ADDED Sept 2026 — "Add Missed Entry", per explicit instruction:
+  // sometimes a connectivity issue at the gate means Sewage
+  // Disposal/Water Tanker (the two photo-required types — see
+  // IN_OUT_TYPES.allowBackfill) can't be logged AT ALL, not even via the
+  // no-signal manual-vehicle-details fallback above (that one still
+  // needs a live save to succeed; if the connection is down hard enough,
+  // even that plain text append fails). This lets whoever has access to
+  // this screen add the missed IN and/or OUT afterward, for a date
+  // within the last BACKFILL_MAX_DAYS_AGO+1 days, with the actual
+  // event time and vehicle details typed in — writes to the exact same
+  // HSInOutLog sheet as a live entry, so weekly compliance counts,
+  // dashboards and the Monthly Report all pick it up automatically with
+  // no separate handling needed; the only thing that marks it apart is
+  // BackfilledAt (see the INOUT_LOG_COLS comment), which the live list
+  // and Monthly Report use to show it in a distinct color.
+  function openBackfillEntry(typeKey, container) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const minDate = new Date(today.getTime() - BACKFILL_MAX_DAYS_AGO * 86400000);
+    const maxDateStr = isoDate(today);
+    const minDateStr = isoDate(minDate);
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box">
+        <h3 style="margin-top:0;">Add Missed Entry — ${escapeHtml(typeKey)}</h3>
+        <p class="muted" style="font-size:0.85rem;margin:0 0 10px;">
+          For a round that actually happened but couldn't be logged at the time (no signal). Fill in Log IN and/or Log OUT — leave one blank if only the other was missed. Only dates within the last ${BACKFILL_MAX_DAYS_AGO + 1} days can be used.
+        </p>
+        <label style="display:block;margin-bottom:8px;">Date
+          <input type="date" id="hs-backfill-date" min="${minDateStr}" max="${maxDateStr}" value="${maxDateStr}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+        </label>
+        <div class="mvoa-row" style="gap:10px;">
+          <label style="flex:1;">Log IN time
+            <input type="time" id="hs-backfill-in" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+          </label>
+          <label style="flex:1;">Log OUT time
+            <input type="time" id="hs-backfill-out" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+          </label>
+        </div>
+        <label style="display:block;margin-top:8px;">Vehicle Details
+          <input type="text" id="hs-backfill-vehicle" placeholder="e.g. vehicle number / description" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+        </label>
+        <p class="error-text" id="hs-backfill-err" style="min-height:1.2em;margin:8px 0 0;"></p>
+        <div class="mvoa-row" style="margin-top:10px;">
+          <button id="hs-backfill-submit" class="btn-primary">Save Entry</button>
+          <button id="hs-backfill-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const dateInput = modal.querySelector('#hs-backfill-date');
+    const inInput = modal.querySelector('#hs-backfill-in');
+    const outInput = modal.querySelector('#hs-backfill-out');
+    const vehicleInput = modal.querySelector('#hs-backfill-vehicle');
+    const errEl = modal.querySelector('#hs-backfill-err');
+    dateInput.focus();
+
+    modal.querySelector('#hs-backfill-cancel').addEventListener('click', () => modal.remove());
+
+    // Builds a real Date from the picked local date + a "HH:MM" time
+    // string — NOT string concatenation into an ISO literal, since that
+    // would be interpreted as UTC and shift by the device's timezone
+    // offset. This mirrors how every live entry already gets its
+    // Timestamp (new Date().toISOString() off a local Date), just with
+    // picked components instead of "now".
+    function localDateTime(dateStr, timeStr) {
+      const [y, mo, d] = dateStr.split('-').map(Number);
+      const [h, mi] = timeStr.split(':').map(Number);
+      return new Date(y, mo - 1, d, h, mi, 0, 0);
+    }
+
+    let isSaving = false;
+    modal.querySelector('#hs-backfill-submit').addEventListener('click', async () => {
+      if (isSaving) return;
+      errEl.textContent = '';
+      const dateStr = dateInput.value;
+      const inTime = inInput.value;
+      const outTime = outInput.value;
+      const vehicle = vehicleInput.value.trim();
+      if (!dateStr || dateStr < minDateStr || dateStr > maxDateStr) {
+        errEl.textContent = `Pick a date within the last ${BACKFILL_MAX_DAYS_AGO + 1} days.`;
+        return;
+      }
+      if (!inTime && !outTime) {
+        errEl.textContent = 'Enter a Log IN time, a Log OUT time, or both.';
+        return;
+      }
+      if (!vehicle) {
+        errEl.textContent = 'Enter the vehicle details before saving.';
+        return;
+      }
+      const inDt = inTime ? localDateTime(dateStr, inTime) : null;
+      const outDt = outTime ? localDateTime(dateStr, outTime) : null;
+      if (inDt && outDt && outDt <= inDt) {
+        errEl.textContent = 'Log OUT time must be after Log IN time.';
+        return;
+      }
+      isSaving = true;
+      errEl.textContent = 'Saving…';
+      try {
+        const existingRows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+        const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+        const allLogs = rowsToObjs(existingRows, INOUT_LOG_COLS);
+        // Soft duplicate check only — a legitimate second visit the same
+        // day is possible, so this warns rather than blocks.
+        const dupe = allLogs.some(l => l.Type === typeKey &&
+          ((inDt && l.Direction === 'IN' && isoDate(new Date(l.Timestamp)) === dateStr) ||
+           (outDt && l.Direction === 'OUT' && isoDate(new Date(l.Timestamp)) === dateStr)));
+        if (dupe && !confirm(`${typeKey} already has an entry on ${dateStr}. Add this one anyway?`)) {
+          isSaving = false;
+          errEl.textContent = '';
+          return;
+        }
+        const user = MVOA.getUser();
+        const backfilledAt = new Date().toISOString();
+        const rowsToAppend = [];
+        if (inDt) {
+          const logId = MVOA.nextId('IOLOG', existingIds);
+          existingIds.push(logId);
+          rowsToAppend.push(INOUT_LOG_COLS.map(c => ({
+            LogID: logId, Type: typeKey, Direction: 'IN', Timestamp: inDt.toISOString(),
+            PhotoURL: '', LoggedBy: user.name, VehicleDetails: vehicle, BackfilledAt: backfilledAt
+          })[c]));
+        }
+        if (outDt) {
+          const logId = MVOA.nextId('IOLOG', existingIds);
+          existingIds.push(logId);
+          rowsToAppend.push(INOUT_LOG_COLS.map(c => ({
+            LogID: logId, Type: typeKey, Direction: 'OUT', Timestamp: outDt.toISOString(),
+            PhotoURL: '', LoggedBy: user.name, VehicleDetails: vehicle, BackfilledAt: backfilledAt
+          })[c]));
+        }
+        for (const row of rowsToAppend) {
+          await MVOA.sheetsAppend(TAB_HS_INOUT_LOG, row);
+        }
+        modal.remove();
+        await renderInOutLog(container);
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message + ' — try again once you have signal.';
         isSaving = false;
       }
     });
@@ -1788,6 +1958,7 @@ const HSModule = (function () {
       <div class="mvoa-row" style="margin-bottom:12px;gap:8px;">
         <label class="muted">Month: <input id="hs-inout-month" type="month" value="${inOutMonthlyMonth}"></label>
       </div>
+      <p class="muted" style="margin:0 0 8px;font-size:0.78rem;">📷 photo · 📝 manual entry (no signal, logged live) · <span style="color:#8a6d00;font-weight:600;">✏️ backfilled (added after the fact)</span></p>
       <div id="hs-inout-monthly-body" style="max-height:72vh;overflow:auto;-webkit-overflow-scrolling:touch;"><p class="muted">Loading…</p></div>
     `;
     container.querySelector('#hs-back-reports').addEventListener('click', () => renderReportsMenu(container));
@@ -1840,18 +2011,32 @@ const HSModule = (function () {
         if (!entries.length) return `<td style="padding:4px 6px;text-align:center;color:#ccc;${divider}">—</td>`;
         const linesHtml = entries.map(e => {
           const timeStr = new Date(e.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          // ADDED Sept 2026 — a Backfilled entry (see openBackfillEntry /
+          // the INOUT_LOG_COLS comment) gets its own icon AND its own
+          // color for the whole line, per explicit instruction ("reflect
+          // in the monthly report in a different color"), so it's
+          // visually distinct at a glance and not just on hover — not to
+          // be confused with the pre-existing 📝 "manual entry, no
+          // signal, but still logged live at the actual moment" case,
+          // which keeps its original look unchanged.
+          const isBackfilled = !!e.BackfilledAt;
+          const backfillTitle = `Backfilled entry — added ${formatDate(e.BackfilledAt)}${e.VehicleDetails ? ' — ' + escapeHtml(e.VehicleDetails) : ''}`;
           // No photo icon at all for non-photo types — showing a ✕ would
           // wrongly read as a Fail when a photo was never required here.
           // For photo-required types, a manual (no-signal) entry shows its
           // own icon with the typed vehicle details on hover — a real ✕
           // is now reserved for the case that actually shouldn't happen
-          // any more (neither a photo nor manually-entered details).
-          const photoMark = e.PhotoURL ? `<a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷</a>`
+          // any more (neither a photo, nor manually-entered details, nor
+          // a backfilled entry).
+          const photoMark = isBackfilled ? `<span title="${backfillTitle}" style="cursor:help;">✏️</span>`
+            : e.PhotoURL ? `<a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷</a>`
             : e.VehicleDetails ? `<span title="Manual entry (no signal) — ${escapeHtml(e.VehicleDetails)}" style="cursor:help;">📝</span>`
             : '<span style="color:#b3261e;">✕</span>';
+          const lineStyle = isBackfilled ? 'color:#8a6d00;font-weight:600;' : '';
+          const lineTitle = isBackfilled && !t.needsPhoto ? ` title="${backfillTitle}"` : '';
           return t.needsPhoto
-            ? `<div>${photoMark} <span class="muted" style="font-size:0.7rem;">${timeStr}</span></div>`
-            : `<div class="muted" style="font-size:0.75rem;">${timeStr}</div>`;
+            ? `<div style="${lineStyle}">${photoMark} <span style="font-size:0.7rem;${lineStyle}">${timeStr}</span></div>`
+            : `<div class="${isBackfilled ? '' : 'muted'}" style="font-size:0.75rem;${lineStyle}"${lineTitle}>${timeStr}${isBackfilled ? ' ✏️' : ''}</div>`;
         }).join('');
         return `<td style="padding:4px 6px;text-align:center;${divider}">${linesHtml}</td>`;
       }).join('')).join('');
