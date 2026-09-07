@@ -227,7 +227,18 @@ const FinanceModule = (function () {
     // knows this request's payment already happened, so its approval of
     // the Expense Sheet entry should close the request straight to Paid
     // instead of routing to a separate "Release Payment" step.
-    'ProcurementInvoiceURL','ProcurementBank','ProcurementRef','ProcurementDate','ProcuredBy'];
+    'ProcurementInvoiceURL','ProcurementBank','ProcurementRef','ProcurementDate','ProcuredBy',
+    // ADDED Sept 2026 — "Disable this ATS" (Secretary/Treasurer/
+    // President/Admin only, never on a PaymentRequest row): 'TRUE' once
+    // someone has explicitly closed this Approval-to-Spend so it can no
+    // longer be picked in the "Linked Spend Approval" dropdown on a new
+    // Payment Request, and so budgetInfoFor() stops reserving its own
+    // estimate and switches to the real total of its linked, Approved
+    // Payment Requests. Blank (the default) = still open/active.
+    // Reversible — see toggleDisableAts/isAtsDisabled. Only ever set on
+    // a Schedule A/B/C request that's already Status === 'Approved';
+    // meaningless (left blank) on everything else.
+    'Disabled'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
 
@@ -376,6 +387,12 @@ const FinanceModule = (function () {
     const startYear = Number(fy.split('-')[0]);
     return { start: new Date(startYear, 8, 1), end: new Date(startYear + 1, 7, 31, 23, 59, 59) };
   }
+  // ADDED Sept 2026 — see the 'Disabled' REQUEST_COLS comment and
+  // toggleDisableAts. Case-insensitive/string-safe the same way every
+  // other TRUE/blank sheet flag in this module is read.
+  function isAtsDisabled(r) {
+    return String(r.Disabled || '').toUpperCase() === 'TRUE';
+  }
   function budgetInfoFor(category, fy) {
     const b = budgetsCache.find(x => x.Category === category && x.FYYear === fy);
     if (!b) return null;
@@ -408,9 +425,19 @@ const FinanceModule = (function () {
       .reduce((sum, r) => {
         const linkedApprovedPayments = requestsCache.filter(p =>
           p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === r.RequestID && p.Status === 'Approved');
-        const actual = linkedApprovedPayments.length
-          ? linkedApprovedPayments.reduce((s, p) => s + (Number(p.Amount) || 0), 0)
-          : (Number(r.Amount) || 0);
+        const linkedSum = linkedApprovedPayments.reduce((s, p) => s + (Number(p.Amount) || 0), 0);
+        const estimate = Number(r.Amount) || 0;
+        // REFINED Sept 2026, per explicit instruction: the app has no way
+        // to know how many more ATPs are still expected against an ATS
+        // that's still open, so while it remains enabled the ORIGINAL
+        // estimate keeps reserving the budget until the booked (linked,
+        // Approved) Payment Requests actually exceed it — never drops
+        // below the estimate just because a smaller partial payment has
+        // landed. Only once the ATS has been explicitly Disabled (see
+        // isAtsDisabled/toggleDisableAts — the person's own signal that
+        // no further ATPs are coming) does this switch unconditionally to
+        // the real linked total, even if that's less than the estimate.
+        const actual = isAtsDisabled(r) ? linkedSum : Math.max(estimate, linkedSum);
         return sum + actual;
       }, 0);
     // ADDED Sept 2026: some categories (e.g. Salaries) are never routed
@@ -759,7 +786,7 @@ const FinanceModule = (function () {
   // MVOA.canViewFinanceSection/canEditFinanceSection) — one per top-level
   // tab. Must match exactly what an admin types as the "Section" for that
   // tab's rows in the PermissionsMatrix_Finance sheet.
-  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard', pettycash: 'Petty Cash' };
+  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard', pettycash: 'Petty Cash', approvedats: 'Approved ATS' };
   // Recomputed at the top of render() for whichever top-level tab is
   // currently open — 'Edit' lets every action through exactly as before;
   // 'ReadOnly' (a Title with an explicit Read Only row for this tab) hides
@@ -798,7 +825,7 @@ const FinanceModule = (function () {
     ];
     return [];
   }
-  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard', pettycash: 'pettycash' };
+  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard', pettycash: 'pettycash', approvedats: 'approvedats' };
 
   function render(container) {
     const realUser = MVOA.getUser();
@@ -888,6 +915,7 @@ const FinanceModule = (function () {
         { key: 'payment', label: '💵 Payment Approval' },
         { key: 'pettycash', label: '💰 Petty Cash' },
         { key: 'budget', label: '📊 Budget' },
+        { key: 'approvedats', label: '🔒 Approved ATS' },
         { key: 'contracts', label: '📄 Contracts' }
       ];
       // Requested: a "something landed here" alert right on the home
@@ -956,7 +984,7 @@ const FinanceModule = (function () {
     // hiding that tab from the nav.
     if (!currentSectionCanEdit && (currentView === 'submit' || currentView === 'payreq')) currentView = 'mine';
     const subTabs = subTabsFor(currentTopTab, currentSectionCanEdit);
-    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'pettycash' ? '💰 Petty Cash' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : '📄 Contracts';
+    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'pettycash' ? '💰 Petty Cash' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : currentTopTab === 'approvedats' ? '🔒 Approved ATS' : '📄 Contracts';
     const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
     const tabLabelHtml = (t) => t.view === 'myapprovals'
       ? `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`
@@ -1008,6 +1036,7 @@ const FinanceModule = (function () {
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
     else if (currentView === 'dashboard') renderDashboardTab(body, container);
     else if (currentView === 'pettycash') renderPettyCashLedger(body, container);
+    else if (currentView === 'approvedats') renderApprovedAtsList(body, container);
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
   }
 
@@ -2421,7 +2450,18 @@ const FinanceModule = (function () {
     return request.StageEnteredAt ? ` — since ${formatDate(request.StageEnteredAt)}` : '';
   }
 
+  // ADDED Sept 2026 — wraps the existing logic below (renamed to
+  // stageDescriptionInner) so a Disabled ATS keeps showing its real,
+  // unchanged status (Paid / awaiting Expense Sheet entry / whatever it
+  // already was) with a "🔒 Closed · " prefix, per "The disabled ATS
+  // should remain visible everywhere it appears today, just marked
+  // closed" — never hidden, never a replacement message.
   function stageDescription(request, approvals) {
+    const result = stageDescriptionInner(request, approvals);
+    if (isAtsDisabled(request)) return { text: `🔒 Closed · ${result.text}`, cls: result.cls };
+    return result;
+  }
+  function stageDescriptionInner(request, approvals) {
     if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
     if (request.Status === 'PendingApproval') {
       if (request.RequestType === 'PaymentRequest') {
@@ -2564,6 +2604,53 @@ const FinanceModule = (function () {
   function notesButtonHtml(request, noteCount, btnClass, dataAttrs) {
     const flagged = hasUnreadNote(request, noteCount);
     return `<button class="${btnClass} btn-secondary" ${dataAttrs} style="font-size:0.8rem;padding:4px 10px;${flagged ? 'border-color:#b3261e;color:#b3261e;font-weight:600;' : ''}">${flagged ? '🆕' : '💬'} Notes${noteCount ? ` (${noteCount})` : ''}</button>`;
+  }
+  // ADDED Sept 2026 — "Disable this ATS", per explicit instruction:
+  // reversible, restricted to Secretary/Treasurer/President/Admin, and
+  // only ever offered on a fully-Approved Schedule A/B/C request (never a
+  // PaymentRequest — those don't get an ATS-style close). Deliberately
+  // checks the REAL logged-in person via currentPerson() (which reads
+  // MVOA.getUser() directly) rather than effectiveUser(), and is NOT
+  // ANDed with currentSectionCanEdit the way every other write action
+  // is — both on purpose, per "Developer should also get this as a View
+  // as": View As is only ever reachable by an Admin/DEV in the first
+  // place (see the header's admin-only dropdown), so an Admin/DEV keeps
+  // this control even while impersonating someone else to browse, while
+  // every other write action on the page stays correctly locked out
+  // (those all gate on currentSectionCanEdit, which View As forces
+  // false). A real Secretary/Treasurer/President who ISN'T viewing as
+  // anyone gets it directly, same as asked.
+  function canDisableAts(request) {
+    if (request.RequestType === 'PaymentRequest' || request.Status !== 'Approved') return false;
+    const person = currentPerson();
+    return isSecretaryPerson(person) || isTreasurerPerson(person) || isPresidentPerson(person) || isAdmin(person);
+  }
+  function disableAtsButtonHtml(request) {
+    if (!canDisableAts(request)) return '';
+    const disabled = isAtsDisabled(request);
+    return `<button class="fin-disable-ats-toggle btn-secondary" data-request-id="${escapeHtml(request.RequestID)}" style="font-size:0.8rem;padding:4px 10px;${disabled ? 'border-color:#8a6d00;color:#8a6d00;font-weight:600;' : ''}">${disabled ? '🔓 Enable this ATS' : '🔒 Disable this ATS'}</button>`;
+  }
+  // Shared handler wired up wherever disableAtsButtonHtml's button
+  // appears (My Requests, My Approvals) — see those render functions.
+  async function toggleDisableAts(requestId, container) {
+    const r = requestsCache.find(x => x.RequestID === requestId);
+    if (!r) return;
+    const wasDisabled = isAtsDisabled(r);
+    const msg = wasDisabled
+      ? `Re-enable "${r.Category} — ${formatAmount(r.Amount)}"? It becomes selectable again in the "Linked Spend Approval" picker on a new Payment Request, and its budget reservation resumes protecting whichever is higher — its own amount or its linked payments so far.`
+      : `Disable "${r.Category} — ${formatAmount(r.Amount)}"? It will show 🔒 Closed everywhere it appears, drop out of the "Linked Spend Approval" picker on new Payment Requests, and its budget consumption will switch to the actual total of its linked, Approved Payment Requests. This is reversible — you can Enable it again later.`;
+    if (!confirm(msg)) return;
+    const prevValue = r.Disabled;
+    r.Disabled = wasDisabled ? '' : 'TRUE';
+    try {
+      await MVOA.sheetsUpdateRow(TAB_REQUESTS, r.rowNumber, objToRow(REQUEST_COLS, r));
+      await MVOA.logAudit({ module: 'Finance', requestId: r.RequestID, eventType: wasDisabled ? 'ATS Re-enabled' : 'ATS Disabled', comment: '', statusAfter: r.Status });
+    } catch (e) {
+      r.Disabled = prevValue;
+      alert(`Could not update: ${e.message}`);
+      return;
+    }
+    render(container);
   }
   // A condensed, click-to-open card for a New item — shows just enough to
   // identify it plus the 🆕 badge; clicking it marks it Opened (shared,
@@ -2933,7 +3020,11 @@ const FinanceModule = (function () {
   // life (installments, a multi-year AMC's several payment cycles), so
   // the same Approval-to-Spend has to stay pickable more than once.
   function eligibleSpendRequestsForLinking() {
-    return requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
+    // ADDED Sept 2026: a Disabled ATS is explicitly closed to new linked
+    // Payment Requests — see the 'Disabled' REQUEST_COLS comment and
+    // toggleDisableAts. Still fully visible everywhere else; just no
+    // longer offered in this picker.
+    return requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved' && !isAtsDisabled(r))
       .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
   }
 
@@ -4321,12 +4412,24 @@ const FinanceModule = (function () {
       </div>`;
   }
 
+  // ADDED Sept 2026 — same "🔒 Closed · " prefix treatment as
+  // stageDescription above, for the coarser badge this function draws
+  // (used when the finer approvals-based one can't be computed yet).
+  // displayStatusInner returns a plain {text, cls} pair (not a rendered
+  // badge) purely so this wrapper can prefix the text before handing it
+  // to statusBadge — every existing call site still just gets back the
+  // final HTML string from displayStatus itself, unchanged.
   function displayStatus(request) {
-    if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
-    if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return statusBadge('Paid', 'paid');
-    if (request.Status === 'Approved' && (isPettyCashExpense(request) || requiresLinkedPaymentRequest(request))) return statusBadge(`Approved — awaiting linked Payment Request${sinceText(request)}`, 'approved');
-    if (request.Status === 'Approved') return statusBadge(`Approved — awaiting payment${sinceText(request)}`, 'approved');
-    return statusBadge(`Pending approval${sinceText(request)}`, 'pending');
+    const inner = displayStatusInner(request);
+    const text = isAtsDisabled(request) ? `🔒 Closed · ${inner.text}` : inner.text;
+    return statusBadge(text, inner.cls);
+  }
+  function displayStatusInner(request) {
+    if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
+    if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return { text: 'Paid', cls: 'paid' };
+    if (request.Status === 'Approved' && (isPettyCashExpense(request) || requiresLinkedPaymentRequest(request))) return { text: `Approved — awaiting linked Payment Request${sinceText(request)}`, cls: 'approved' };
+    if (request.Status === 'Approved') return { text: `Approved — awaiting payment${sinceText(request)}`, cls: 'approved' };
+    return { text: `Pending approval${sinceText(request)}`, cls: 'pending' };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -4395,6 +4498,7 @@ const FinanceModule = (function () {
           ${req && hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
           ${req ? notesButtonHtml(req, noteCount, 'fin-myapproval-notes-toggle', `data-idx="${i}" style="margin-top:6px;"`) : ''}
+          ${req ? disableAtsButtonHtml(req) : ''}
           <div class="fin-myapproval-trail-body hidden" data-idx="${i}"></div>
           <div class="fin-myapproval-notes-body hidden" data-idx="${i}"></div>
         </div>`;
@@ -4432,6 +4536,10 @@ const FinanceModule = (function () {
         notesBody.classList.remove('hidden');
         await renderNotesThread(notesBody, mine[idx].RequestID, btn, !isViewingAs(), container);
       });
+    });
+
+    body.querySelectorAll('.fin-disable-ats-toggle').forEach(btn => {
+      btn.addEventListener('click', () => toggleDisableAts(btn.dataset.requestId, container));
     });
   }
 
@@ -4482,9 +4590,10 @@ const FinanceModule = (function () {
         ${paymentReferenceLineHtml(r)}
         ${r.Status === 'Rejected' ? rejectionDetailHtml(r, approvals) : ''}
         ${hasUnreadNote(r, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
-        <div style="display:flex;gap:8px;margin-top:6px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
           <button class="fin-mine-trail-toggle-btn btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">🔍 View Details</button>
           ${notesButtonHtml(r, noteCount, 'fin-mine-notes-toggle', `data-request-id="${escapeHtml(r.RequestID)}"`)}
+          ${disableAtsButtonHtml(r)}
         </div>
         <div class="fin-mine-trail-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
         <div class="fin-mine-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
@@ -4518,6 +4627,10 @@ const FinanceModule = (function () {
         notesBody.classList.remove('hidden');
         await renderNotesThread(notesBody, id, btn, !isViewingAs(), container);
       });
+    });
+
+    body.querySelectorAll('.fin-disable-ats-toggle').forEach(btn => {
+      btn.addEventListener('click', () => toggleDisableAts(btn.dataset.requestId, container));
     });
   }
 
@@ -4594,6 +4707,104 @@ const FinanceModule = (function () {
         }
       });
     }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // APPROVED ATS — ADDED Sept 2026, per explicit request: every fully-
+  // approved Standard/Spend-Approval request, across EVERY requester —
+  // not just "my own" (My Requests) or "ones I personally acted on" (My
+  // Approvals), neither of which reliably surfaces every ATS to every
+  // Secretary/Treasurer/President (e.g. a President who never had to
+  // approve a lower-tier request that never reached EC/AGM would never
+  // see it in their own My Approvals history). This is the one place
+  // guaranteed to list every approved ATS regardless of who submitted or
+  // approved it, so Disable/Enable is actually reachable for all of
+  // them. Read-only browse for anyone with access to this tab; the
+  // Disable/Enable button itself still gates on canDisableAts (checked
+  // against the REAL logged-in identity, same as everywhere else).
+  // ───────────────────────────────────────────────────────────
+  async function renderApprovedAtsList(body, container) {
+    const list = requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
+      .sort((a, b) => (b.StageEnteredAt || b.RequestedDate || '').localeCompare(a.StageEnteredAt || a.RequestedDate || ''));
+    if (!list.length) {
+      body.innerHTML = `<p class="muted">No Approval-to-Spend requests have been fully approved yet.</p>`;
+      return;
+    }
+    body.innerHTML = `<p class="muted">Loading current status…</p>`;
+    let allApprovals = [];
+    let allNotes = [];
+    try {
+      const [approvalRows, noteRows] = await Promise.all([
+        MVOA.sheetsRead(TAB_APPROVALS),
+        MVOA.sheetsRead(TAB_NOTES)
+      ]);
+      allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+      allNotes = noteRows.slice(1).map((r, i) => rowToObj(NOTE_COLS, r, i + 2));
+    } catch (e) { /* fall back to coarse status below if this fails */ }
+
+    const closedCount = list.filter(isAtsDisabled).length;
+    body.innerHTML = `
+      <p class="muted" style="margin:0 0 10px;">${list.length} approved${closedCount ? ` · ${closedCount} 🔒 closed` : ''}</p>
+      ${list.map(r => {
+        const approvals = allApprovals.filter(a => a.RequestID === r.RequestID);
+        const noteCount = allNotes.filter(n => n.RequestID === r.RequestID).length;
+        let badge;
+        try {
+          badge = stageBadgeHtml(r, approvals);
+        } catch (e) {
+          badge = displayStatus(r);
+        }
+        return `
+        <div class="mvoa-list-item" data-request-id="${escapeHtml(r.RequestID)}">
+          <div class="mvoa-row fin-ats-trail-toggle" data-request-id="${escapeHtml(r.RequestID)}" style="cursor:pointer;">
+            <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
+            ${badge}
+          </div>
+          ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(r.RequestedBy)} · Submitted ${formatDate(r.RequestedDate)}</p>
+          ${hasUnreadNote(r, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <button class="fin-ats-trail-toggle-btn btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">🔍 View Details</button>
+            ${notesButtonHtml(r, noteCount, 'fin-ats-notes-toggle', `data-request-id="${escapeHtml(r.RequestID)}"`)}
+            ${disableAtsButtonHtml(r)}
+          </div>
+          <div class="fin-ats-trail-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
+          <div class="fin-ats-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
+        </div>`;
+      }).join('')}
+    `;
+
+    function toggleTrail(id) {
+      const trailBody = body.querySelector(`.fin-ats-trail-body[data-request-id="${id}"]`);
+      const isHidden = trailBody.classList.contains('hidden');
+      if (!isHidden) { trailBody.classList.add('hidden'); return; }
+      const r = list.find(x => x.RequestID === id);
+      const approvals = allApprovals.filter(a => a.RequestID === id);
+      try {
+        trailBody.innerHTML = renderRequestTrailHtml(r, approvals);
+      } catch (e) {
+        trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
+      }
+      trailBody.classList.remove('hidden');
+    }
+    body.querySelectorAll('.fin-ats-trail-toggle, .fin-ats-trail-toggle-btn').forEach(el => {
+      el.addEventListener('click', () => toggleTrail(el.dataset.requestId));
+    });
+
+    body.querySelectorAll('.fin-ats-notes-toggle').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.requestId;
+        const notesBody = body.querySelector(`.fin-ats-notes-body[data-request-id="${id}"]`);
+        const isHidden = notesBody.classList.contains('hidden');
+        if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Notes'; return; }
+        notesBody.classList.remove('hidden');
+        await renderNotesThread(notesBody, id, btn, !isViewingAs(), container);
+      });
+    });
+
+    body.querySelectorAll('.fin-disable-ats-toggle').forEach(btn => {
+      btn.addEventListener('click', () => toggleDisableAts(btn.dataset.requestId, container));
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -5079,6 +5290,10 @@ const FinanceModule = (function () {
   }
   function isSecretaryPerson(person) {
     return roleMatchesToken(person, 'secretary');
+  }
+  // ADDED Sept 2026 for "Disable this ATS" permission gating.
+  function isPresidentPerson(person) {
+    return roleMatchesToken(person, 'president');
   }
 
   function currentPerson() {
