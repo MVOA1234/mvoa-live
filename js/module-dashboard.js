@@ -81,7 +81,13 @@ MVOA.registerModule('dashboard', {
 
 const DashboardModule = (function () {
   const IN_OUT_TAB = 'HSInOutLog'; // literal sheet name — not in MVOA.TABS, matches module-hs.js's own TAB_HS_INOUT_LOG
-  const IN_OUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy'];
+  // ADDED Sept 2026: 'VehicleDetails' and 'BackfilledAt' brought in line
+  // with module-hs.js's own INOUT_LOG_COLS (this file reads the same
+  // HSInOutLog sheet independently) — BackfilledAt is what marks a
+  // "✏️ Add Missed Entry" row (see openBackfillEntry in module-hs.js) so
+  // this dashboard can show it distinctly too, same as the Monthly
+  // Report.
+  const IN_OUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails', 'BackfilledAt'];
   const IN_OUT_TYPES = ['Sewage Disposal', 'Garbage Disposal', 'Water Tanker', 'Garden Waste Disposal'];
 
   // Column orders below must match the live sheet exactly — copied
@@ -669,7 +675,7 @@ const DashboardModule = (function () {
           <div style="margin-bottom:10px;">
             <span style="font-weight:600;">${escapeHtml(g.type)}</span>
             <div class="muted" style="font-size:0.8rem;margin-top:2px;">
-              ${g.entries.map(e => `${e.Direction === 'IN' ? '🟢 IN' : '🔴 OUT'} ${new Date(e.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${currentPeriod !== 'day' ? ' (' + new Date(e.Timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ')' : ''}`).join(' &nbsp;·&nbsp; ')}
+              ${g.entries.map(e => `<span${e.BackfilledAt ? ' style="color:#8a6d00;font-weight:600;" title="Backfilled entry — added after the fact"' : ''}>${e.Direction === 'IN' ? '🟢 IN' : '🔴 OUT'} ${new Date(e.Timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${currentPeriod !== 'day' ? ' (' + new Date(e.Timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ')' : ''}${e.BackfilledAt ? ' ✏️' : ''}</span>`).join(' &nbsp;·&nbsp; ')}
             </div>
           </div>
         `).join('') : '<p class="muted">No Sewage/Garbage/Water Tanker/Garden Waste activity logged this period.</p>'}
