@@ -1929,6 +1929,29 @@ const FinanceModule = (function () {
   function isPettyCashExpense(r) {
     return r.Category === 'Petty Cash' && r.PettyCashType === 'Expense';
   }
+  // GENERALIZED Sept 2026, per explicit instruction: an Approval-to-Spend
+  // amount is only ever an estimate/quotation at the time it's approved —
+  // the real invoice/receipt only exists once the actual spend happens,
+  // which can differ from the approved figure (e.g. approved ₹20,000,
+  // actual invoice ₹19,950 or ₹20,100). So EVERY Standard request must
+  // have a separate, linked Payment Request — carrying that real
+  // invoice/receipt, going through its own FM→...→Treasurer approval
+  // chain — before the Accountant can log an Expense Sheet entry from
+  // it; the Accountant should never act on the Approval-to-Spend's own
+  // estimated amount directly. The one exception is a category flagged
+  // ProcuredByDisbursement (e.g. "On Line Procurement") — that already
+  // has its own separate path where the Disbursement Officer buys first
+  // and attaches the real invoice themselves, before the Accountant ever
+  // sees it (see disbursementStageOnApproval) — it never goes through
+  // "New Payment Request" at all, so requiring one here would strand it.
+  // This is a direct generalization of isPettyCashExpense's own
+  // already-built "waits for a linked Payment Request" mechanism (Petty
+  // Cash naturally still matches this too, since it's never
+  // ProcuredByDisbursement) — see isSupersededByPaymentRequest for what
+  // happens once that linked Payment Request actually exists.
+  function requiresLinkedPaymentRequest(r) {
+    return r.RequestType !== 'PaymentRequest' && ruleForRequest(r).ProcuredByDisbursement !== 'Yes';
+  }
   // A request is fully "done" — nothing further will ever happen to it —
   // once it's Rejected, or has actually been paid out (PaymentStatus/
   // DisbursementStage both get set to 'Paid' together, see releasePayment
@@ -2452,6 +2475,15 @@ const FinanceModule = (function () {
     if (isPettyCashExpense(request)) {
       return { text: `Approved — awaiting linked "${PETTY_CASH_PAYMENT_TYPE}" Payment Request (FM)${sinceText(request)}`, cls: 'approved' };
     }
+    // GENERALIZED Sept 2026 — every other Approval-to-Spend not already
+    // routed through the Disbursement Officer (ProcuredByDisbursement)
+    // has the exact same "not enough on its own" situation as Petty Cash
+    // above: it's Approved, but nobody's submitted the linked Payment
+    // Request (with the real invoice) yet, so it isn't actually sitting
+    // with the Accountant to act on — see requiresLinkedPaymentRequest.
+    if (requiresLinkedPaymentRequest(request)) {
+      return { text: `Approved — awaiting linked Payment Request${sinceText(request)}`, cls: 'approved' };
+    }
     // Status === 'Approved' — now in the Schedule D payment-release chain
     switch (request.DisbursementStage) {
       case 'PendingProcurement': return { text: `Approved — awaiting purchase (Disbursement Officer)${sinceText(request)}`, cls: 'approved' };
@@ -2667,7 +2699,7 @@ const FinanceModule = (function () {
     const pendingApprovalSpendRows = pendingApprovalAll.filter(r => r.RequestType !== 'PaymentRequest');
     const pendingApprovalPaymentRows = pendingApprovalAll.filter(r => r.RequestType === 'PaymentRequest');
 
-    const needsExpenseEntryRows = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
+    const needsExpenseEntryRows = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !requiresLinkedPaymentRequest(r) && !isSupersededByPaymentRequest(r));
     const pendingProcurementRows = requestsCache.filter(r => r.DisbursementStage === 'PendingProcurement');
     const needsCorrectionRows = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
     const pendingTreasurerRows = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
@@ -4243,7 +4275,19 @@ const FinanceModule = (function () {
         : active.Status !== 'Approved'
           ? `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Linked Payment Request ${escapeHtml(active.RequestID)} submitted — awaiting its own approvals</p>`
           : `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Payment in progress — see linked Payment Request ${escapeHtml(active.RequestID)}</p>`;
-    } else if (request.Status === 'Approved' && !isPettyCashExpense(request)) {
+    } else if (isPettyCashExpense(request) && request.Status === 'Approved') {
+      // Approved (Secretary & Treasurer, pre-spend) but no Payment
+      // Request linked yet — see stageDescription's matching branch.
+      paymentsTrailHtml = `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Approved to spend — awaiting a linked "${PETTY_CASH_PAYMENT_TYPE}" Payment Request from the FM</p>`;
+    } else if (request.Status === 'Approved' && requiresLinkedPaymentRequest(request)) {
+      // GENERALIZED Sept 2026 — every other Approval-to-Spend that isn't
+      // routed through the Disbursement Officer is in exactly the same
+      // boat as Petty Cash above: Approved, but nothing for the
+      // Accountant to act on yet until someone submits the linked
+      // Payment Request carrying the real invoice — see
+      // requiresLinkedPaymentRequest / stageDescription's matching branch.
+      paymentsTrailHtml = `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Approved to spend — awaiting a linked Payment Request (with the actual invoice) before the Accountant can log it</p>`;
+    } else if (request.Status === 'Approved') {
       const stage = request.DisbursementStage;
       // Categories flagged ProcuredByDisbursement (e.g. "On Line
       // Procurement") route through the Disbursement Officer FIRST —
@@ -4265,10 +4309,6 @@ const FinanceModule = (function () {
         <p style="margin:10px 0 3px;font-weight:600;">Payment release:</p>
         ${stage === 'NeedsCorrection' ? '<p style="margin:3px 0;color:#b3261e;">🔁 Sent back by Treasurer for correction — waiting on Accountant</p>' : ''}
         ${steps.map(s => `<p style="margin:3px 0;color:${s.done ? 'green' : 'inherit'};" class="${s.done ? '' : 'muted'}">${s.done ? '✅' : '⏳'} ${s.label}</p>`).join('')}`;
-    } else if (isPettyCashExpense(request) && request.Status === 'Approved') {
-      // Approved (Secretary & Treasurer, pre-spend) but no Payment
-      // Request linked yet — see stageDescription's matching branch.
-      paymentsTrailHtml = `<p style="margin:10px 0 3px;color:#8a6d00;">⏳ Approved to spend — awaiting a linked "${PETTY_CASH_PAYMENT_TYPE}" Payment Request from the FM</p>`;
     }
 
     return `
@@ -4284,7 +4324,7 @@ const FinanceModule = (function () {
   function displayStatus(request) {
     if (request.Status === 'Rejected') return statusBadge('Rejected', 'rejected');
     if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return statusBadge('Paid', 'paid');
-    if (request.Status === 'Approved' && isPettyCashExpense(request)) return statusBadge(`Approved — awaiting linked Payment Request${sinceText(request)}`, 'approved');
+    if (request.Status === 'Approved' && (isPettyCashExpense(request) || requiresLinkedPaymentRequest(request))) return statusBadge(`Approved — awaiting linked Payment Request${sinceText(request)}`, 'approved');
     if (request.Status === 'Approved') return statusBadge(`Approved — awaiting payment${sinceText(request)}`, 'approved');
     return statusBadge(`Pending approval${sinceText(request)}`, 'pending');
   }
@@ -5065,7 +5105,7 @@ const FinanceModule = (function () {
     const list = [];
     const add = (arr) => arr.forEach(r => { if (!seen.has(r.RequestID)) { seen.add(r.RequestID); list.push(r); } });
     if (isAcct || isAdminUser) {
-      add(requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r)));
+      add(requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !requiresLinkedPaymentRequest(r) && !isSupersededByPaymentRequest(r)));
       add(requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection'));
     }
     if (isTres || isAdminUser) add(requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer'));
@@ -5104,7 +5144,7 @@ const FinanceModule = (function () {
       return;
     }
 
-    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !isPettyCashExpense(r) && !isSupersededByPaymentRequest(r));
+    const needsExpenseEntry = requestsCache.filter(r => r.Status === 'Approved' && !r.DisbursementStage && !requiresLinkedPaymentRequest(r) && !isSupersededByPaymentRequest(r));
     const pendingProcurement = requestsCache.filter(r => r.DisbursementStage === 'PendingProcurement');
     const needsCorrection = requestsCache.filter(r => r.DisbursementStage === 'NeedsCorrection');
     const pendingTreasurer = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
