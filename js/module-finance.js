@@ -381,6 +381,7 @@ const FinanceModule = (function () {
     if (!b) return null;
     const total = Number(b.TotalBudget) || 0;
     const { start, end } = fyDateRange(fy);
+    const inFy = r => { const d = new Date(r.RequestedDate); return d >= start && d <= end; };
     // "Consumed" = Approved requests against this category that are
     // Budgeted (Unbudgeted spend, by definition, doesn't draw against a
     // budget line) and fall within this FY. Each one starts out counted
@@ -401,9 +402,9 @@ const FinanceModule = (function () {
     // or not linked to a Payment Request at all) are untouched by this —
     // this only ever fires for requests something actually links back to
     // via LinkedSpendRequestID.
-    const consumed = requestsCache
+    const consumedViaSpendApproval = requestsCache
       .filter(r => r.Category === category && r.BudgetStatus === 'Budgeted' && r.Status === 'Approved')
-      .filter(r => { const d = new Date(r.RequestedDate); return d >= start && d <= end; })
+      .filter(inFy)
       .reduce((sum, r) => {
         const linkedApprovedPayments = requestsCache.filter(p =>
           p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === r.RequestID && p.Status === 'Approved');
@@ -412,6 +413,23 @@ const FinanceModule = (function () {
           : (Number(r.Amount) || 0);
         return sum + actual;
       }, 0);
+    // ADDED Sept 2026: some categories (e.g. Salaries) are never routed
+    // through Spend Approval at all — they're submitted straight via
+    // "New Payment Request" (Schedule D), so they never get a
+    // BudgetStatus of 'Budgeted' and were previously invisible to Budget
+    // Status entirely (the request existed and drew real money, but no
+    // budget line ever reflected it). Counts every Approved Payment
+    // Request in this category that ISN'T linked back to a Spend
+    // Approval request — that "linked" case is exactly what the block
+    // above already sums, so there's no overlap/double-count between the
+    // two: a Payment Request is counted in exactly one of them,
+    // depending on whether LinkedSpendRequestID is set.
+    const consumedViaDirectPayment = requestsCache
+      .filter(r => r.RequestType === 'PaymentRequest' && r.Category === category &&
+        !r.LinkedSpendRequestID && r.Status === 'Approved')
+      .filter(inFy)
+      .reduce((sum, r) => sum + (Number(r.Amount) || 0), 0);
+    const consumed = consumedViaSpendApproval + consumedViaDirectPayment;
     return { total, consumed, available: total - consumed, fy };
   }
 
