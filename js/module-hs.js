@@ -4021,6 +4021,15 @@ const HSModule = (function () {
     if (shift === '3rd') return '9 PM – 7 AM';
     return '';
   }
+  // ADDED Sept 2026 — same ShiftApplicability match used to build the
+  // actual checklist form (see renderChecklistForm's `items` filter);
+  // extracted so the shift-picker can also use it, to hide a shift with
+  // nothing to check entirely rather than offering it into a dead end.
+  function shiftHasApplicableItems(templateId, shift) {
+    return itemsCache.some(i => i.TemplateID === templateId &&
+      (i.ShiftApplicability === 'Both' || i.ShiftApplicability === shift ||
+       (i.ShiftApplicability === '2nd3rd' && (shift === '2nd' || shift === '3rd'))));
+  }
   // Security's "Daily Rounds Photos" doesn't fit the 1st/2nd/3rd shift
   // system at all — two fixed windows, deliberately kept as its own
   // separate mechanic rather than overloading "shift" terminology.
@@ -4089,6 +4098,20 @@ const HSModule = (function () {
         '2nd': hasSubmittedToday(currentTemplate.TemplateID, '2nd'),
         '3rd': hasSubmittedToday(currentTemplate.TemplateID, '3rd') };
       const shiftBtn = (shift, label) => {
+        // ADDED Sept 2026 — bug found in testing: a shift-based template
+        // whose items are ALL restricted to one shift (e.g. Swimming Pool
+        // Infra's daily checks are ShiftApplicability='2nd' only) still
+        // offered every shift button here, and picking one with nothing
+        // to check landed on an empty "No checklist items set up for
+        // this template / shift" screen with a live Submit Checklist
+        // button doing nothing useful. Rather than a new per-template
+        // "which shifts are allowed" column, this derives it from the
+        // items themselves — the same ShiftApplicability check used to
+        // filter the actual form below (see the `items` filter further
+        // down) — so a shift with zero applicable items is left off the
+        // picker entirely instead of shown disabled or, worse, clickable
+        // into a dead end.
+        if (!shiftHasApplicableItems(currentTemplate.TemplateID, shift)) return '';
         if (shiftDone[shift]) {
           return `<button class="btn-secondary" disabled style="width:100%;margin-bottom:8px;opacity:0.5;cursor:not-allowed;">${label} — Already submitted today</button>`;
         }
