@@ -515,10 +515,43 @@ const FinanceModule = (function () {
   function objToRow(cols, o) { return cols.map(c => o[c] !== undefined ? o[c] : ''); }
 
   async function loadAll(force) {
-    const [ruleRows, reqRows, roleRows] = await Promise.all([
+    // Perf fix: all independent tab reads now fire in ONE parallel batch
+    // instead of mostly-sequential round trips — the old version did 3
+    // parallel reads, then 4 MORE reads one after another (each its own
+    // network round trip), then computeQueueCards() and
+    // computeMyApprovalsNewNoteCounts() sequentially on top of that (each
+    // with their own internal reads) — around 8-9 sequential round trips
+    // per Finance open, which is what made the app take 10-14s to load.
+    // The four "optional" tabs below still fail open exactly like before
+    // (.catch(() => null) instead of try/catch — same effect).
+    const [
+      ruleRows, reqRows, roleRows,
+      budgetRows, revRows, contractRows, pRuleRows
+    ] = await Promise.all([
       MVOA.sheetsRead(TAB_RULES, force),
       MVOA.sheetsRead(TAB_REQUESTS, force),
-      MVOA.sheetsRead(TAB_ROLES, force)
+      MVOA.sheetsRead(TAB_ROLES, force),
+      // Optional tab — Budget Available/Consumed only shows once this
+      // exists; fails open so a fresh install without it yet doesn't
+      // break anything else.
+      MVOA.sheetsRead(TAB_BUDGETS, force).catch(() => null),
+      // Optional tab — Budget Input/Revise buttons still work without it
+      // (a fresh install just won't have any revision history yet);
+      // fails open like the other optional tabs here.
+      MVOA.sheetsRead(TAB_BUDGET_REVISIONS, force).catch(() => null),
+      // Optional tab — Contract Expiring Soon banner only shows once this
+      // exists; fails open so nothing breaks before it's set up.
+      MVOA.sheetsRead(TAB_CONTRACTS, force).catch(() => null),
+      // Optional tab — the "New Payment Request" flow only shows up once
+      // this exists; fails open like the others above.
+      MVOA.sheetsRead(TAB_PAYMENT_RULES, force).catch(() => null),
+      // Cache-warming prefetches only (results intentionally unused here):
+      // computeQueueCards() and computeMyApprovalsNewNoteCounts() below
+      // still do their own reads of Approvals/Notes internally (unchanged
+      // code), but sheetsRead() caches each tab for ~12s, so those reads
+      // now land on a warm cache instead of making fresh network calls.
+      MVOA.sheetsRead(TAB_APPROVALS, force).catch(() => null),
+      MVOA.sheetsRead(TAB_NOTES, force).catch(() => null)
     ]);
     rulesCache = ruleRows.slice(1).map((r, i) => rowToObj(RULE_COLS, r, i + 2)).filter(r => r.RuleID);
     requestsCache = reqRows.slice(1).map((r, i) => rowToObj(REQUEST_COLS, r, i + 2)).filter(r => r.RequestID);
@@ -528,39 +561,10 @@ const FinanceModule = (function () {
     } else {
       rolesCache = [];
     }
-    // Optional tab — Budget Available/Consumed only shows once this exists;
-    // fails open so a fresh install without it yet doesn't break anything else.
-    try {
-      const budgetRows = await MVOA.sheetsRead(TAB_BUDGETS, force);
-      budgetsCache = budgetRows.slice(1).map((r, i) => rowToObj(BUDGET_COLS, r, i + 2)).filter(b => b.BudgetID);
-    } catch (e) {
-      budgetsCache = [];
-    }
-    // Optional tab — Budget Input/Revise buttons still work without it (a
-    // fresh install just won't have any revision history yet); fails open
-    // like the other optional tabs above.
-    try {
-      const revRows = await MVOA.sheetsRead(TAB_BUDGET_REVISIONS, force);
-      budgetRevisionsCache = revRows.slice(1).map((r, i) => rowToObj(BUDGET_REVISION_COLS, r, i + 2)).filter(v => v.RevisionID);
-    } catch (e) {
-      budgetRevisionsCache = [];
-    }
-    // Optional tab — Contract Expiring Soon banner only shows once this
-    // exists; fails open so nothing breaks before it's set up.
-    try {
-      const contractRows = await MVOA.sheetsRead(TAB_CONTRACTS, force);
-      contractsCache = contractRows.slice(1).map((r, i) => rowToObj(CONTRACT_COLS, r, i + 2)).filter(c => c.ContractID);
-    } catch (e) {
-      contractsCache = [];
-    }
-    // Optional tab — the "New Payment Request" flow only shows up once
-    // this exists; fails open like the others above.
-    try {
-      const pRuleRows = await MVOA.sheetsRead(TAB_PAYMENT_RULES, force);
-      paymentRulesCache = pRuleRows.slice(1).map((r, i) => rowToObj(PAYMENT_RULE_COLS, r, i + 2)).filter(p => p.PaymentType);
-    } catch (e) {
-      paymentRulesCache = [];
-    }
+    budgetsCache = budgetRows ? budgetRows.slice(1).map((r, i) => rowToObj(BUDGET_COLS, r, i + 2)).filter(b => b.BudgetID) : [];
+    budgetRevisionsCache = revRows ? revRows.slice(1).map((r, i) => rowToObj(BUDGET_REVISION_COLS, r, i + 2)).filter(v => v.RevisionID) : [];
+    contractsCache = contractRows ? contractRows.slice(1).map((r, i) => rowToObj(CONTRACT_COLS, r, i + 2)).filter(c => c.ContractID) : [];
+    paymentRulesCache = pRuleRows ? pRuleRows.slice(1).map((r, i) => rowToObj(PAYMENT_RULE_COLS, r, i + 2)).filter(p => p.PaymentType) : [];
     // Bug found in testing: the "Approval Queue" nav-tab count used to just
     // count ALL PendingApproval requests, while the tab's own "Awaiting
     // your action" list correctly filtered to items THIS user can actually
@@ -578,11 +582,17 @@ const FinanceModule = (function () {
     // exactly the symptom of it clearing up only after leaving and
     // re-entering the module, which forces a genuinely fresh load. Every
     // internal loadAll() call after a mutation now also passes true.
-    try {
-      queueCardsCache = await computeQueueCards(force, effectiveUser());
-    } catch (e) {
-      queueCardsCache = []; // fail closed on the count rather than showing a wrong number
-    }
+    //
+    // Perf fix: these two used to run as sequential awaits, each doing its
+    // own internal sheetsRead() of Approvals/Notes on top of everything
+    // above; now they run in parallel, and (per the cache-warming prefetch
+    // above) their internal reads land on a warm cache instead of the
+    // network.
+    const [queueResult, noteCountResult] = await Promise.allSettled([
+      computeQueueCards(force, effectiveUser()),
+      computeMyApprovalsNewNoteCounts(force, effectiveUser())
+    ]);
+    queueCardsCache = queueResult.status === 'fulfilled' ? queueResult.value : []; // fail closed on the count rather than showing a wrong number
     // Live count for the "✅ My Approvals" nav button itself — how many
     // requests this user previously approved/rejected now have an
     // unread note (see NotesOpenedAt/hasUnreadNote). Safe to show as a
@@ -590,11 +600,7 @@ const FinanceModule = (function () {
     // earlier) since it's now backed by genuine shared tracking, not a
     // heuristic — same underlying data the tab itself displays, so
     // count and content can't disagree.
-    try {
-      myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(force, effectiveUser());
-    } catch (e) {
-      myApprovalsNewNoteCounts = { spend: 0, payment: 0 };
-    }
+    myApprovalsNewNoteCounts = noteCountResult.status === 'fulfilled' ? noteCountResult.value : { spend: 0, payment: 0 };
     updateBadge();
   }
 
@@ -765,18 +771,20 @@ const FinanceModule = (function () {
     // (and not see their own "Logged in as" reality) on the next visit.
     viewAsPerson = null;
     container.innerHTML = `<p class="muted">Loading…</p>`;
-    // Separate try/catch from the main load below — the
+    // Perf fix: these two used to run as sequential awaits even though
+    // they're fully independent of each other — now they run in parallel.
+    // Still using separate outcomes below (not a shared try/catch) — the
     // PermissionsMatrix_Finance sheet tab may not exist yet (it's a new,
     // opt-in feature), and canViewFinanceSection/canEditFinanceSection both
     // default to fully open when the matrix hasn't loaded, so a missing tab
     // here should never take down the rest of the Finance Application.
-    try {
-      await MVOA.loadFinancePermissionsMatrix(true);
-    } catch (e) { /* PermissionsMatrix_Finance tab may not exist yet — defaults to fully open */ }
-    try {
-      await loadAll(true);
-    } catch (e) {
-      container.innerHTML = `<p class="error-text">Could not load Finance Application: ${escapeHtml(e.message)}</p>`;
+    const [matrixResult, loadAllResult] = await Promise.allSettled([
+      MVOA.loadFinancePermissionsMatrix(true),
+      loadAll(true)
+    ]);
+    if (matrixResult.status === 'rejected') { /* PermissionsMatrix_Finance tab may not exist yet — defaults to fully open */ }
+    if (loadAllResult.status === 'rejected') {
+      container.innerHTML = `<p class="error-text">Could not load Finance Application: ${escapeHtml(loadAllResult.reason && loadAllResult.reason.message)}</p>`;
       return;
     }
     render(container);
