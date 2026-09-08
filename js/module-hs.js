@@ -2848,7 +2848,14 @@ const HSModule = (function () {
     // values everywhere else (cellFor/performedByFor just compare
     // l.Shift === shift generically), so grouping by them here is a
     // one-line fix, not a deeper change.
-    const shifts = isShiftBased ? ['1st', '2nd', '3rd'] : isRoundBased ? activeRoundKeys() : [null];
+    // ADDED Sept 2026 — same fix as the shift-picker on the submission
+    // screen (see shiftHasApplicableItems): a shift-based template whose
+    // items are ALL restricted to one shift (e.g. Swimming Pool Infra —
+    // every item is ShiftApplicability='2nd') used to still get a full
+    // "1st Shift"/"3rd Shift" section here too, permanently empty since
+    // nothing could ever be submitted under those shifts. Only offer a
+    // shift section the template actually has at least one item for.
+    const shifts = isShiftBased ? ['1st', '2nd', '3rd'].filter(s => shiftHasApplicableItems(template.TemplateID, s)) : isRoundBased ? activeRoundKeys() : [null];
     // "Diesel Level Before/After Top Up" don't belong in this raw
     // per-item grid: "After Top Up" only ever gets a value on the rare
     // shift a top-up actually happens (via the separate Log Diesel
