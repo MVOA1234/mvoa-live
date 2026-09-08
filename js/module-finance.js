@@ -4765,7 +4765,7 @@ const FinanceModule = (function () {
         return `
         <div class="mvoa-list-item" data-request-id="${escapeHtml(r.RequestID)}">
           <div class="mvoa-row fin-ats-trail-toggle" data-request-id="${escapeHtml(r.RequestID)}" style="cursor:pointer;">
-            <strong>${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
+            <strong>${escapeHtml(r.RequestID)} · ${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
             ${badge}
           </div>
           ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
