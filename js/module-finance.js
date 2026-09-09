@@ -3730,6 +3730,27 @@ const FinanceModule = (function () {
         return;
       }
       const rule = result.rule;
+      // Petty Cash Expense with no Administrative/Financial/EC/AGM
+      // requirement at all (the ≤₹1,000 tier — see resolveRule/R03) has no
+      // approval step for Spend Approval to add here; submitting it anyway
+      // just creates a zero-value, auto-approved ATS record that still
+      // needs its own separate linked Payment Request afterward — a
+      // no-value-add extra step. Point the FM straight at the Payment
+      // Request instead, which already supports submitting with no linked
+      // Approval to Spend (see refreshSpendRequestPicker's "optional"
+      // linking) — exactly the direct path this tier is meant to use.
+      if (category === 'Petty Cash' && pettyCashType === 'Expense' &&
+        parseApproverGroups(rule.AdministrativeApprover).length === 0 &&
+        parseApproverGroups(rule.FinancialApprover).length === 0 &&
+        rule.ECApprovalRequired !== 'Yes' && rule.ECApprovalRequired !== 'Ratification' &&
+        rule.AGMApprovalRequired !== 'Yes') {
+        previewEl.innerHTML = `
+          <div class="mvoa-list-item" style="margin-top:10px;background:#fff8e1;">
+            <p style="margin:0;font-weight:600;">This Petty Cash spend doesn't need Spend Approval.</p>
+            <p class="muted" style="margin:6px 0 0;">At ${escapeHtml(formatAmount(amount))}, there's no Administrative/Financial approver required for Petty Cash — submit it directly as a Payment Request instead: <strong>💵 New Payment Request → ${escapeHtml(PETTY_CASH_PAYMENT_TYPE)}</strong> (no linked Approval to Spend needed).</p>
+          </div>`;
+        return;
+      }
       const docs = requiredDocsList(rule);
       const budgetStatus = effectiveBudgetStatus(currentBudgetStatus(), rule);
       const fy = currentFY();
@@ -4059,6 +4080,18 @@ const FinanceModule = (function () {
     if (result.blocked) { errEl.textContent = result.message; return; }
     if (!result.rule) { errEl.textContent = 'No approval rule matches this category/amount combination — contact your Developer.'; return; }
     const rule = result.rule;
+    // Same "no approval stages" tier refreshRulePreview already warns
+    // about above the form — enforced here too in case that guidance was
+    // missed, so this no-value-add zero-stage ATS record can't actually
+    // be created. See that comment for the full reasoning.
+    if (category === 'Petty Cash' && pettyCashType === 'Expense' &&
+      parseApproverGroups(rule.AdministrativeApprover).length === 0 &&
+      parseApproverGroups(rule.FinancialApprover).length === 0 &&
+      rule.ECApprovalRequired !== 'Yes' && rule.ECApprovalRequired !== 'Ratification' &&
+      rule.AGMApprovalRequired !== 'Yes') {
+      errEl.textContent = `Petty Cash spends of ${formatAmount(amount)} don't need Spend Approval — submit this directly as a Payment Request instead (💵 New Payment Request → "${PETTY_CASH_PAYMENT_TYPE}"), no Approval to Spend needed.`;
+      return;
+    }
     // See effectiveBudgetStatus's comment — a single-tier category (no
     // Budgeted/Unbudgeted selector shown) must still be saved as
     // 'Budgeted' by default, or its FinanceBudgets line never accrues
