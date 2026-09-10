@@ -4345,7 +4345,7 @@ const FinanceModule = (function () {
   // Approved, where it stands in the Payments pipeline. Shown on "My
   // Requests" so the requester can see the whole picture, not just the
   // current stage.
-  function renderRequestTrailHtml(request, approvals) {
+  async function renderRequestTrailHtml(request, approvals) {
     // Rebuilt as a true CHRONOLOGICAL event log rather than grouped by
     // stage — bug found in testing: grouping by stage bunched every
     // Secretary action together even when a Treasurer send-back
@@ -4430,13 +4430,29 @@ const FinanceModule = (function () {
       // truthy and showed the Accountant step as already done before the
       // purchase had even happened. Both fixed below.
       const isProcurementFlow = ruleForRequest(request).ProcuredByDisbursement === 'Yes';
+      // Timestamps for this section come from the actual Expense Sheet
+      // row, not from the request — "Passed By"/"Approved By" are already
+      // formatted "Name · date" stamps written at the exact moment the
+      // Accountant logs the entry / the Treasurer reviews it (see
+      // saveExpenseEntry/treasurerApprove), so they're the real per-step
+      // history the "Approval trail:" section above already shows for
+      // the spend-approval half of the journey. A failed/slow read here
+      // must never break the rest of the trail, so it's best-effort —
+      // the steps still render (just without a stamp) if this fails.
+      let expenseEntry = null;
+      if (request.ExpenseTab) {
+        try { expenseEntry = await readExpenseRow(request.ExpenseTab, request.RequestID); } catch (e) { /* best-effort — trail still renders without timestamps */ }
+      }
+      const loggedStamp = expenseEntry && expenseEntry.row.PassedBy ? ` — ${escapeHtml(expenseEntry.row.PassedBy)}` : '';
+      const reviewedStamp = expenseEntry && expenseEntry.row.ApprovedBy ? ` — ${escapeHtml(expenseEntry.row.ApprovedBy)}` : '';
+      const paidStamp = stage === 'Paid' && request.PaymentDate ? ` — ${formatDate(request.PaymentDate)}` : '';
       const steps = [];
       if (isProcurementFlow) {
         steps.push({ done: !!request.ProcuredBy, label: `Purchase made & invoice attached (Disbursement Officer)${request.ProcuredBy ? ' — ' + escapeHtml(request.ProcuredBy) : ''}` });
       }
-      steps.push({ done: !!stage && stage !== 'PendingProcurement', label: 'Expense Sheet entry logged (Accountant)' });
-      steps.push({ done: stage === 'PendingPayment' || stage === 'Paid', label: 'Treasurer review' });
-      steps.push({ done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}` });
+      steps.push({ done: !!stage && stage !== 'PendingProcurement', label: `Expense Sheet entry logged (Accountant)${loggedStamp}` });
+      steps.push({ done: stage === 'PendingPayment' || stage === 'Paid', label: `Treasurer review${reviewedStamp}` });
+      steps.push({ done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}${paidStamp}` });
       paymentsTrailHtml = `
         <p style="margin:10px 0 3px;font-weight:600;">Payment release:</p>
         ${stage === 'NeedsCorrection' ? '<p style="margin:3px 0;color:#b3261e;">🔁 Sent back by Treasurer for correction — waiting on Accountant</p>' : ''}
@@ -4545,20 +4561,22 @@ const FinanceModule = (function () {
         </div>`;
     }).join('');
 
-    function toggleTrail(idx) {
+    async function toggleTrail(idx) {
       const trailBody = body.querySelector(`.fin-myapproval-trail-body[data-idx="${idx}"]`);
       if (!trailBody) return;
       const isHidden = trailBody.classList.contains('hidden');
       if (!isHidden) { trailBody.classList.add('hidden'); return; }
+      trailBody.classList.remove('hidden');
       const a = mine[idx];
       const req = requestsCache.find(r => r.RequestID === a.RequestID);
       const approvals = allApprovals.filter(x => x.RequestID === a.RequestID);
+      if (!req) { trailBody.innerHTML = '<p class="muted">Request no longer available.</p>'; return; }
+      trailBody.innerHTML = `<p class="muted">Loading…</p>`;
       try {
-        trailBody.innerHTML = req ? renderRequestTrailHtml(req, approvals) : '<p class="muted">Request no longer available.</p>';
+        trailBody.innerHTML = await renderRequestTrailHtml(req, approvals);
       } catch (e) {
         trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
       }
-      trailBody.classList.remove('hidden');
     }
     body.querySelectorAll('.fin-myapproval-trail-toggle, .fin-myapproval-trail-toggle-btn').forEach(el => {
       el.addEventListener('click', () => toggleTrail(el.dataset.idx));
@@ -4642,18 +4660,19 @@ const FinanceModule = (function () {
     `; }).join('');
     wireNewItemCards(body, () => render(container));
 
-    function toggleTrail(id) {
+    async function toggleTrail(id) {
       const trailBody = body.querySelector(`.fin-mine-trail-body[data-request-id="${id}"]`);
       const isHidden = trailBody.classList.contains('hidden');
       if (!isHidden) { trailBody.classList.add('hidden'); return; }
+      trailBody.classList.remove('hidden');
       const r = list.find(x => x.RequestID === id);
       const approvals = allApprovals.filter(a => a.RequestID === id);
+      trailBody.innerHTML = `<p class="muted">Loading…</p>`;
       try {
-        trailBody.innerHTML = renderRequestTrailHtml(r, approvals);
+        trailBody.innerHTML = await renderRequestTrailHtml(r, approvals);
       } catch (e) {
         trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
       }
-      trailBody.classList.remove('hidden');
     }
     body.querySelectorAll('.fin-mine-trail-toggle, .fin-mine-trail-toggle-btn').forEach(el => {
       el.addEventListener('click', () => toggleTrail(el.dataset.requestId));
@@ -4815,18 +4834,19 @@ const FinanceModule = (function () {
       }).join('')}
     `;
 
-    function toggleTrail(id) {
+    async function toggleTrail(id) {
       const trailBody = body.querySelector(`.fin-ats-trail-body[data-request-id="${id}"]`);
       const isHidden = trailBody.classList.contains('hidden');
       if (!isHidden) { trailBody.classList.add('hidden'); return; }
+      trailBody.classList.remove('hidden');
       const r = list.find(x => x.RequestID === id);
       const approvals = allApprovals.filter(a => a.RequestID === id);
+      trailBody.innerHTML = `<p class="muted">Loading…</p>`;
       try {
-        trailBody.innerHTML = renderRequestTrailHtml(r, approvals);
+        trailBody.innerHTML = await renderRequestTrailHtml(r, approvals);
       } catch (e) {
         trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
       }
-      trailBody.classList.remove('hidden');
     }
     body.querySelectorAll('.fin-ats-trail-toggle, .fin-ats-trail-toggle-btn').forEach(el => {
       el.addEventListener('click', () => toggleTrail(el.dataset.requestId));
