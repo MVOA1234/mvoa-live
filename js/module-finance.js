@@ -1018,6 +1018,7 @@ const FinanceModule = (function () {
           if (currentTopTab === 'dashboard') {
             dashboardDrilldownKey = null; dashboardDrilldownStageMap = null;
             dashboardStatDrilldownKey = null; dashboardBudgetDrilldownCategory = null;
+            dashboardStatDrilldownStageMap = null;
           }
           render(container);
         });
@@ -2799,6 +2800,14 @@ const FinanceModule = (function () {
   // section.
   let dashboardStatDrilldownKey = null;
   let dashboardBudgetDrilldownCategory = null;
+  // Lazily-loaded "Pending With" text for the 'pendingApprovals' stat
+  // tile's drill-down — same reasoning as dashboardDrilldownStageMap
+  // below: knowing exactly which approver a request is waiting on needs
+  // FinanceApprovals, which the dashboard otherwise avoids fetching, so
+  // it's only pulled in once that specific tile is actually opened.
+  // Keyed by RequestID, same shape as dashboardDrilldownStageMap. null
+  // while loading/not yet fetched.
+  let dashboardStatDrilldownStageMap = null;
   // Only the two "Pending Approval" groups can be sitting at more than one
   // possible stage (Administrative/Financial/EC/AGM for spend, FM/OpsHead/
   // Secretary/Treasurer/President for payment) — everything else in the
@@ -2859,12 +2868,20 @@ const FinanceModule = (function () {
         <button type="button" id="${closeId}" class="btn-secondary fin-dashboard-panel-close" style="font-size:0.75rem;padding:2px 10px;">✕ Close</button>
       </div>`;
   }
-  function dashboardRequestsTableHtml(rows, dateCol) {
+  // ADDED Sept 2026 — optional `withCol` ({label, resolve(r)}) inserts a
+  // "Pending With" column between Requested By and the date column.
+  // resolve() may return either plain text (escaped by the caller if
+  // needed) or an already-safe HTML string — same convention as
+  // dashboardDrilldownPanelHtml's stage-map cell above, which this
+  // mirrors, so a "Loading…" placeholder or a stageDescription() string
+  // (already includes its own "— since ..." suffix) can both be passed
+  // straight through unescaped.
+  function dashboardRequestsTableHtml(rows, dateCol, withCol) {
     if (!rows.length) return `<p class="muted">Nothing here.</p>`;
     return `
       <div style="overflow-x:auto;width:100%;">
       <table class="mvoa-table" style="width:100%;">
-        <thead><tr><th>Request ID</th><th>Category</th><th>Amount</th><th>Requested By</th><th>${escapeHtml(dateCol.label)}</th></tr></thead>
+        <thead><tr><th>Request ID</th><th>Category</th><th>Amount</th><th>Requested By</th>${withCol ? `<th>${escapeHtml(withCol.label)}</th>` : ''}<th>${escapeHtml(dateCol.label)}</th></tr></thead>
         <tbody>
           ${rows.map(r => `
             <tr>
@@ -2872,6 +2889,7 @@ const FinanceModule = (function () {
               <td>${escapeHtml(r.Category)}${r.Vendor ? ` <span class="muted">(${escapeHtml(r.Vendor)})</span>` : ''}</td>
               <td>${formatAmount(r.Amount)}</td>
               <td>${escapeHtml(r.RequestedBy)}</td>
+              ${withCol ? `<td>${withCol.resolve(r)}</td>` : ''}
               <td>${formatDate(r[dateCol.field])}</td>
             </tr>`).join('')}
         </tbody>
@@ -2943,17 +2961,35 @@ const FinanceModule = (function () {
         </div>`;
     }
     if (key === 'pendingApprovals') {
+      // "Pending With" needs FinanceApprovals (who's approved so far),
+      // fetched lazily by the click handler into ctx.pendingApprovalsStageMap
+      // — same lazy-load reasoning as the Pipeline badges' own stage map.
+      // stageDescription()'s text already carries its own "— since ..."
+      // suffix (see sinceText), so this one column covers both "with
+      // whom" and "since when" at once; Submitted stays alongside it for
+      // when the request first came in, which can be well before it
+      // reached its current stage.
+      const stageMap = ctx.pendingApprovalsStageMap;
       return `
         <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
           ${dashboardPanelHeaderHtml(`Pending Approvals — ${ctx.pendingApprovalAll.length}`, closeId)}
-          ${dashboardRequestsTableHtml(ctx.pendingApprovalAll, { label: 'Submitted', field: 'RequestedDate' })}
+          ${dashboardRequestsTableHtml(ctx.pendingApprovalAll, { label: 'Submitted', field: 'RequestedDate' }, {
+            label: 'Pending With',
+            resolve: r => stageMap ? (stageMap[r.RequestID] || displayStatus(r)) : '<span class="muted">Loading…</span>'
+          })}
         </div>`;
     }
     if (key === 'awaitingDisbursement') {
+      // Every row here sits at the exact same stage (DisbursementStage
+      // 'PendingPayment') — no per-row lookup needed, "Pending With" is
+      // always the Disbursement Officer. "Since" (StageEnteredAt) already
+      // says when it got there.
       return `
         <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
           ${dashboardPanelHeaderHtml(`Awaiting Disbursement — ${ctx.pendingPaymentRows.length}`, closeId)}
-          ${dashboardRequestsTableHtml(ctx.pendingPaymentRows, { label: 'Since', field: 'StageEnteredAt' })}
+          ${dashboardRequestsTableHtml(ctx.pendingPaymentRows, { label: 'Since', field: 'StageEnteredAt' }, {
+            label: 'Pending With', resolve: () => 'Disbursement Officer'
+          })}
         </div>`;
     }
     if (key === 'paidThisMonth') {
@@ -3139,7 +3175,8 @@ const FinanceModule = (function () {
     const statCtx = {
       fy, budgetRowsFy, budgetTotals, remaining,
       pendingApprovalAll, pendingPaymentRows, paidThisMonthRows,
-      pettyCashSpendThisMonthRows, pettyCashBalance
+      pettyCashSpendThisMonthRows, pettyCashBalance,
+      pendingApprovalsStageMap: dashboardStatDrilldownStageMap
     };
     body.innerHTML = `
       <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:0;">
@@ -3265,8 +3302,39 @@ const FinanceModule = (function () {
     body.querySelectorAll('.fin-dashboard-stat-tile').forEach(tile => {
       tile.addEventListener('click', () => {
         const key = tile.dataset.key;
-        dashboardStatDrilldownKey = dashboardStatDrilldownKey === key ? null : key;
+        if (dashboardStatDrilldownKey === key) {
+          dashboardStatDrilldownKey = null;
+          dashboardStatDrilldownStageMap = null;
+          renderDashboardTab(body, container);
+          return;
+        }
+        dashboardStatDrilldownKey = key;
+        dashboardStatDrilldownStageMap = null; // re-render now with "Loading…" for Pending With if applicable
         renderDashboardTab(body, container);
+        // "Pending With" for the combined Pending Approvals tile needs
+        // FinanceApprovals (who's approved so far) — same lazy fetch, on
+        // open only, as the Pipeline badges' own stage map above.
+        // stageDescription() handles both Spend-Approval and Payment
+        // Request rows, so one fetch/map covers the whole tile even
+        // though pendingApprovalAll mixes both types.
+        if (key === 'pendingApprovals') {
+          const rows = pendingApprovalAll;
+          MVOA.sheetsRead(TAB_APPROVALS).then(approvalRows => {
+            if (dashboardStatDrilldownKey !== key) return; // user switched away while this was in flight
+            const allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+            const map = {};
+            rows.forEach(r => {
+              const approvalsForReq = allApprovals.filter(a => a.RequestID === r.RequestID);
+              let text = stageDescription(r, approvalsForReq).text;
+              // Same requester-facing rewrite as the Pipeline badges'
+              // stage map — see there for why "you" is ambiguous here.
+              text = text.replace(/^🔁 Sent back to you/, `🔁 With Requester (${escapeHtml(r.RequestedBy)}) — sent back for correction`);
+              map[r.RequestID] = text;
+            });
+            dashboardStatDrilldownStageMap = map;
+            renderDashboardTab(body, container);
+          }).catch(() => { /* leave the generic status showing on failure */ });
+        }
       });
     });
     const statCloseBtn = body.querySelector('#fin-dashboard-stat-drilldown-close');
