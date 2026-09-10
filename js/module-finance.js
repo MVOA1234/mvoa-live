@@ -1661,21 +1661,25 @@ const FinanceModule = (function () {
     const d = new Date(iso);
     return isNaN(d) ? iso : d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
-  // Explicit dd-mm-yyyy, independent of whoever's browser is doing the
-  // formatting. Used for the Expense Sheet's "Approved By"/"Passed By"/
-  // "Date" stamps specifically — those get written ONCE, as plain text,
-  // at the moment someone clicks a button, and toLocaleDateString() with
-  // no locale argument silently follows THAT PERSON's own browser
-  // settings. That's exactly why "Approved By" and "Passed By" on the
-  // same Expense Sheet row could show two different date orderings for
-  // the same day (e.g. "2/9/2026" vs "9/2/2026") — not a display
-  // preference difference, a genuine ambiguity baked into the sheet.
+  // Explicit dd-mm-yyyy HH:mm (24-hour), independent of whoever's browser
+  // is doing the formatting. Used for the Expense Sheet's "Approved By"/
+  // "Passed By"/"Date" stamps specifically — those get written ONCE, as
+  // plain text, at the moment someone clicks a button, and
+  // toLocaleDateString()/toLocaleTimeString() with no locale argument
+  // silently follow THAT PERSON's own browser settings. That's exactly
+  // why "Approved By" and "Passed By" on the same Expense Sheet row could
+  // show two different date orderings for the same day (e.g. "2/9/2026"
+  // vs "9/2/2026"), or one in 12-hour AM/PM and another in 24-hour — not
+  // a display preference difference, a genuine ambiguity baked into the
+  // sheet. The time component was added Sept 2026 so the Payment release
+  // trail (renderRequestTrailHtml) can show the same "on <date> <time>"
+  // precision the Approval trail above it already has, via formatDate().
   // Pass a Date object (or nothing, for "now") — never an already-
   // formatted string.
   function formatStampDate(date) {
     const d = date || new Date();
     if (isNaN(d)) return '';
-    return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+    return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   }
   function formatKB(bytes) {
     return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round((bytes||0) / 1024) + ' KB';
