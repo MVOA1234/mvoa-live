@@ -2645,6 +2645,42 @@ const HSModule = (function () {
       return { assetId: aid, label };
     }).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
   }
+  // True when this category has more than one individually QR-scanned
+  // physical unit registered (e.g. 18 Distribution Panels — EB 1-8, DG
+  // 1-8), as opposed to a single-instance category (DG Set, WTP Room)
+  // where there's only ever one physical thing to scan. Used right after
+  // a checklist submission to decide whether it's safe to return to the
+  // "choose a checklist" screen still carrying the just-scanned identity
+  // forward (fine for a single-instance category — same asset either
+  // way), or whether a fresh scan MUST be forced first (multi-asset —
+  // see the bug this fixes in submitChecklist below).
+  function categoryHasMultipleAssets(qrTarget) {
+    return categoryAssetsCache.filter(a => a.CategoryKey === qrTarget).length > 1;
+  }
+  // Shown right after a multi-asset category's checklist is submitted —
+  // bug found in testing: submitChecklist used to call renderScanResult()
+  // directly here, which re-showed the "choose a checklist" screen still
+  // bound to the JUST-SUBMITTED panel's currentScan (only currentTemplate
+  // was cleared, not currentScan). Tapping the same checklist again for
+  // the NEXT physical panel silently reused the previous panel's identity
+  // — no re-scan prompt, and the new entry would have been logged against
+  // the wrong AssetID entirely. This screen forces an explicit fresh scan
+  // before any further checklist can be filled for this category.
+  function renderScanNextAssetPrompt(container, qrTarget, lastAssetLabel) {
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
+        <strong>${escapeHtml(categoryLabel(qrTarget))}</strong>
+      </div>
+      <div class="card" style="max-width:420px;margin:0;">
+        <p style="margin:0 0 10px;font-weight:700;color:#1e6b33;">✅ ${lastAssetLabel ? escapeHtml(lastAssetLabel) + ' saved.' : 'Saved.'}</p>
+        <p class="muted" style="margin:0 0 12px;">Scan the next ${escapeHtml(categoryLabel(qrTarget))} unit to continue, or go back if you're done.</p>
+        <button id="hs-scan-next-btn" class="btn-primary" style="width:100%;">📷 Scan Next</button>
+      </div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+    container.querySelector('#hs-scan-next-btn').addEventListener('click', () => openQrScanner(container, qrTarget));
+  }
 
   // Groups an asset-per-template list by stripping a trailing number off
   // each label — "EB Distribution Panel 3" groups under "EB Distribution
@@ -5014,6 +5050,15 @@ const HSModule = (function () {
         // straight on to the next floor without re-scanning.
         currentFloor = ''; pendingResults = {};
         renderChecklistForm(container);
+      } else if (categoryHasMultipleAssets(currentScan.qrTarget)) {
+        // Multi-asset category (e.g. 18 individually-scanned Distribution
+        // Panels) — force a fresh scan before the next checklist instead
+        // of silently carrying the just-submitted panel's identity
+        // forward. See renderScanNextAssetPrompt's comment for the bug.
+        const qrTarget = currentScan.qrTarget;
+        const lastAssetLabel = currentScan.assetName;
+        currentTemplate = null; currentShift = ''; pendingResults = {}; currentScan = null;
+        renderScanNextAssetPrompt(container, qrTarget, lastAssetLabel);
       } else {
         currentTemplate = null; currentShift = ''; pendingResults = {};
         renderScanResult(container);
