@@ -460,6 +460,53 @@ const FinanceModule = (function () {
     return { total, consumed, available: total - consumed, fy };
   }
 
+  // ADDED Sept 2026 for the Dashboard's click-to-expand breakdowns —
+  // itemized companion to budgetInfoFor() above: same two filters
+  // (Spend-Approval-reserved/linked-actual, and un-linked direct Payment
+  // Requests), same per-row "actual" math, but returns the individual
+  // rows that were summed instead of just the total, so a category's
+  // "Consumed" figure is never a number nobody can trace back to an
+  // actual request. Deliberately mirrors budgetInfoFor's logic line for
+  // line rather than sharing code with it, so the two can't silently
+  // drift out of sync in a future edit without both being touched —
+  // simplest guarantee that the drill-down always adds up to the exact
+  // figure shown above it.
+  function budgetConsumingEntriesFor(category, fy) {
+    const { start, end } = fyDateRange(fy);
+    const inFy = r => { const d = new Date(r.RequestedDate); return d >= start && d <= end; };
+    const entries = [];
+    requestsCache
+      .filter(r => r.Category === category && r.BudgetStatus === 'Budgeted' && r.Status === 'Approved')
+      .filter(inFy)
+      .forEach(r => {
+        const linkedApprovedPayments = requestsCache.filter(p =>
+          p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === r.RequestID && p.Status === 'Approved');
+        const linkedSum = linkedApprovedPayments.reduce((s, p) => s + (Number(p.Amount) || 0), 0);
+        const estimate = Number(r.Amount) || 0;
+        const actual = isAtsDisabled(r) ? linkedSum : Math.max(estimate, linkedSum);
+        const note = linkedApprovedPayments.length
+          ? (isAtsDisabled(r)
+              ? `Closed — actual amount from ${linkedApprovedPayments.length} linked payment${linkedApprovedPayments.length > 1 ? 's' : ''}`
+              : `Approved estimate (kept until closed) — ${linkedApprovedPayments.length} linked payment${linkedApprovedPayments.length > 1 ? 's' : ''} so far`)
+          : 'Approved estimate — no linked Payment Request yet';
+        entries.push({
+          requestId: r.RequestID, requestType: 'Approval to Spend', vendor: r.Vendor,
+          amountCounted: actual, note, requestedBy: r.RequestedBy, date: r.RequestedDate
+        });
+      });
+    requestsCache
+      .filter(r => r.RequestType === 'PaymentRequest' && r.Category === category && !r.LinkedSpendRequestID && r.Status === 'Approved')
+      .filter(inFy)
+      .forEach(r => {
+        entries.push({
+          requestId: r.RequestID, requestType: 'Payment Request', vendor: r.Vendor,
+          amountCounted: Number(r.Amount) || 0, note: 'Not linked to a Spend Approval — counted directly',
+          requestedBy: r.RequestedBy, date: r.RequestedDate
+        });
+      });
+    return entries.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }
+
   // Which contracts are actually worth a "no lapse in coverage" warning —
   // the critical operational/safety services where an expired contract
   // means the service genuinely stops (maintenance, security, sewage,
@@ -968,7 +1015,10 @@ const FinanceModule = (function () {
           currentTopTab = btn.dataset.toptab;
           currentView = TOP_TAB_DEFAULT_VIEW[currentTopTab];
           if (currentTopTab === 'contracts') contractsSubView = 'list';
-          if (currentTopTab === 'dashboard') { dashboardDrilldownKey = null; dashboardDrilldownStageMap = null; }
+          if (currentTopTab === 'dashboard') {
+            dashboardDrilldownKey = null; dashboardDrilldownStageMap = null;
+            dashboardStatDrilldownKey = null; dashboardBudgetDrilldownCategory = null;
+          }
           render(container);
         });
       });
@@ -2700,7 +2750,12 @@ const FinanceModule = (function () {
   // contract-expiry flags are a planned follow-up round, not in this
   // version.
   // ───────────────────────────────────────────────────────────
-  function dashboardStatTileHtml(label, value, sublabel, color) {
+  // ADDED Sept 2026 — `key`/`active` make a tile a click-to-expand
+  // drill-down (see dashboardStatDrilldownKey/dashboardStatDrilldownPanelHtml
+  // below), same idea as the existing Pipeline badges. Omit `key` (as no
+  // current call site does, but kept optional for safety) to render the
+  // original plain, non-clickable tile.
+  function dashboardStatTileHtml(label, value, sublabel, color, key, active) {
     // flex:1 1 0 (basis explicitly ZERO, not a content-derived or fixed
     // pixel basis) — every tile then grows purely by its flex-grow ratio,
     // which is identical across all six, so they end up exactly equal
@@ -2713,8 +2768,11 @@ const FinanceModule = (function () {
     // is exactly the regression seen in testing. Flexbox with an explicit
     // zero basis doesn't have that failure mode.
     return `
-      <div style="flex:1 1 0;min-width:150px;box-sizing:border-box;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;">
-        <div class="muted" style="font-size:0.78rem;">${escapeHtml(label)}</div>
+      <div class="${key ? 'fin-dashboard-stat-tile' : ''}" ${key ? `data-key="${escapeHtml(key)}"` : ''} style="flex:1 1 0;min-width:150px;box-sizing:border-box;background:#fff;border:1px solid ${active ? '#185fa5' : '#e0e0e0'};border-radius:8px;padding:12px 14px;${key ? 'cursor:pointer;' : ''}">
+        <div class="mvoa-row" style="align-items:flex-start;">
+          <div class="muted" style="font-size:0.78rem;">${escapeHtml(label)}</div>
+          ${key ? `<span class="muted" style="font-size:0.7rem;line-height:1;">${active ? '▲' : '▼'}</span>` : ''}
+        </div>
         <div style="font-size:1.35rem;font-weight:700;${color ? `color:${color};` : ''}margin-top:2px;">${value}</div>
         ${sublabel ? `<div class="muted" style="font-size:0.75rem;margin-top:2px;">${sublabel}</div>` : ''}
       </div>`;
@@ -2733,6 +2791,14 @@ const FinanceModule = (function () {
   // survives the re-render each click triggers but resets when the module
   // remounts. null = nothing expanded.
   let dashboardDrilldownKey = null;
+  // ADDED Sept 2026 — independent click-to-expand state for the top stat
+  // tile row and for the Budget Utilization category rows, kept separate
+  // from dashboardDrilldownKey (the Pipeline badges above) so opening one
+  // section's breakdown doesn't close another's — each section expands
+  // in place, right below itself. null = nothing expanded for that
+  // section.
+  let dashboardStatDrilldownKey = null;
+  let dashboardBudgetDrilldownCategory = null;
   // Only the two "Pending Approval" groups can be sitting at more than one
   // possible stage (Administrative/Financial/EC/AGM for spend, FM/OpsHead/
   // Secretary/Treasurer/President for payment) — everything else in the
@@ -2781,6 +2847,186 @@ const FinanceModule = (function () {
             </tbody>
           </table>
           </div>` : `<p class="muted">Nothing currently in this state.</p>`}
+      </div>`;
+  }
+
+  // Small shared close-button header, same look as dashboardDrilldownPanelHtml
+  // above — used by both new drill-down panels below.
+  function dashboardPanelHeaderHtml(title, closeId) {
+    return `
+      <div class="mvoa-row" style="margin-bottom:8px;">
+        <strong style="font-size:0.85rem;">${title}</strong>
+        <button type="button" id="${closeId}" class="btn-secondary fin-dashboard-panel-close" style="font-size:0.75rem;padding:2px 10px;">✕ Close</button>
+      </div>`;
+  }
+  function dashboardRequestsTableHtml(rows, dateCol) {
+    if (!rows.length) return `<p class="muted">Nothing here.</p>`;
+    return `
+      <div style="overflow-x:auto;width:100%;">
+      <table class="mvoa-table" style="width:100%;">
+        <thead><tr><th>Request ID</th><th>Category</th><th>Amount</th><th>Requested By</th><th>${escapeHtml(dateCol.label)}</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>${escapeHtml(r.RequestID)}</td>
+              <td>${escapeHtml(r.Category)}${r.Vendor ? ` <span class="muted">(${escapeHtml(r.Vendor)})</span>` : ''}</td>
+              <td>${formatAmount(r.Amount)}</td>
+              <td>${escapeHtml(r.RequestedBy)}</td>
+              <td>${formatDate(r[dateCol.field])}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>`;
+  }
+  // ADDED Sept 2026 — click-to-expand breakdowns for the top stat tile
+  // row (dashboardStatTileHtml's `key`/`active`). Read-only: every panel
+  // here is just a table/summary over data already loaded for the
+  // dashboard, nothing editable and nothing that triggers a write. `ctx`
+  // carries the values renderDashboardTab already computed for the tiles
+  // themselves, so a figure shown here can never drift from the tile
+  // above it.
+  function dashboardStatDrilldownPanelHtml(key, ctx) {
+    const closeId = 'fin-dashboard-stat-drilldown-close';
+    if (key === 'fyBudget') {
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Budget lines — FY ${escapeHtml(ctx.fy)}`, closeId)}
+          ${ctx.budgetRowsFy.length ? `
+            <div style="overflow-x:auto;width:100%;">
+            <table class="mvoa-table" style="width:100%;">
+              <thead><tr><th>Category</th><th>Total Budget</th><th>Notes</th></tr></thead>
+              <tbody>
+                ${ctx.budgetRowsFy.map(b => `
+                  <tr>
+                    <td>${escapeHtml(b.Category)}</td>
+                    <td>${formatAmount(b.TotalBudget)}</td>
+                    <td class="muted">${escapeHtml(b.Notes || '—')}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+            </div>` : `<p class="muted">No budget lines set up yet for this FY — see the 📊 Budget tab.</p>`}
+        </div>`;
+    }
+    if (key === 'spent' || key === 'remaining') {
+      // Both tiles are facets of the same per-category numbers — same
+      // breakdown table for either, since "what's remaining" and "what's
+      // been spent" are two columns of the exact same Category x FY data
+      // already drawn (as bars) in the Budget Utilization card below.
+      // The individual requests behind any one category's Consumed
+      // figure are one click away on that category's own row instead of
+      // repeated here.
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Category breakdown — FY ${escapeHtml(ctx.fy)}`, closeId)}
+          ${ctx.budgetRowsFy.length ? `
+            <div style="overflow-x:auto;width:100%;">
+            <table class="mvoa-table" style="width:100%;">
+              <thead><tr><th>Category</th><th>Total</th><th>Consumed</th><th>Remaining</th><th>%</th></tr></thead>
+              <tbody>
+                ${ctx.budgetRowsFy.map(b => {
+                  const info = budgetInfoFor(b.Category, ctx.fy);
+                  const pct = info.total > 0 ? Math.round((info.consumed / info.total) * 100) : 0;
+                  return `
+                    <tr>
+                      <td>${escapeHtml(b.Category)}</td>
+                      <td>${formatAmount(info.total)}</td>
+                      <td>${formatAmount(info.consumed)}</td>
+                      <td style="${info.available < 0 ? 'color:#b3261e;' : ''}">${formatAmount(info.available)}</td>
+                      <td>${pct}%</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+            </div>
+            <p class="muted" style="font-size:0.75rem;margin:8px 0 0;">Tap a category in Budget Utilization below to see the individual requests behind its Consumed figure.</p>`
+            : `<p class="muted">No budget lines set up yet for this FY — see the 📊 Budget tab.</p>`}
+        </div>`;
+    }
+    if (key === 'pendingApprovals') {
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Pending Approvals — ${ctx.pendingApprovalAll.length}`, closeId)}
+          ${dashboardRequestsTableHtml(ctx.pendingApprovalAll, { label: 'Submitted', field: 'RequestedDate' })}
+        </div>`;
+    }
+    if (key === 'awaitingDisbursement') {
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Awaiting Disbursement — ${ctx.pendingPaymentRows.length}`, closeId)}
+          ${dashboardRequestsTableHtml(ctx.pendingPaymentRows, { label: 'Since', field: 'StageEnteredAt' })}
+        </div>`;
+    }
+    if (key === 'paidThisMonth') {
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Paid This Month — ${ctx.paidThisMonthRows.length}`, closeId)}
+          ${dashboardRequestsTableHtml(ctx.paidThisMonthRows, { label: 'Paid', field: 'PaymentDate' })}
+        </div>`;
+    }
+    if (key === 'pettyCashSpendThisMonth') {
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Petty Cash Spend This Month — ${ctx.pettyCashSpendThisMonthRows.length}`, closeId)}
+          ${dashboardRequestsTableHtml(ctx.pettyCashSpendThisMonthRows, { label: 'Paid', field: 'PaymentDate' })}
+        </div>`;
+    }
+    if (key === 'pettyCashBalance') {
+      const expenseRows = requestsCache.filter(r => isPettyCashPaymentRequest(r) && r.Status === 'Approved' && r.DisbursementStage === 'Paid');
+      const replenishRows = requestsCache.filter(r => isReplenishmentRequest(r) && r.Status === 'Approved' && r.DisbursementStage === 'Paid');
+      const expenseSum = expenseRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+      const replenishSum = replenishRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+      const combined = expenseRows.map(r => Object.assign({}, r, { _sign: '−', _kind: 'Petty Cash Payment' }))
+        .concat(replenishRows.map(r => Object.assign({}, r, { _sign: '+', _kind: 'Replenishment' })))
+        .sort((a, b) => (b.PaymentDate || '').localeCompare(a.PaymentDate || ''));
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml('Petty Cash Balance — how it’s made up', closeId)}
+          <p style="margin:4px 0;font-size:0.85rem;">Target float ${formatAmount(PETTY_CASH_FLOAT_TARGET)} − Paid Expenses ${formatAmount(expenseSum)} + Paid Replenishments ${formatAmount(replenishSum)} = <strong>${formatAmount(PETTY_CASH_FLOAT_TARGET - expenseSum + replenishSum)}</strong></p>
+          ${combined.length ? `
+            <div style="overflow-x:auto;width:100%;margin-top:8px;">
+            <table class="mvoa-table" style="width:100%;">
+              <thead><tr><th>Request ID</th><th>Type</th><th>Amount</th><th>Paid</th></tr></thead>
+              <tbody>
+                ${combined.map(r => `
+                  <tr>
+                    <td>${escapeHtml(r.RequestID)}</td>
+                    <td>${r._sign} ${escapeHtml(r._kind)}</td>
+                    <td>${formatAmount(r.Amount)}</td>
+                    <td>${formatDate(r.PaymentDate)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+            </div>` : `<p class="muted" style="margin-top:8px;">No Petty Cash Payments or Replenishments settled yet.</p>`}
+        </div>`;
+    }
+    return '';
+  }
+  // ADDED Sept 2026 — click-to-expand for a single Budget Utilization
+  // category row, showing exactly which requests (and at what counted
+  // amount — see budgetConsumingEntriesFor) make up that category's
+  // Consumed figure. Read-only.
+  function dashboardCategoryDrilldownPanelHtml(category, fy) {
+    const entries = budgetConsumingEntriesFor(category, fy);
+    return `
+      <div class="card" style="background:#f7f9fb;margin:6px 0 14px;">
+        ${dashboardPanelHeaderHtml(`${escapeHtml(category)} — what makes up Consumed`, 'fin-dashboard-budget-drilldown-close')}
+        ${entries.length ? `
+          <div style="overflow-x:auto;width:100%;">
+          <table class="mvoa-table" style="width:100%;">
+            <thead><tr><th>Request ID</th><th>Type</th><th>Counted Amount</th><th>Why</th><th>Requested By</th><th>Date</th></tr></thead>
+            <tbody>
+              ${entries.map(e => `
+                <tr>
+                  <td>${escapeHtml(e.requestId)}</td>
+                  <td>${escapeHtml(e.requestType)}${e.vendor ? ` <span class="muted">(${escapeHtml(e.vendor)})</span>` : ''}</td>
+                  <td>${formatAmount(e.amountCounted)}</td>
+                  <td class="muted">${escapeHtml(e.note)}</td>
+                  <td>${escapeHtml(e.requestedBy)}</td>
+                  <td>${formatDate(e.date)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+          </div>` : `<p class="muted">Nothing counted against this category yet this FY.</p>`}
       </div>`;
   }
   function renderDashboardTab(body, container) {
@@ -2886,16 +3132,28 @@ const FinanceModule = (function () {
     // into one narrow stacked column. Learned that the hard way in
     // testing — keep the tile row as a plain, non-percentage-width flex
     // row.
+    // Bundled once here so dashboardStatDrilldownPanelHtml (a plain,
+    // non-nested function — see there) can read the exact same figures
+    // the tiles above it show, without recomputing anything and without
+    // ever being able to drift from them.
+    const statCtx = {
+      fy, budgetRowsFy, budgetTotals, remaining,
+      pendingApprovalAll, pendingPaymentRows, paidThisMonthRows,
+      pettyCashSpendThisMonthRows, pettyCashBalance
+    };
     body.innerHTML = `
-      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
-        ${dashboardStatTileHtml(`FY ${escapeHtml(fy)} Budget`, formatAmount(budgetTotals.total))}
-        ${dashboardStatTileHtml('Spent (vs Budget)', formatAmount(budgetTotals.consumed), budgetRowsFy.length ? `${utilizationPct}% of budget` : 'no FY budget set yet', utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33')}
-        ${dashboardStatTileHtml('Remaining (Budget)', formatAmount(remaining), budgetRowsFy.length ? null : 'no FY budget set yet', remaining < 0 ? '#b3261e' : '#1e6b33')}
-        ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpendRows.length} spend · ${pendingApprovalPaymentRows.length} payment`)}
-        ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`)}
-        ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`)}
-        ${dashboardStatTileHtml('Petty Cash Spend This Month', formatAmount(pettyCashSpendThisMonthAmount), `${pettyCashSpendThisMonthRows.length} entr${pettyCashSpendThisMonthRows.length === 1 ? 'y' : 'ies'}`)}
-        ${dashboardStatTileHtml('Petty Cash Balance (with FM)', formatAmount(pettyCashBalance), `of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below minimum' : ''}`, pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : '#1e6b33')}
+      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:0;">
+        ${dashboardStatTileHtml(`FY ${escapeHtml(fy)} Budget`, formatAmount(budgetTotals.total), null, null, 'fyBudget', dashboardStatDrilldownKey === 'fyBudget')}
+        ${dashboardStatTileHtml('Spent (vs Budget)', formatAmount(budgetTotals.consumed), budgetRowsFy.length ? `${utilizationPct}% of budget` : 'no FY budget set yet', utilizationPct >= 90 ? '#b3261e' : utilizationPct >= 70 ? '#8a6d00' : '#1e6b33', 'spent', dashboardStatDrilldownKey === 'spent')}
+        ${dashboardStatTileHtml('Remaining (Budget)', formatAmount(remaining), budgetRowsFy.length ? null : 'no FY budget set yet', remaining < 0 ? '#b3261e' : '#1e6b33', 'remaining', dashboardStatDrilldownKey === 'remaining')}
+        ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpendRows.length} spend · ${pendingApprovalPaymentRows.length} payment`, null, 'pendingApprovals', dashboardStatDrilldownKey === 'pendingApprovals')}
+        ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`, null, 'awaitingDisbursement', dashboardStatDrilldownKey === 'awaitingDisbursement')}
+        ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`, null, 'paidThisMonth', dashboardStatDrilldownKey === 'paidThisMonth')}
+        ${dashboardStatTileHtml('Petty Cash Spend This Month', formatAmount(pettyCashSpendThisMonthAmount), `${pettyCashSpendThisMonthRows.length} entr${pettyCashSpendThisMonthRows.length === 1 ? 'y' : 'ies'}`, null, 'pettyCashSpendThisMonth', dashboardStatDrilldownKey === 'pettyCashSpendThisMonth')}
+        ${dashboardStatTileHtml('Petty Cash Balance (with FM)', formatAmount(pettyCashBalance), `of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below minimum' : ''}`, pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : '#1e6b33', 'pettyCashBalance', dashboardStatDrilldownKey === 'pettyCashBalance')}
+      </div>
+      <div style="margin-bottom:16px;">
+        ${dashboardStatDrilldownKey ? dashboardStatDrilldownPanelHtml(dashboardStatDrilldownKey, statCtx) : ''}
       </div>
 
       <div class="card" style="margin-bottom:16px;width:100%;box-sizing:border-box;">
@@ -2903,14 +3161,16 @@ const FinanceModule = (function () {
         ${budgetRowsFy.length ? budgetRowsFy.map(b => {
           const info = budgetInfoFor(b.Category, fy);
           const pct = info.total > 0 ? Math.round((info.consumed / info.total) * 100) : 0;
+          const isOpen = dashboardBudgetDrilldownCategory === b.Category;
           return `
-            <div style="margin-bottom:10px;">
+            <div class="fin-dashboard-budget-row" data-category="${escapeHtml(b.Category)}" style="margin-bottom:10px;cursor:pointer;">
               <div class="mvoa-row" style="margin-bottom:3px;">
-                <span style="font-size:0.85rem;">${escapeHtml(b.Category)}</span>
+                <span style="font-size:0.85rem;">${escapeHtml(b.Category)} <span class="muted" style="font-size:0.7rem;">${isOpen ? '▲' : '▼'}</span></span>
                 <span class="muted" style="font-size:0.78rem;">${formatAmount(info.consumed)} / ${formatAmount(info.total)} (${pct}%)</span>
               </div>
               ${dashboardBarHtml(info.consumed, info.total)}
-            </div>`;
+            </div>
+            ${isOpen ? dashboardCategoryDrilldownPanelHtml(b.Category, fy) : ''}`;
         }).join('') : `<p class="muted">No budget lines set up yet for FY ${escapeHtml(fy)} — see the 📊 Budget tab.</p>`}
       </div>
 
@@ -2997,6 +3257,32 @@ const FinanceModule = (function () {
     });
     const closeBtn = body.querySelector('#fin-dashboard-drilldown-close');
     if (closeBtn) closeBtn.addEventListener('click', () => { dashboardDrilldownKey = null; dashboardDrilldownStageMap = null; renderDashboardTab(body, container); });
+
+    // Top stat tile row — click-to-expand (read-only breakdown of that
+    // tile's figure). Same toggle-off-if-already-open pattern as the
+    // Pipeline badges above, but its own independent state so it doesn't
+    // fight with that section for the screen.
+    body.querySelectorAll('.fin-dashboard-stat-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const key = tile.dataset.key;
+        dashboardStatDrilldownKey = dashboardStatDrilldownKey === key ? null : key;
+        renderDashboardTab(body, container);
+      });
+    });
+    const statCloseBtn = body.querySelector('#fin-dashboard-stat-drilldown-close');
+    if (statCloseBtn) statCloseBtn.addEventListener('click', (e) => { e.stopPropagation(); dashboardStatDrilldownKey = null; renderDashboardTab(body, container); });
+
+    // Budget Utilization category rows — click-to-expand the individual
+    // requests behind that category's Consumed figure.
+    body.querySelectorAll('.fin-dashboard-budget-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const category = row.dataset.category;
+        dashboardBudgetDrilldownCategory = dashboardBudgetDrilldownCategory === category ? null : category;
+        renderDashboardTab(body, container);
+      });
+    });
+    const budgetCloseBtn = body.querySelector('#fin-dashboard-budget-drilldown-close');
+    if (budgetCloseBtn) budgetCloseBtn.addEventListener('click', (e) => { e.stopPropagation(); dashboardBudgetDrilldownCategory = null; renderDashboardTab(body, container); });
   }
 
   // ───────────────────────────────────────────────────────────
