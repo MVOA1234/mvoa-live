@@ -3589,28 +3589,28 @@ const HSModule = (function () {
       // current cycle" grace, just sized to one day instead of a week
       // or a window.
       const doneToday = last && new Date(last.Timestamp).toDateString() === now.toDateString();
-      if (doneToday) return { text: lastText, overdue: false, cycleKey: isoDate(now) };
+      if (doneToday) return { text: lastText, overdue: false, cycleKey: isoDate(now), done: true };
       const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
       const doneYesterday = last && new Date(last.Timestamp).toDateString() === yesterday.toDateString();
       if (doneYesterday) {
         // Yesterday's occurrence was completed; today's just hasn't
         // happened YET — today isn't over. Not overdue.
-        return { text: 'Due today', overdue: false, cycleKey: isoDate(now) };
+        return { text: 'Due today', overdue: false, cycleKey: isoDate(now), done: false };
       }
       // Neither today nor yesterday was logged — at least one full day
       // was missed outright. cycleKey is keyed to the missed day
       // (yesterday), not today, so each newly-missed day gets its own
       // dedupe key/ticket instead of today's still-in-progress cycle
       // silently absorbing an older miss.
-      return { text: lastText, overdue: true, cycleKey: isoDate(yesterday) };
+      return { text: lastText, overdue: true, cycleKey: isoDate(yesterday), done: false };
     }
 
     if (template.Frequency === 'Weekly') {
       const monday = mostRecentMonday(now);
       const done = hasLogSince(template.TemplateID, monday, assetId);
-      if (done) return { text: lastText, overdue: false, cycleKey: isoDate(monday) };
+      if (done) return { text: lastText, overdue: false, cycleKey: isoDate(monday), done: true };
       const isMonday = now.getDay() === 1;
-      return isMonday ? { text: 'Due today (Monday)', overdue: false, cycleKey: isoDate(monday) } : { text: `Not done since ${formatDate(monday)}`, overdue: true, cycleKey: isoDate(monday) };
+      return isMonday ? { text: 'Due today (Monday)', overdue: false, cycleKey: isoDate(monday), done: false } : { text: `Not done since ${formatDate(monday)}`, overdue: true, cycleKey: isoDate(monday), done: false };
     }
 
     // Fixed day-of-month window (WindowStartDay/WindowEndDay set on the
@@ -3627,20 +3627,20 @@ const HSModule = (function () {
       const windowEnd = new Date(y, m0, winEnd); windowEnd.setHours(23, 59, 59, 999);
       const monthStart = new Date(y, m0, 1); monthStart.setHours(0, 0, 0, 0);
       const done = hasLogSince(template.TemplateID, monthStart, assetId);
-      if (done) return { text: lastText, overdue: false, cycleKey: isoDate(windowStart) };
-      if (now <= windowEnd) return { text: `Due this week (days ${winStart}-${winEnd} of month)`, overdue: false, cycleKey: isoDate(windowStart) };
-      return { text: `Overdue since ${formatDate(new Date(y, m0, winEnd + 1))}`, overdue: true, cycleKey: isoDate(windowStart) };
+      if (done) return { text: lastText, overdue: false, cycleKey: isoDate(windowStart), done: true };
+      if (now <= windowEnd) return { text: `Due this week (days ${winStart}-${winEnd} of month)`, overdue: false, cycleKey: isoDate(windowStart), done: false };
+      return { text: `Overdue since ${formatDate(new Date(y, m0, winEnd + 1))}`, overdue: true, cycleKey: isoDate(windowStart), done: false };
     }
 
     // Monthly and BiMonthly share the same "last week of a cycle month" shape
     const interval = template.Frequency === 'BiMonthly' ? 2 : 1;
     const anchor0 = 6; // July, 0-based — only relevant when interval=2
     const win = currentOrLastCycleWindow(now, interval, anchor0);
-    if (!win) return { text: lastText, overdue: true, cycleKey: isoDate(now) };
+    if (!win) return { text: lastText, overdue: true, cycleKey: isoDate(now), done: false };
     const done = hasLogSince(template.TemplateID, win.start, assetId);
-    if (done) return { text: lastText, overdue: false, cycleKey: isoDate(win.start) };
-    if (win.isCurrentMonth) return { text: 'Due this week', overdue: false, cycleKey: isoDate(win.start) };
-    return { text: `Overdue since ${formatDate(win.start)}`, overdue: true, cycleKey: isoDate(win.start) };
+    if (done) return { text: lastText, overdue: false, cycleKey: isoDate(win.start), done: true };
+    if (win.isCurrentMonth) return { text: 'Due this week', overdue: false, cycleKey: isoDate(win.start), done: false };
+    return { text: `Overdue since ${formatDate(win.start)}`, overdue: true, cycleKey: isoDate(win.start), done: false };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -3905,20 +3905,33 @@ const HSModule = (function () {
     if (shift === '3rd' && d.getHours() < 12) d.setDate(d.getDate() - 1);
     return d.toDateString();
   }
-  function hasSubmittedToday(templateId, shift) {
+  // `assetId` is optional and, when passed, scopes the check to that ONE
+  // physical unit (e.g. one specific Distribution Panel) instead of the
+  // whole template. Bug found in testing: for a multi-asset category this
+  // used to match on TemplateID alone, so submitting Panel 1's checklist
+  // today incorrectly blocked Panel 2/3/4/etc. from being submitted later
+  // the SAME day too — "already submitted today" was true for the
+  // template as a whole the moment ANY one panel was done. Passing the
+  // currently-scanned assetId through fixes that: different panels never
+  // block each other, while single-instance categories (DG Set, WTP Room
+  // — always the same one assetId every time) behave exactly as before,
+  // since filtering by a constant assetId never changes which rows match.
+  function hasSubmittedToday(templateId, shift, assetId) {
     const todayBucket = shift ? shiftDayBucket(new Date(), shift) : new Date().toDateString();
     return logsCache.some(l => {
       if (l.TemplateID !== templateId) return false;
+      if (assetId && l.AssetID !== assetId) return false;
       if (!shift) return new Date(l.Timestamp).toDateString() === todayBucket; // non-Daily: no shift concept, just "any log today"
       const matchesShift = l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'));
       if (!matchesShift) return false;
       return shiftDayBucket(l.Timestamp, shift) === todayBucket;
     });
   }
-  function todaysLogFor(templateId, shift) {
+  function todaysLogFor(templateId, shift, assetId) {
     const todayBucket = shiftDayBucket(new Date(), shift);
     return logsCache.find(l =>
       l.TemplateID === templateId &&
+      (!assetId || l.AssetID === assetId) &&
       (l.Shift === shift || (l.Shift === '2nd3rd' && (shift === '2nd' || shift === '3rd'))) &&
       shiftDayBucket(l.Timestamp, shift) === todayBucket
     ) || null;
@@ -4137,9 +4150,9 @@ const HSModule = (function () {
     const isRoundBased = currentTemplate.RoundBased === 'TRUE' || currentTemplate.RoundBased === 'true';
     if (isDaily && isShiftBased && !currentShift) {
       const now = new Date();
-      const shiftDone = { '1st': hasSubmittedToday(currentTemplate.TemplateID, '1st'),
-        '2nd': hasSubmittedToday(currentTemplate.TemplateID, '2nd'),
-        '3rd': hasSubmittedToday(currentTemplate.TemplateID, '3rd') };
+      const shiftDone = { '1st': hasSubmittedToday(currentTemplate.TemplateID, '1st', currentScan.assetId),
+        '2nd': hasSubmittedToday(currentTemplate.TemplateID, '2nd', currentScan.assetId),
+        '3rd': hasSubmittedToday(currentTemplate.TemplateID, '3rd', currentScan.assetId) };
       const shiftBtn = (shift, label) => {
         // ADDED Sept 2026 — bug found in testing: a shift-based template
         // whose items are ALL restricted to one shift (e.g. Swimming Pool
@@ -4192,7 +4205,7 @@ const HSModule = (function () {
       const now = new Date();
       const roundKeys = activeRoundKeys();
       const roundDone = {};
-      roundKeys.forEach(k => { roundDone[k] = hasSubmittedToday(currentTemplate.TemplateID, k); });
+      roundKeys.forEach(k => { roundDone[k] = hasSubmittedToday(currentTemplate.TemplateID, k, currentScan.assetId); });
       const roundBtn = (round, idx) => {
         const label = shiftLabel(round);
         if (roundDone[round]) {
@@ -4226,7 +4239,7 @@ const HSModule = (function () {
       return;
     }
 
-    if (isDaily && !isShiftBased && !isRoundBased && hasSubmittedToday(currentTemplate.TemplateID, null)) {
+    if (isDaily && !isShiftBased && !isRoundBased && hasSubmittedToday(currentTemplate.TemplateID, null, currentScan.assetId)) {
       const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
@@ -4251,8 +4264,8 @@ const HSModule = (function () {
     // plain-text error at final submit — this is the duplicate-log
     // scenario that caused HSLOG-0240/HSLOG-0244 (and the Jul 30 1st/2nd
     // shift pairs) to collide on the same day+shift in the reports.
-    if (isDaily && (isShiftBased || isRoundBased) && currentShift && hasSubmittedToday(currentTemplate.TemplateID, currentShift)) {
-      const existingLog = todaysLogFor(currentTemplate.TemplateID, currentShift);
+    if (isDaily && (isShiftBased || isRoundBased) && currentShift && hasSubmittedToday(currentTemplate.TemplateID, currentShift, currentScan.assetId)) {
+      const existingLog = todaysLogFor(currentTemplate.TemplateID, currentShift, currentScan.assetId);
       container.innerHTML = `
         <div class="mvoa-row" style="margin-bottom:10px;">
           <button id="hs-back-scan" class="btn-secondary">← Back</button>
@@ -4323,6 +4336,38 @@ const HSModule = (function () {
     // the rest of the form works exactly as before, just scoped to that
     // floor's items when floorGroups is set.
     const floorItems = (floorGroups && currentFloor) ? items.filter(i => floorNameOf(i.CheckItem) === currentFloor) : items;
+
+    // ALREADY-INSPECTED-THIS-CYCLE WARNING — Daily's own duplicate
+    // protection is the hasSubmittedToday guards above (which fully
+    // block re-entry); Weekly/Monthly/BiMonthly had no equivalent at
+    // all. Nothing previously stopped someone re-scanning an
+    // already-inspected panel again within its own due window (e.g. a
+    // Distribution Panel inspected on the 9th, re-scanned on the 12th —
+    // both inside the same 8-14 window) — dueInfo() already knows this
+    // cycle is "done" for this asset, so this surfaces it as a
+    // confirmable warning right as the form is about to open, instead of
+    // silently letting a second entry double up. Gated on "genuinely
+    // fresh round start" (same signal the draft-restore check right
+    // below uses) so it only asks once per scan, not on every re-render
+    // of an already-in-progress round.
+    if (!isDaily && !isFloorWise && Object.keys(pendingResults).length === 0) {
+      const due = dueInfo(currentTemplate, currentScan.assetId);
+      if (due.done) {
+        const assetPart = currentScan.assetName ? ` for ${currentScan.assetName}` : '';
+        const proceed = confirm(`This checklist${assetPart} was already submitted this cycle (${due.text}). Submit another entry anyway?`);
+        if (!proceed) {
+          if (categoryHasMultipleAssets(currentScan.qrTarget)) {
+            const qrTarget = currentScan.qrTarget;
+            currentTemplate = null; currentScan = null;
+            renderScanNextAssetPrompt(container, qrTarget, null);
+          } else {
+            currentTemplate = null;
+            renderScanResult(container);
+          }
+          return;
+        }
+      }
+    }
 
     // RESTORE IN-PROGRESS DRAFT — if this exact round/shift/floor was
     // already partway filled in before the page got reloaded (see the IN-
@@ -4800,7 +4845,7 @@ const HSModule = (function () {
         errEl.textContent = `${currentFloor} has already been submitted today for this checklist.`;
         return;
       }
-    } else if (hasSubmittedToday(currentTemplate.TemplateID, (isShiftBased || isRoundBased) ? currentShift : null)) {
+    } else if (hasSubmittedToday(currentTemplate.TemplateID, (isShiftBased || isRoundBased) ? currentShift : null, currentScan.assetId)) {
       errEl.textContent = (isShiftBased || isRoundBased)
         ? `${shiftLabel(currentShift)} has already been submitted today for this checklist.`
         : 'This checklist has already been submitted today.';
