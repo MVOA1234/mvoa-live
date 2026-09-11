@@ -115,6 +115,22 @@
   const HOLIDAY_COLS = ['HolidayID', 'AgencyID', 'Description', 'Date', 'Day', 'CreatedDate', 'CreatedBy'];
   const TAB_HOLIDAYS = 'AttHolidays';
   const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  // ADDED Sept 2026 — "Leave Application" tab, applicable to the "MVOA"
+  // agency's own staff only (the office staff, not the outsourced service
+  // agencies). No Active flag needed — Status itself IS the lifecycle
+  // (Pending/Approved/Rejected/Cancelled). Own tab, auto-created via
+  // MVOA.sheetsEnsureTab on first save, same pattern as AttStaffCategories/
+  // AttHolidays above — nothing for the user to set up in the Sheet first.
+  // Deliberately does NOT denormalize Name onto the row (StaffID is looked
+  // up against staffCache/allStaffCache for display, same as LOG_COLS does
+  // for AttLog) — one source of truth for a staff member's name.
+  const LEAVE_COLS = [
+    'LeaveID', 'StaffID', 'FromDate', 'ToDate', 'Reason', 'Status',
+    'AppliedDate', 'AppliedBy',
+    'DecisionBy', 'DecisionDate', 'DecisionComment',
+    'CancelledDate'
+  ];
+  const TAB_LEAVE = 'AttLeaveApplications';
   const SECTION_AGENCIES = 'Agencies';
   const SECTION_STAFF = 'Staff';
   const SECTION_LOGS = 'Logs';
@@ -126,6 +142,13 @@
   // so it's added to the tab list separately in mount()/renderShell()
   // rather than living in NAV_TABS below.
   const SECTION_CODES = 'Codes';
+  // "Leave" (this session's addition) is likewise NOT part of the
+  // Agencies/Staff/Logs/Settings permissions matrix — visibility is
+  // determined dynamically (is this person an MVOA-agency staff member,
+  // or a Secretary/President/admin who can approve leave?) rather than by
+  // a Sheet-configured Title row, so it's appended in visibleTabsFor()
+  // like Codes, not listed in NAV_TABS below.
+  const SECTION_LEAVE = 'Leave';
   // Order here drives both the tab bar's left-to-right order AND which
   // tab opens by default — mount() opens whichever tab is first in this
   // list that the current user can see (see visibleTabsFor/mount below).
@@ -153,6 +176,9 @@
   let staffCategoriesCache = []; // all AttStaffCategories rows (no Active flag — see the
                                   // comment on STAFF_CATEGORY_COLS above)
   let holidaysCache = [];         // all AttHolidays rows, same reasoning
+  let leaveCache = [];            // all AttLeaveApplications rows (all statuses — filtered
+                                   // client-side per view, e.g. Pending-only for the approver
+                                   // badge count)
   let retentionCleanupRan = false; // throttle: run the passive photo-link cleanup at most
                                     // once per session, not on every mount()
   let staffIdPrintSelection = new Set(); // StaffIDs checked in the Staff list for bulk ID
@@ -225,21 +251,82 @@
     return isNaN(d) ? '' : WEEKDAYS[d.getUTCDay()];
   }
 
+  // ADDED Sept 2026 — Leave Application helpers.
+  // Same date+time stamp format used for AppliedDate/DecisionDate/
+  // CancelledDate below — "date stamp" per the user's request, with time,
+  // matching the format module-finance.js's own formatStampDate() uses
+  // for its own approval stamps.
+  function formatLeaveStamp(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  // The one Agency named "MVOA" (case/whitespace-tolerant match, same
+  // spirit as canManageCategoriesAndHolidays' role/title matching below)
+  // — Leave Application is scoped to this agency's own staff only, per
+  // the user's explicit instruction.
+  function mvoaAgency() {
+    return allAgenciesCache.find(a => String(a.Name || '').trim().toLowerCase() === 'mvoa');
+  }
+  // Auto-identifies which (active) MVOA-agency staff record the CURRENTLY
+  // LOGGED-IN person corresponds to, by matching MVOA.getUser().name
+  // against Staff.Name within that agency — there is deliberately no open
+  // "pick your name from a list" dropdown; per the user's explicit
+  // instruction, "the display of name should be based on who is logging
+  // in (Role)", i.e. auto-resolved from the login itself. Returns null if
+  // this person isn't an active MVOA-agency staff member (e.g. an EC
+  // member who is also a Secretary/President approver but not themselves
+  // enrolled as MVOA staff) — renderLeaveTab hides the "apply" panel in
+  // that case.
+  function resolveSelfMvoaStaff(user) {
+    if (!user || !user.name) return null;
+    const agency = mvoaAgency();
+    if (!agency) return null;
+    const uname = String(user.name).trim().toLowerCase();
+    return staffCache.find(s => s.AgencyID === agency.AgencyID && String(s.Name || '').trim().toLowerCase() === uname) || null;
+  }
+  // "The approval of leave is with Secretary, President and Developer" —
+  // identical eligibility to canManageCategoriesAndHolidays above (Sr 3/4
+  // edit rights), so reused rather than duplicated; kept as its own named
+  // function since the two checks are conceptually separate features that
+  // just happen to share the same Secretary/President/admin membership
+  // today.
+  function canApproveLeave(user) { return canManageCategoriesAndHolidays(user); }
+  function leaveStatusBadge(status) {
+    const colors = {
+      Pending: { bg: '#fff3cd', fg: '#856404' },
+      Approved: { bg: '#d4edda', fg: '#155724' },
+      Rejected: { bg: '#f8d7da', fg: '#721c24' },
+      Cancelled: { bg: '#e2e3e5', fg: '#383d41' }
+    };
+    const c = colors[status] || colors.Cancelled;
+    return `<span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:0.78rem;font-weight:700;white-space:nowrap;background:${c.bg};color:${c.fg};">${escapeHtml(status || '')}</span>`;
+  }
+
   async function loadAll(force) {
-    const [agencyRows, staffRows, logRows, settingsRows, , categoryRows, holidayRows] = await Promise.all([
+    // NOTE — the 5th slot (MVOA.loadAttendancePermissionsMatrix) is
+    // intentionally un-destructured (empty comma) — it's side-effect-only,
+    // its resolved value is never used here. This exact spot broke the
+    // whole module once already this session (a categoryRows/holidayRows
+    // add that missed this gap, shifting every name after it one slot to
+    // the right) — when adding leaveRows below, the promise array and the
+    // destructured name list were recounted twice to make sure the 7
+    // promises above line up 1:1 with the 7 names, with the gap preserved.
+    const [agencyRows, staffRows, logRows, settingsRows, , categoryRows, holidayRows, leaveRows] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.attAgencies),
       MVOA.sheetsRead(MVOA.TABS.attStaff),
       MVOA.sheetsRead(MVOA.TABS.attLog),
       MVOA.sheetsRead(MVOA.TABS.attSettings),
       MVOA.loadAttendancePermissionsMatrix(force),
-      // Brand-new tabs (see STAFF_CATEGORY_COLS/HOLIDAY_COLS above) —
-      // don't exist in the Sheet until the first row is ever saved to
-      // them (see saveCategoryRow/saveHolidayRow's sheetsEnsureTab call),
-      // so a fresh install must fail OPEN here exactly like
-      // module-finance.js's own optional tabs, not break the whole
-      // module's load.
+      // Brand-new tabs (see STAFF_CATEGORY_COLS/HOLIDAY_COLS/LEAVE_COLS
+      // above) — don't exist in the Sheet until the first row is ever
+      // saved to them (see saveCategoryRow/renderHolidayForm/
+      // saveLeaveApplication's sheetsEnsureTab calls), so a fresh install
+      // must fail OPEN here exactly like module-finance.js's own optional
+      // tabs, not break the whole module's load.
       MVOA.sheetsRead(TAB_STAFF_CATEGORIES).catch(() => []),
-      MVOA.sheetsRead(TAB_HOLIDAYS).catch(() => [])
+      MVOA.sheetsRead(TAB_HOLIDAYS).catch(() => []),
+      MVOA.sheetsRead(TAB_LEAVE).catch(() => [])
     ]);
     allAgenciesCache = rowsToObjs(agencyRows, AGENCY_COLS);
     agenciesCache = allAgenciesCache.filter(a => isActive(a.Active));
@@ -250,6 +337,7 @@
     rowsToObjs(settingsRows, SETTINGS_COLS).forEach(o => { attSettingsCache[o.Key] = o.Value; });
     staffCategoriesCache = rowsToObjs(categoryRows, STAFF_CATEGORY_COLS);
     holidaysCache = rowsToObjs(holidayRows, HOLIDAY_COLS);
+    leaveCache = rowsToObjs(leaveRows, LEAVE_COLS);
   }
 
   function agencyName(agencyId) {
@@ -292,8 +380,26 @@
 
   // Codes is admin-only (MVOA.isAdmin), not part of the Agencies/Staff/
   // Logs/Settings permissions matrix — see the comment on SECTION_CODES.
+  // Leave is likewise appended dynamically rather than matrix-gated — see
+  // SECTION_LEAVE's comment — shown to an MVOA-agency staff member (to
+  // apply for themselves), an approver (Secretary/President/admin, to
+  // review others'), or both. A pending-count flag ("🆕 N") is added to
+  // the label for approvers only, per the user's instruction that the
+  // "flag" on the Leave Application button signals a new application —
+  // that's an approver-facing signal, not something the applicant needs
+  // on their own tab.
   function visibleTabsFor(user) {
     const tabs = NAV_TABS.filter(t => canViewSection(t.key, user));
+    const selfStaff = resolveSelfMvoaStaff(user);
+    const approver = canApproveLeave(user);
+    if (selfStaff || approver) {
+      let label = 'Leave Application';
+      if (approver) {
+        const pendingCount = leaveCache.filter(l => l.Status === 'Pending').length;
+        if (pendingCount > 0) label += ` 🆕${pendingCount}`;
+      }
+      tabs.push({ key: SECTION_LEAVE, label });
+    }
     if (MVOA.isAdmin(user)) tabs.push({ key: SECTION_CODES, label: 'Codes' });
     return tabs;
   }
@@ -317,6 +423,7 @@
     else if (activeTab === SECTION_LOGS) renderAttendanceLogs(host, user);
     else if (activeTab === SECTION_SETTINGS) renderSettings(host, user);
     else if (activeTab === SECTION_CODES) renderCodeManagement(host, user);
+    else if (activeTab === SECTION_LEAVE) renderLeaveTab(host, user);
     else renderAgenciesList(host, user);
   }
 
@@ -2549,6 +2656,256 @@
         } catch (e) { /* best-effort — retried next session */ }
       }
     } catch (e) { /* best-effort — retention cleanup should never block the app */ }
+  }
+
+  // ─────────────────────────────────────────────
+  // LEAVE APPLICATION (ADDED Sept 2026) — applicable only to the "MVOA"
+  // agency's own staff. A logged-in MVOA staff member applies only for
+  // themselves (name auto-resolved from login, see resolveSelfMvoaStaff —
+  // there's no open name picker); a Secretary/President/Developer reviews
+  // and decides (see canApproveLeave). Someone who is both (an MVOA staff
+  // member who also happens to be Secretary/President) sees both panels,
+  // but is blocked from approving/rejecting their OWN application — see
+  // the isSelf check in renderLeaveApprovalsPanel.
+  // ─────────────────────────────────────────────
+  function renderLeaveTab(host, user) {
+    const selfStaff = resolveSelfMvoaStaff(user);
+    const approver = canApproveLeave(user);
+    host.innerHTML = `
+      ${selfStaff ? `
+        <div class="card" style="margin-bottom:16px;">
+          <div id="att-leave-mine"></div>
+        </div>
+      ` : `
+        <div class="card" style="margin-bottom:16px;">
+          <p class="muted" style="margin:0;">Leave Application is for MVOA agency staff only — you're not enrolled as MVOA staff, so there's nothing to apply for here.</p>
+        </div>
+      `}
+      ${approver ? `
+        <div class="card">
+          <h3 style="margin-top:0;">Leave Approvals</h3>
+          <p class="muted" style="margin:0 0 10px;">Approval rests with the Secretary, President, or Developer.</p>
+          <div id="att-leave-approvals"></div>
+        </div>
+      ` : ''}
+    `;
+    if (selfStaff) renderMyLeavePanel(host, host.querySelector('#att-leave-mine'), selfStaff, user);
+    if (approver) renderLeaveApprovalsPanel(host, host.querySelector('#att-leave-approvals'), user, selfStaff ? selfStaff.StaffID : null);
+  }
+
+  function renderMyLeavePanel(host, panelHost, selfStaff, user) {
+    const myLeaves = leaveCache.filter(l => l.StaffID === selfStaff.StaffID)
+      .sort((a, b) => (b.AppliedDate || '').localeCompare(a.AppliedDate || ''));
+    panelHost.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:12px;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <strong>My Leave Applications — ${escapeHtml(selfStaff.Name)}</strong>
+        <button id="att-leave-apply-btn" class="btn-primary">+ Apply for Leave</button>
+      </div>
+      <div style="overflow-x:auto;">
+      <table class="mvoa-table">
+        <thead><tr>
+          <th>From</th><th>To</th><th>Reason</th><th>Status</th><th>Applied</th><th>Decision</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${myLeaves.length ? myLeaves.map(l => `
+            <tr>
+              <td style="white-space:nowrap;">${escapeHtml(l.FromDate)}</td>
+              <td style="white-space:nowrap;">${escapeHtml(l.ToDate)}</td>
+              <td style="max-width:220px;white-space:normal;">${escapeHtml(l.Reason)}</td>
+              <td>${leaveStatusBadge(l.Status)}</td>
+              <td style="white-space:nowrap;font-size:0.85rem;">${escapeHtml(formatLeaveStamp(l.AppliedDate))}</td>
+              <td style="white-space:nowrap;font-size:0.85rem;">${l.DecisionBy ? `${escapeHtml(l.DecisionBy)}<br><span class="muted">${escapeHtml(formatLeaveStamp(l.DecisionDate))}</span>${l.DecisionComment ? `<br><span class="muted">"${escapeHtml(l.DecisionComment)}"</span>` : ''}` : (l.Status === 'Cancelled' ? `<span class="muted">${escapeHtml(formatLeaveStamp(l.CancelledDate))}</span>` : '')}</td>
+              <td>${(l.Status === 'Pending' || l.Status === 'Approved') ? `<button class="btn-secondary att-leave-cancel" data-id="${escapeHtml(l.LeaveID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">Cancel</button>` : ''}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="7" class="muted">No leave applications yet.</td></tr>`}
+        </tbody>
+      </table>
+      </div>
+    `;
+    panelHost.querySelector('#att-leave-apply-btn').addEventListener('click', () => renderLeaveApplyForm(host, panelHost, selfStaff, user));
+    panelHost.querySelectorAll('.att-leave-cancel').forEach(btn => btn.addEventListener('click', () => cancelLeave(host, btn.dataset.id, user)));
+  }
+
+  function renderLeaveApplyForm(host, panelHost, selfStaff, user) {
+    const today = isoDateLocal(new Date());
+    panelHost.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="att-leave-form-back" class="btn-secondary">← Back</button>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">Apply for Leave</h3>
+        <label>Name
+          <input type="text" value="${escapeHtml(selfStaff.Name)}" readonly disabled>
+        </label>
+        <label>From
+          <input type="date" id="att-leave-from" value="${today}">
+        </label>
+        <label>To
+          <input type="date" id="att-leave-to" value="${today}" min="${today}">
+        </label>
+        <label>Reason for Leave
+          <textarea id="att-leave-reason" rows="3" placeholder="Reason for leave"></textarea>
+        </label>
+        <div class="mvoa-row" style="margin-top:12px;">
+          <button id="att-leave-submit" class="btn-primary">Submit</button>
+          <button id="att-leave-cancel-form" class="btn-secondary">Cancel</button>
+        </div>
+        <p class="error-text" id="att-leave-form-error"></p>
+      </div>
+    `;
+    const backToList = () => renderMyLeavePanel(host, panelHost, selfStaff, user);
+    panelHost.querySelector('#att-leave-form-back').addEventListener('click', backToList);
+    panelHost.querySelector('#att-leave-cancel-form').addEventListener('click', backToList);
+    const fromEl = panelHost.querySelector('#att-leave-from');
+    const toEl = panelHost.querySelector('#att-leave-to');
+    // Keep To from silently preceding From — clamp it forward the moment
+    // From changes, rather than letting an invalid range reach Submit.
+    fromEl.addEventListener('change', () => {
+      toEl.min = fromEl.value;
+      if (toEl.value && toEl.value < fromEl.value) toEl.value = fromEl.value;
+    });
+    panelHost.querySelector('#att-leave-submit').addEventListener('click', async () => {
+      const from = fromEl.value;
+      const to = toEl.value;
+      const reason = panelHost.querySelector('#att-leave-reason').value.trim();
+      const errEl = panelHost.querySelector('#att-leave-form-error');
+      errEl.textContent = '';
+      if (!from || !to) { errEl.textContent = 'Please select both From and To dates.'; return; }
+      if (to < from) { errEl.textContent = 'To date cannot be before the From date.'; return; }
+      if (!reason) { errEl.textContent = 'Please enter a reason for leave.'; return; }
+      const btn = panelHost.querySelector('#att-leave-submit');
+      btn.disabled = true; btn.textContent = 'Submitting…';
+      try {
+        await MVOA.sheetsEnsureTab(TAB_LEAVE, LEAVE_COLS);
+        const existingRows = await MVOA.sheetsRead(TAB_LEAVE);
+        const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+        const leaveId = MVOA.nextId('LV', existingIds);
+        const row = {
+          LeaveID: leaveId,
+          StaffID: selfStaff.StaffID,
+          FromDate: from, ToDate: to, Reason: reason,
+          Status: 'Pending',
+          AppliedDate: new Date().toISOString(), AppliedBy: (user && user.name) || '',
+          DecisionBy: '', DecisionDate: '', DecisionComment: '',
+          CancelledDate: ''
+        };
+        await MVOA.sheetsAppend(TAB_LEAVE, objToRow(LEAVE_COLS, row));
+        await loadAll(true);
+        renderLeaveTab(host, user);
+      } catch (e) {
+        errEl.textContent = 'Submit failed: ' + e.message;
+        btn.disabled = false; btn.textContent = 'Submit';
+      }
+    });
+  }
+
+  async function cancelLeave(host, leaveId, user) {
+    const l = leaveCache.find(x => x.LeaveID === leaveId);
+    if (!l) return;
+    if (!confirm(`Cancel this leave application (${l.FromDate} to ${l.ToDate})? This cannot be undone.`)) return;
+    try {
+      const row = Object.assign({}, l, { Status: 'Cancelled', CancelledDate: new Date().toISOString() });
+      await MVOA.sheetsUpdateRow(TAB_LEAVE, l.rowNumber, objToRow(LEAVE_COLS, row));
+      await loadAll(true);
+      renderLeaveTab(host, user);
+    } catch (e) {
+      alert('Cancel failed: ' + e.message);
+    }
+  }
+
+  // approver=null-safe: selfStaffId is the CURRENT USER's own StaffID (if
+  // they're also enrolled MVOA staff), used only to block self-approval.
+  function renderLeaveApprovalsPanel(host, panelHost, user, selfStaffId) {
+    const allLeaves = leaveCache.slice().sort((a, b) => (b.AppliedDate || '').localeCompare(a.AppliedDate || ''));
+    panelHost.innerHTML = `
+      <div style="overflow-x:auto;">
+      <table class="mvoa-table">
+        <thead><tr>
+          <th>Name</th><th>From</th><th>To</th><th>Reason</th><th>Status</th><th>Applied</th><th>Decision</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${allLeaves.length ? allLeaves.map(l => {
+            const staff = staffById(l.StaffID);
+            const isSelf = !!selfStaffId && l.StaffID === selfStaffId;
+            return `
+            <tr>
+              <td>${escapeHtml(staff ? staff.Name : l.StaffID)}</td>
+              <td style="white-space:nowrap;">${escapeHtml(l.FromDate)}</td>
+              <td style="white-space:nowrap;">${escapeHtml(l.ToDate)}</td>
+              <td style="max-width:200px;white-space:normal;">${escapeHtml(l.Reason)}</td>
+              <td>${leaveStatusBadge(l.Status)}</td>
+              <td style="white-space:nowrap;font-size:0.85rem;">${escapeHtml(formatLeaveStamp(l.AppliedDate))}</td>
+              <td style="white-space:nowrap;font-size:0.85rem;">${l.DecisionBy ? `${escapeHtml(l.DecisionBy)}<br><span class="muted">${escapeHtml(formatLeaveStamp(l.DecisionDate))}</span>${l.DecisionComment ? `<br><span class="muted">"${escapeHtml(l.DecisionComment)}"</span>` : ''}` : (l.Status === 'Cancelled' ? `<span class="muted">${escapeHtml(formatLeaveStamp(l.CancelledDate))}</span>` : '')}</td>
+              <td>
+                ${l.Status === 'Pending' ? (
+                  isSelf
+                    ? `<span class="muted" style="font-size:0.78rem;">Own application — cannot self-approve</span>`
+                    : `<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;">
+                         <button class="btn-primary att-leave-approve" data-id="${escapeHtml(l.LeaveID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;">Approve</button>
+                         <button class="btn-secondary att-leave-reject" data-id="${escapeHtml(l.LeaveID)}" style="font-size:0.8rem;padding:4px 10px;white-space:nowrap;color:#b3261e;">Reject</button>
+                       </div>`
+                ) : ''}
+              </td>
+            </tr>
+          `; }).join('') : `<tr><td colspan="8" class="muted">No leave applications yet.</td></tr>`}
+        </tbody>
+      </table>
+      </div>
+    `;
+    panelHost.querySelectorAll('.att-leave-approve').forEach(btn => btn.addEventListener('click', () => {
+      const l = leaveCache.find(x => x.LeaveID === btn.dataset.id);
+      if (l) applyLeaveDecision(host, l, 'Approved', '', user);
+    }));
+    panelHost.querySelectorAll('.att-leave-reject').forEach(btn => btn.addEventListener('click', () => {
+      const l = leaveCache.find(x => x.LeaveID === btn.dataset.id);
+      if (l) showLeaveRejectModal(host, l, user);
+    }));
+  }
+
+  // Custom modal (reusing the ops-qr-modal/ops-qr-box CSS classes already
+  // used elsewhere in this module, e.g. openCheckInOut/showStaffIdCard)
+  // for an optional rejection comment — deliberately not window.prompt(),
+  // which reads as a jarring native dialog against the rest of this app's
+  // styling.
+  function showLeaveRejectModal(host, leave, user) {
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="width:min(420px,96vw);max-width:none;">
+        <h3 style="margin-top:0;">Reject Leave Application</h3>
+        <p class="muted" style="margin-top:0;">${escapeHtml(leave.FromDate)} to ${escapeHtml(leave.ToDate)}</p>
+        <label>Comment (optional)
+          <textarea id="att-leave-reject-comment" rows="3" placeholder="Reason for rejecting (optional)"></textarea>
+        </label>
+        <div class="mvoa-row" style="margin-top:14px;">
+          <button id="att-leave-reject-confirm" class="btn-primary">Confirm Reject</button>
+          <button id="att-leave-reject-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('#att-leave-reject-cancel').addEventListener('click', () => modal.remove());
+    modal.querySelector('#att-leave-reject-confirm').addEventListener('click', async () => {
+      const comment = modal.querySelector('#att-leave-reject-comment').value.trim();
+      modal.remove();
+      await applyLeaveDecision(host, leave, 'Rejected', comment, user);
+    });
+  }
+
+  async function applyLeaveDecision(host, leave, status, comment, user) {
+    try {
+      const row = Object.assign({}, leave, {
+        Status: status,
+        DecisionBy: (user && user.name) || '',
+        DecisionDate: new Date().toISOString(),
+        DecisionComment: comment || ''
+      });
+      await MVOA.sheetsUpdateRow(TAB_LEAVE, leave.rowNumber, objToRow(LEAVE_COLS, row));
+      await loadAll(true);
+      renderLeaveTab(host, user);
+    } catch (e) {
+      alert((status === 'Approved' ? 'Approve' : 'Reject') + ' failed: ' + e.message);
+    }
   }
 
   MVOA.registerModule('attendance', {
