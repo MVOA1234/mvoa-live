@@ -82,6 +82,39 @@
   const STAFF_COLS = ['StaffID', 'AgencyID', 'Name', 'Role', 'Phone', 'AadhaarNumber', 'AadhaarPhotoURL', 'Code', 'PhotoURL', 'Active', 'CreatedDate', 'CreatedBy', 'BloodGroup'];
   const LOG_COLS = ['LogID', 'StaffID', 'Date', 'CheckInTime', 'CheckInPhotoURL', 'CheckOutTime', 'CheckOutPhotoURL', 'Status', 'LoggedBy'];
   const SETTINGS_COLS = ['Key', 'Value'];
+  // ADDED Sept 2026 — "Add Agency and Staff Data.xlsx" spec: per-Agency
+  // "Category of Staff" (Sr 3) and "Holiday List" (Sr 4) sub-records.
+  // Two brand-new sheet tabs, own StringID scheme (CAT-/HOL-), auto-
+  // created on first save via MVOA.sheetsEnsureTab (same pattern
+  // module-finance.js uses for its own optional tabs) — nothing for the
+  // user to set up in the Sheet by hand first. Neither tab has an Active
+  // flag: per the spec's note (b) these rows "should remain editable
+  // even after submission", so they're a genuine, always-live mini-CRUD
+  // attached to an Agency (add/edit/remove any time via Edit Agency),
+  // not a one-time snapshot taken at Agency creation — a hard delete
+  // (confirmed) is enough; there's no "deactivate but keep history"
+  // concept for these the way there is for Agencies/Staff themselves.
+  //
+  // ShiftTimings is a JSON-stringified array of {start,end} 24h "HH:MM"
+  // pairs — its length always matches NumShifts. Only meaningful when
+  // ShiftDuty === 'Yes'. When ShiftDuty === 'No' (spec note e), the
+  // NonShiftCheckIn/NonShiftCheckOut pair holds a single daily check-in/
+  // check-out time instead, and ShiftTimings/NumShifts stay blank.
+  const STAFF_CATEGORY_COLS = [
+    'CategoryID', 'AgencyID', 'Role', 'MonthlyRate',
+    'ShiftDuty', 'NumShifts', 'ShiftTimings',
+    'NonShiftCheckIn', 'NonShiftCheckOut',
+    'WeeklyOffDay', 'OvertimeApplicable',
+    'CreatedDate', 'CreatedBy'
+  ];
+  const TAB_STAFF_CATEGORIES = 'AttStaffCategories';
+  // Day is stored (not just computed on the fly) so the sheet itself is
+  // a readable record even if someone opens it directly — but it's
+  // always DERIVED from Date at save time (see dayOfWeekFor), never
+  // hand-entered, matching the spec's "auto populate as per date".
+  const HOLIDAY_COLS = ['HolidayID', 'AgencyID', 'Description', 'Date', 'Day', 'CreatedDate', 'CreatedBy'];
+  const TAB_HOLIDAYS = 'AttHolidays';
+  const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const SECTION_AGENCIES = 'Agencies';
   const SECTION_STAFF = 'Staff';
   const SECTION_LOGS = 'Logs';
@@ -117,6 +150,9 @@
                                 // re-read fresh (not from this cache) at the moment of an
                                 // actual scan, see processAttendanceScan()
   let attSettingsCache = {};   // Key -> Value map from AttSettings, e.g. {RetentionDays: '90'}
+  let staffCategoriesCache = []; // all AttStaffCategories rows (no Active flag — see the
+                                  // comment on STAFF_CATEGORY_COLS above)
+  let holidaysCache = [];         // all AttHolidays rows, same reasoning
   let retentionCleanupRan = false; // throttle: run the passive photo-link cleanup at most
                                     // once per session, not on every mount()
   let staffIdPrintSelection = new Set(); // StaffIDs checked in the Staff list for bulk ID
@@ -155,14 +191,55 @@
 
   function canEditSection(section, user) { return MVOA.canEditAttendanceSection(section, user); }
   function canViewSection(section, user) { return MVOA.canViewAttendanceSection(section, user); }
+  // ADDED Sept 2026 — "Category of Staff" / "Holiday List" edit rights
+  // are deliberately narrower than the general Agencies-section edit
+  // permission (see STAFF_CATEGORY_COLS's comment / spec note c):
+  // "edit rights for Sr 3 and 4 with Secretary, President and
+  // developer". MVOA.getUser()'s `role` is the Roles-sheet Role CODE
+  // (e.g. 'SECY', 'PRES', 'DEV') and `title` is the free-text Title
+  // column — matched the same tolerant way module-finance.js's
+  // roleMatchesToken matches Secretary/President elsewhere in this app.
+  // MVOA.isAdmin() covers 'developer' (role 'DEV') and also anyone with
+  // AdminAccess=TRUE on their Roles row, which is consistent with how
+  // every other admin-only action in this app (hard-Delete, PIN
+  // Management, Codes) is already gated in this same module.
+  function canManageCategoriesAndHolidays(user) {
+    if (!user) return false;
+    if (MVOA.isAdmin(user)) return true;
+    const role = String(user.role || '').toUpperCase();
+    const title = String(user.title || '').toLowerCase();
+    return role === 'SECY' || role === 'PRES' ||
+      title.indexOf('secretary') !== -1 || title.indexOf('president') !== -1;
+  }
+  function objToRow(cols, o) { return cols.map(c => (o[c] !== undefined && o[c] !== null) ? o[c] : ''); }
+  // Derives the weekday name from a Date string — "auto populate as per
+  // date" per the Holiday List spec. new Date('YYYY-MM-DD') parses as
+  // UTC midnight in every browser, so read the weekday off the UTC
+  // getter (getUTCDay) rather than getDay() — using getDay() here would
+  // silently read back a day EARLIER than the date typed whenever the
+  // viewer is west of UTC (most of the Americas), which is exactly the
+  // kind of date-off-by-one bug that's easy to miss in testing from IST.
+  function dayOfWeekFor(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + 'T00:00:00Z');
+    return isNaN(d) ? '' : WEEKDAYS[d.getUTCDay()];
+  }
 
   async function loadAll(force) {
-    const [agencyRows, staffRows, logRows, settingsRows] = await Promise.all([
+    const [agencyRows, staffRows, logRows, settingsRows, categoryRows, holidayRows] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.attAgencies),
       MVOA.sheetsRead(MVOA.TABS.attStaff),
       MVOA.sheetsRead(MVOA.TABS.attLog),
       MVOA.sheetsRead(MVOA.TABS.attSettings),
-      MVOA.loadAttendancePermissionsMatrix(force)
+      MVOA.loadAttendancePermissionsMatrix(force),
+      // Brand-new tabs (see STAFF_CATEGORY_COLS/HOLIDAY_COLS above) —
+      // don't exist in the Sheet until the first row is ever saved to
+      // them (see saveCategoryRow/saveHolidayRow's sheetsEnsureTab call),
+      // so a fresh install must fail OPEN here exactly like
+      // module-finance.js's own optional tabs, not break the whole
+      // module's load.
+      MVOA.sheetsRead(TAB_STAFF_CATEGORIES).catch(() => []),
+      MVOA.sheetsRead(TAB_HOLIDAYS).catch(() => [])
     ]);
     allAgenciesCache = rowsToObjs(agencyRows, AGENCY_COLS);
     agenciesCache = allAgenciesCache.filter(a => isActive(a.Active));
@@ -171,6 +248,8 @@
     allLogsCache = rowsToObjs(logRows, LOG_COLS);
     attSettingsCache = {};
     rowsToObjs(settingsRows, SETTINGS_COLS).forEach(o => { attSettingsCache[o.Key] = o.Value; });
+    staffCategoriesCache = rowsToObjs(categoryRows, STAFF_CATEGORY_COLS);
+    holidaysCache = rowsToObjs(holidayRows, HOLIDAY_COLS);
   }
 
   function agencyName(agencyId) {
@@ -293,8 +372,31 @@
     }
   }
 
+  // ADDED Sept 2026 — Category of Staff / Holiday List summary lines for
+  // the panels inside renderAgencyForm below.
+  function parseShiftTimings(json) {
+    try { const arr = JSON.parse(json || '[]'); return Array.isArray(arr) ? arr : []; } catch (e) { return []; }
+  }
+  function categoryShiftSummary(c) {
+    if (c.ShiftDuty === 'No') {
+      return (c.NonShiftCheckIn && c.NonShiftCheckOut) ? `Daily ${c.NonShiftCheckIn}–${c.NonShiftCheckOut}` : '—';
+    }
+    const timings = parseShiftTimings(c.ShiftTimings);
+    if (!timings.length) return `${c.NumShifts || '?'} shift(s)`;
+    return timings.map(t => `${t.start || '?'}–${t.end || '?'}`).join(', ');
+  }
+
   function renderAgencyForm(host, agency, user) {
     const isEdit = !!agency;
+    const editable = canEditSection(SECTION_AGENCIES, user);
+    // Category of Staff / Holiday List are optional per-agency sub-records
+    // (spec note a) that stay editable any time (spec note b), by a
+    // NARROWER right than the general Agencies edit permission (spec
+    // note c) — see canManageCategoriesAndHolidays.
+    const canManageSub = editable && canManageCategoriesAndHolidays(user);
+    const categories = isEdit ? staffCategoriesCache.filter(c => c.AgencyID === agency.AgencyID) : [];
+    const holidays = isEdit ? holidaysCache.filter(h => h.AgencyID === agency.AgencyID).sort((a, b) => (a.Date || '').localeCompare(b.Date || '')) : [];
+
     host.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
         <button id="att-agency-form-back" class="btn-secondary">← Back to Agencies</button>
@@ -302,46 +404,411 @@
       <div class="card">
         <h3 style="margin-top:0;">${isEdit ? 'Edit Agency' : 'Add Agency'}</h3>
         <label>Name
-          <input type="text" id="att-agency-name" value="${isEdit ? escapeHtml(agency.Name) : ''}" placeholder="e.g. ABC Security Services">
+          <input type="text" id="att-agency-name" value="${isEdit ? escapeHtml(agency.Name) : ''}" placeholder="e.g. ABC Security Services" ${editable ? '' : 'disabled'}>
         </label>
-        <label>Type
-          <input type="text" id="att-agency-type" value="${isEdit ? escapeHtml(agency.Type) : ''}" placeholder="e.g. Security, Housekeeping, Landscaping">
+        <label>Type of Service
+          <input type="text" id="att-agency-type" value="${isEdit ? escapeHtml(agency.Type) : ''}" placeholder="e.g. Security, Housekeeping, Landscaping" ${editable ? '' : 'disabled'}>
         </label>
-        <div class="mvoa-row" style="margin-top:12px;">
-          <button id="att-agency-save" class="btn-primary">Save</button>
-          <button id="att-agency-cancel" class="btn-secondary">Cancel</button>
-        </div>
-        <p class="error-text" id="att-agency-form-error"></p>
+        ${editable ? `
+          <div class="mvoa-row" style="margin-top:12px;">
+            <button id="att-agency-save" class="btn-primary">Save</button>
+            <button id="att-agency-cancel" class="btn-secondary">Cancel</button>
+          </div>
+          <p class="error-text" id="att-agency-form-error"></p>
+        ` : ''}
+        ${!isEdit ? '<p class="muted" style="margin-top:10px;">Save the agency first — you\'ll then be able to add its Category of Staff and Holiday List details right here.</p>' : ''}
       </div>
+
+      ${isEdit ? `
+      <div class="card" style="margin-top:14px;">
+        <div class="mvoa-row">
+          <h3 style="margin:0;">Category of Staff</h3>
+          ${canManageSub ? '<button id="att-cat-add" class="btn-primary" style="font-size:0.85rem;padding:6px 12px;">+ Add Category</button>' : ''}
+        </div>
+        <p class="muted" style="margin:6px 0 10px;font-size:0.85rem;">Optional — role, pay, shift pattern and overtime rules for this agency's staff. Not every agency needs this filled in.</p>
+        <div style="overflow-x:auto;">
+        <table class="mvoa-table">
+          <thead><tr>
+            <th>Role</th><th>Monthly Rate</th><th>Shift Duty</th><th>Timings</th><th>Weekly Off</th><th>Overtime</th>
+            ${canManageSub ? '<th></th>' : ''}
+          </tr></thead>
+          <tbody>
+            ${categories.length ? categories.map(c => `
+              <tr>
+                <td>${escapeHtml(c.Role)}</td>
+                <td>${c.MonthlyRate ? '₹' + escapeHtml(String(c.MonthlyRate)) : '—'}</td>
+                <td>${escapeHtml(c.ShiftDuty || '—')}</td>
+                <td>${escapeHtml(categoryShiftSummary(c))}</td>
+                <td>${escapeHtml(c.WeeklyOffDay || '—')}</td>
+                <td>${escapeHtml(c.OvertimeApplicable || '—')}</td>
+                ${canManageSub ? `
+                  <td>
+                    <div style="display:flex;gap:4px;">
+                      <button class="btn-secondary att-cat-edit" data-id="${escapeHtml(c.CategoryID)}" style="font-size:0.78rem;padding:3px 8px;">Edit</button>
+                      <button class="btn-secondary att-cat-delete" data-id="${escapeHtml(c.CategoryID)}" style="font-size:0.78rem;padding:3px 8px;color:#b3261e;">Delete</button>
+                    </div>
+                  </td>` : ''}
+              </tr>
+            `).join('') : `<tr><td colspan="${canManageSub ? 7 : 6}" class="muted">None added yet.</td></tr>`}
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px;">
+        <div class="mvoa-row">
+          <h3 style="margin:0;">Holiday List</h3>
+          ${canManageSub ? '<button id="att-hol-add" class="btn-primary" style="font-size:0.85rem;padding:6px 12px;">+ Add Holiday</button>' : ''}
+        </div>
+        <p class="muted" style="margin:6px 0 10px;font-size:0.85rem;">Optional — this agency's own holiday calendar.</p>
+        <div style="overflow-x:auto;">
+        <table class="mvoa-table">
+          <thead><tr><th>Description</th><th>Date</th><th>Day</th>${canManageSub ? '<th></th>' : ''}</tr></thead>
+          <tbody>
+            ${holidays.length ? holidays.map(h => `
+              <tr>
+                <td>${escapeHtml(h.Description)}</td>
+                <td>${escapeHtml(h.Date)}</td>
+                <td>${escapeHtml(h.Day)}</td>
+                ${canManageSub ? `
+                  <td>
+                    <div style="display:flex;gap:4px;">
+                      <button class="btn-secondary att-hol-edit" data-id="${escapeHtml(h.HolidayID)}" style="font-size:0.78rem;padding:3px 8px;">Edit</button>
+                      <button class="btn-secondary att-hol-delete" data-id="${escapeHtml(h.HolidayID)}" style="font-size:0.78rem;padding:3px 8px;color:#b3261e;">Delete</button>
+                    </div>
+                  </td>` : ''}
+              </tr>
+            `).join('') : `<tr><td colspan="${canManageSub ? 4 : 3}" class="muted">None added yet.</td></tr>`}
+          </tbody>
+        </table>
+        </div>
+      </div>
+      ` : ''}
     `;
     host.querySelector('#att-agency-form-back').addEventListener('click', () => renderAgenciesList(host, user));
-    host.querySelector('#att-agency-cancel').addEventListener('click', () => renderAgenciesList(host, user));
-    host.querySelector('#att-agency-save').addEventListener('click', async () => {
-      const name = host.querySelector('#att-agency-name').value.trim();
-      const type = host.querySelector('#att-agency-type').value.trim();
-      const errEl = host.querySelector('#att-agency-form-error');
+    if (editable) {
+      host.querySelector('#att-agency-cancel').addEventListener('click', () => renderAgenciesList(host, user));
+      host.querySelector('#att-agency-save').addEventListener('click', async () => {
+        const name = host.querySelector('#att-agency-name').value.trim();
+        const type = host.querySelector('#att-agency-type').value.trim();
+        const errEl = host.querySelector('#att-agency-form-error');
+        errEl.textContent = '';
+        if (!name) { errEl.textContent = 'Name is required.'; return; }
+        const btn = host.querySelector('#att-agency-save');
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          let agencyId;
+          if (isEdit) {
+            agencyId = agency.AgencyID;
+            await MVOA.sheetsUpdateRow(MVOA.TABS.attAgencies, agency.rowNumber,
+              [agency.AgencyID, name, type, agency.Active, agency.CreatedDate, agency.CreatedBy]);
+          } else {
+            const existingRows = await MVOA.sheetsRead(MVOA.TABS.attAgencies);
+            const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+            agencyId = MVOA.nextId('AGY', existingIds);
+            const now = new Date().toISOString();
+            await MVOA.sheetsAppend(MVOA.TABS.attAgencies, [agencyId, name, type, 'TRUE', now, (user && user.name) || '']);
+          }
+          await loadAll(true);
+          if (isEdit) {
+            renderAgenciesList(host, user);
+          } else {
+            // Loop straight into Edit mode for the agency just created —
+            // that's what unlocks the Category of Staff / Holiday List
+            // panels above, so "add an Agency" and "fill in its Category
+            // of Staff / Holiday List data" reads as one continuous flow
+            // instead of a separate trip back into the list first.
+            const freshAgency = allAgenciesCache.find(a => a.AgencyID === agencyId);
+            if (freshAgency) renderAgencyForm(host, freshAgency, user);
+            else renderAgenciesList(host, user);
+          }
+        } catch (e) {
+          errEl.textContent = 'Save failed: ' + e.message;
+          btn.disabled = false; btn.textContent = 'Save';
+        }
+      });
+    }
+    if (canManageSub) {
+      host.querySelector('#att-cat-add')?.addEventListener('click', () => renderCategoryForm(host, agency, null, user));
+      host.querySelectorAll('.att-cat-edit').forEach(btn => btn.addEventListener('click', () => {
+        const c = staffCategoriesCache.find(x => x.CategoryID === btn.dataset.id);
+        if (c) renderCategoryForm(host, agency, c, user);
+      }));
+      host.querySelectorAll('.att-cat-delete').forEach(btn => btn.addEventListener('click', () => deleteCategoryRow(host, agency, btn.dataset.id, user)));
+      host.querySelector('#att-hol-add')?.addEventListener('click', () => renderHolidayForm(host, agency, null, user));
+      host.querySelectorAll('.att-hol-edit').forEach(btn => btn.addEventListener('click', () => {
+        const h = holidaysCache.find(x => x.HolidayID === btn.dataset.id);
+        if (h) renderHolidayForm(host, agency, h, user);
+      }));
+      host.querySelectorAll('.att-hol-delete').forEach(btn => btn.addEventListener('click', () => deleteHolidayRow(host, agency, btn.dataset.id, user)));
+    }
+  }
+
+  // ─── Category of Staff — add/edit sub-form ─────────────────────
+  // Shift Duty / Number of shifts structurally change the form (how
+  // many time-pairs to show), so those two re-render the whole sub-form
+  // from `draft`; every other field just updates `draft` in place. This
+  // mirrors renderStaffForm's pendingPhoto pattern (module-level-ish
+  // mutable state captured in a closure, not re-read from the DOM at
+  // Save time) so nothing typed is ever lost across a structural
+  // re-render.
+  function renderCategoryForm(host, agency, category, user) {
+    const isEdit = !!category;
+    const draft = {
+      Role: isEdit ? (category.Role || '') : '',
+      MonthlyRate: isEdit ? (category.MonthlyRate || '') : '',
+      ShiftDuty: isEdit ? (category.ShiftDuty || 'Yes') : 'Yes',
+      NumShifts: isEdit ? (category.NumShifts || '1') : '1',
+      ShiftTimings: isEdit ? parseShiftTimings(category.ShiftTimings) : [],
+      NonShiftCheckIn: isEdit ? (category.NonShiftCheckIn || '') : '',
+      NonShiftCheckOut: isEdit ? (category.NonShiftCheckOut || '') : '',
+      WeeklyOffDay: isEdit ? (category.WeeklyOffDay || 'Sunday') : 'Sunday',
+      OvertimeApplicable: isEdit ? (category.OvertimeApplicable || 'No') : 'No'
+    };
+
+    function normalizeShiftTimings() {
+      const n = Math.max(1, Number(draft.NumShifts) || 1);
+      while (draft.ShiftTimings.length < n) draft.ShiftTimings.push({ start: '', end: '' });
+      draft.ShiftTimings.length = n;
+    }
+
+    function renderForm() {
+      if (draft.ShiftDuty === 'Yes') normalizeShiftTimings();
+      host.innerHTML = `
+        <div class="mvoa-row" style="margin-bottom:10px;">
+          <button id="att-cat-form-back" class="btn-secondary">← Back to ${escapeHtml(agency.Name)}</button>
+        </div>
+        <div class="card">
+          <h3 style="margin-top:0;">${isEdit ? 'Edit' : 'Add'} Category of Staff</h3>
+          <label>Role
+            <input type="text" id="att-cat-role" value="${escapeHtml(draft.Role)}" placeholder="e.g. Security Guard, Supervisor">
+          </label>
+          <label>Monthly Rate (INR)
+            <input type="number" id="att-cat-rate" value="${escapeHtml(String(draft.MonthlyRate))}" min="0" placeholder="e.g. 18000">
+          </label>
+          <label>Shift Duty
+            <select id="att-cat-shiftduty">
+              <option value="Yes" ${draft.ShiftDuty === 'Yes' ? 'selected' : ''}>Yes</option>
+              <option value="No" ${draft.ShiftDuty === 'No' ? 'selected' : ''}>No</option>
+            </select>
+          </label>
+          ${draft.ShiftDuty === 'Yes' ? `
+            <label>Number of shifts per day
+              <select id="att-cat-numshifts">
+                ${[1, 2, 3].map(n => `<option value="${n}" ${Number(draft.NumShifts) === n ? 'selected' : ''}>${n}</option>`).join('')}
+              </select>
+            </label>
+            <label>Shift timings</label>
+            <div id="att-cat-shifttimes">
+              ${draft.ShiftTimings.map((t, i) => `
+                <div class="mvoa-row" style="gap:8px;margin:4px 0;align-items:center;">
+                  <span class="muted" style="min-width:56px;">Shift ${i + 1}</span>
+                  <input type="time" class="att-cat-shift-start" data-idx="${i}" value="${escapeHtml(t.start || '')}">
+                  <span class="muted">to</span>
+                  <input type="time" class="att-cat-shift-end" data-idx="${i}" value="${escapeHtml(t.end || '')}">
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <p class="muted" style="margin:6px 0;">Shift Duty is "No" — define a single daily check-in/check-out instead:</p>
+            <div class="mvoa-row" style="gap:8px;margin:4px 0;align-items:center;">
+              <span class="muted" style="min-width:70px;">Check-in</span>
+              <input type="time" id="att-cat-nonshift-in" value="${escapeHtml(draft.NonShiftCheckIn)}">
+              <span class="muted" style="min-width:70px;">Check-out</span>
+              <input type="time" id="att-cat-nonshift-out" value="${escapeHtml(draft.NonShiftCheckOut)}">
+            </div>
+          `}
+          <label>Weekly Off
+            <select id="att-cat-weeklyoff">
+              ${WEEKDAYS.map(d => `<option value="${d}" ${draft.WeeklyOffDay === d ? 'selected' : ''}>${d}</option>`).join('')}
+            </select>
+          </label>
+          <label>Overtime applicability
+            <select id="att-cat-overtime">
+              <option value="Yes" ${draft.OvertimeApplicable === 'Yes' ? 'selected' : ''}>Yes</option>
+              <option value="No" ${draft.OvertimeApplicable === 'No' ? 'selected' : ''}>No</option>
+            </select>
+          </label>
+          <div class="mvoa-row" style="margin-top:12px;">
+            <button id="att-cat-save" class="btn-primary">Save</button>
+            <button id="att-cat-cancel" class="btn-secondary">Cancel</button>
+          </div>
+          <p class="error-text" id="att-cat-form-error"></p>
+        </div>
+      `;
+      wireForm();
+    }
+
+    function wireForm() {
+      host.querySelector('#att-cat-form-back').addEventListener('click', () => renderAgencyForm(host, agency, user));
+      host.querySelector('#att-cat-cancel').addEventListener('click', () => renderAgencyForm(host, agency, user));
+      host.querySelector('#att-cat-role').addEventListener('input', e => { draft.Role = e.target.value; });
+      host.querySelector('#att-cat-rate').addEventListener('input', e => { draft.MonthlyRate = e.target.value; });
+      host.querySelector('#att-cat-shiftduty').addEventListener('change', e => { draft.ShiftDuty = e.target.value; renderForm(); });
+      const numShiftsEl = host.querySelector('#att-cat-numshifts');
+      if (numShiftsEl) numShiftsEl.addEventListener('change', e => { draft.NumShifts = e.target.value; renderForm(); });
+      host.querySelectorAll('.att-cat-shift-start').forEach(el => el.addEventListener('input', e => {
+        const i = Number(e.target.dataset.idx);
+        draft.ShiftTimings[i] = draft.ShiftTimings[i] || { start: '', end: '' };
+        draft.ShiftTimings[i].start = e.target.value;
+      }));
+      host.querySelectorAll('.att-cat-shift-end').forEach(el => el.addEventListener('input', e => {
+        const i = Number(e.target.dataset.idx);
+        draft.ShiftTimings[i] = draft.ShiftTimings[i] || { start: '', end: '' };
+        draft.ShiftTimings[i].end = e.target.value;
+      }));
+      const inEl = host.querySelector('#att-cat-nonshift-in');
+      if (inEl) inEl.addEventListener('input', e => { draft.NonShiftCheckIn = e.target.value; });
+      const outEl = host.querySelector('#att-cat-nonshift-out');
+      if (outEl) outEl.addEventListener('input', e => { draft.NonShiftCheckOut = e.target.value; });
+      host.querySelector('#att-cat-weeklyoff').addEventListener('change', e => { draft.WeeklyOffDay = e.target.value; });
+      host.querySelector('#att-cat-overtime').addEventListener('change', e => { draft.OvertimeApplicable = e.target.value; });
+      host.querySelector('#att-cat-save').addEventListener('click', () => saveCategoryRow(host, agency, category, draft, user));
+    }
+
+    renderForm();
+  }
+
+  async function saveCategoryRow(host, agency, category, draft, user) {
+    const errEl = host.querySelector('#att-cat-form-error');
+    errEl.textContent = '';
+    const role = (draft.Role || '').trim();
+    if (!role) { errEl.textContent = 'Role is required.'; return; }
+    if (draft.ShiftDuty === 'Yes') {
+      if (draft.ShiftTimings.some(t => !t.start || !t.end)) { errEl.textContent = 'Please fill in a start and end time for every shift.'; return; }
+    } else {
+      if (!draft.NonShiftCheckIn || !draft.NonShiftCheckOut) { errEl.textContent = 'Please enter both check-in and check-out time.'; return; }
+    }
+    const btn = host.querySelector('#att-cat-save');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      await MVOA.sheetsEnsureTab(TAB_STAFF_CATEGORIES, STAFF_CATEGORY_COLS);
+      const isEdit = !!category;
+      const row = {
+        CategoryID: isEdit ? category.CategoryID : '',
+        AgencyID: agency.AgencyID,
+        Role: role,
+        MonthlyRate: draft.MonthlyRate || '',
+        ShiftDuty: draft.ShiftDuty,
+        NumShifts: draft.ShiftDuty === 'Yes' ? draft.NumShifts : '',
+        ShiftTimings: draft.ShiftDuty === 'Yes' ? JSON.stringify(draft.ShiftTimings) : '',
+        NonShiftCheckIn: draft.ShiftDuty === 'No' ? draft.NonShiftCheckIn : '',
+        NonShiftCheckOut: draft.ShiftDuty === 'No' ? draft.NonShiftCheckOut : '',
+        WeeklyOffDay: draft.WeeklyOffDay,
+        OvertimeApplicable: draft.OvertimeApplicable,
+        CreatedDate: isEdit ? category.CreatedDate : new Date().toISOString(),
+        CreatedBy: isEdit ? category.CreatedBy : ((user && user.name) || '')
+      };
+      if (isEdit) {
+        await MVOA.sheetsUpdateRow(TAB_STAFF_CATEGORIES, category.rowNumber, objToRow(STAFF_CATEGORY_COLS, row));
+      } else {
+        const existingRows = await MVOA.sheetsRead(TAB_STAFF_CATEGORIES);
+        const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+        row.CategoryID = MVOA.nextId('CAT', existingIds);
+        await MVOA.sheetsAppend(TAB_STAFF_CATEGORIES, objToRow(STAFF_CATEGORY_COLS, row));
+      }
+      await loadAll(true);
+      const freshAgency = allAgenciesCache.find(a => a.AgencyID === agency.AgencyID) || agency;
+      renderAgencyForm(host, freshAgency, user);
+    } catch (e) {
+      errEl.textContent = 'Save failed: ' + e.message;
+      btn.disabled = false; btn.textContent = 'Save';
+    }
+  }
+
+  async function deleteCategoryRow(host, agency, categoryId, user) {
+    const cat = staffCategoriesCache.find(c => c.CategoryID === categoryId);
+    if (!cat) return;
+    if (!confirm(`Delete Category of Staff "${cat.Role}"? This cannot be undone.`)) return;
+    try {
+      await MVOA.sheetsDeleteRows(TAB_STAFF_CATEGORIES, [cat.rowNumber]);
+      await loadAll(true);
+      const freshAgency = allAgenciesCache.find(a => a.AgencyID === agency.AgencyID) || agency;
+      renderAgencyForm(host, freshAgency, user);
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
+  }
+
+  // ─── Holiday List — add/edit sub-form ──────────────────────────
+  function renderHolidayForm(host, agency, holiday, user) {
+    const isEdit = !!holiday;
+    host.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="att-hol-form-back" class="btn-secondary">← Back to ${escapeHtml(agency.Name)}</button>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">${isEdit ? 'Edit' : 'Add'} Holiday</h3>
+        <label>Description
+          <input type="text" id="att-hol-desc" value="${isEdit ? escapeHtml(holiday.Description) : ''}" placeholder="e.g. Diwali, Republic Day">
+        </label>
+        <label>Date
+          <input type="date" id="att-hol-date" value="${isEdit ? escapeHtml(holiday.Date) : ''}">
+        </label>
+        <label>Day
+          <input type="text" id="att-hol-day" readonly value="${isEdit ? escapeHtml(holiday.Day) : ''}" placeholder="Auto-filled from Date">
+        </label>
+        <div class="mvoa-row" style="margin-top:12px;">
+          <button id="att-hol-save" class="btn-primary">Save</button>
+          <button id="att-hol-cancel" class="btn-secondary">Cancel</button>
+        </div>
+        <p class="error-text" id="att-hol-form-error"></p>
+      </div>
+    `;
+    host.querySelector('#att-hol-form-back').addEventListener('click', () => renderAgencyForm(host, agency, user));
+    host.querySelector('#att-hol-cancel').addEventListener('click', () => renderAgencyForm(host, agency, user));
+    host.querySelector('#att-hol-date').addEventListener('change', (e) => {
+      host.querySelector('#att-hol-day').value = dayOfWeekFor(e.target.value);
+    });
+    host.querySelector('#att-hol-save').addEventListener('click', async () => {
+      const description = host.querySelector('#att-hol-desc').value.trim();
+      const date = host.querySelector('#att-hol-date').value;
+      const errEl = host.querySelector('#att-hol-form-error');
       errEl.textContent = '';
-      if (!name) { errEl.textContent = 'Name is required.'; return; }
-      const btn = host.querySelector('#att-agency-save');
+      if (!description) { errEl.textContent = 'Description is required.'; return; }
+      if (!date) { errEl.textContent = 'Date is required.'; return; }
+      const btn = host.querySelector('#att-hol-save');
       btn.disabled = true; btn.textContent = 'Saving…';
       try {
+        await MVOA.sheetsEnsureTab(TAB_HOLIDAYS, HOLIDAY_COLS);
+        const day = dayOfWeekFor(date);
+        const row = {
+          HolidayID: isEdit ? holiday.HolidayID : '',
+          AgencyID: agency.AgencyID,
+          Description: description, Date: date, Day: day,
+          CreatedDate: isEdit ? holiday.CreatedDate : new Date().toISOString(),
+          CreatedBy: isEdit ? holiday.CreatedBy : ((user && user.name) || '')
+        };
         if (isEdit) {
-          await MVOA.sheetsUpdateRow(MVOA.TABS.attAgencies, agency.rowNumber,
-            [agency.AgencyID, name, type, agency.Active, agency.CreatedDate, agency.CreatedBy]);
+          await MVOA.sheetsUpdateRow(TAB_HOLIDAYS, holiday.rowNumber, objToRow(HOLIDAY_COLS, row));
         } else {
-          const existingRows = await MVOA.sheetsRead(MVOA.TABS.attAgencies);
+          const existingRows = await MVOA.sheetsRead(TAB_HOLIDAYS);
           const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
-          const agencyId = MVOA.nextId('AGY', existingIds);
-          const now = new Date().toISOString();
-          await MVOA.sheetsAppend(MVOA.TABS.attAgencies, [agencyId, name, type, 'TRUE', now, (user && user.name) || '']);
+          row.HolidayID = MVOA.nextId('HOL', existingIds);
+          await MVOA.sheetsAppend(TAB_HOLIDAYS, objToRow(HOLIDAY_COLS, row));
         }
         await loadAll(true);
-        renderAgenciesList(host, user);
+        const freshAgency = allAgenciesCache.find(a => a.AgencyID === agency.AgencyID) || agency;
+        renderAgencyForm(host, freshAgency, user);
       } catch (e) {
         errEl.textContent = 'Save failed: ' + e.message;
         btn.disabled = false; btn.textContent = 'Save';
       }
     });
+  }
+
+  async function deleteHolidayRow(host, agency, holidayId, user) {
+    const h = holidaysCache.find(x => x.HolidayID === holidayId);
+    if (!h) return;
+    if (!confirm(`Delete holiday "${h.Description}"? This cannot be undone.`)) return;
+    try {
+      await MVOA.sheetsDeleteRows(TAB_HOLIDAYS, [h.rowNumber]);
+      await loadAll(true);
+      const freshAgency = allAgenciesCache.find(a => a.AgencyID === agency.AgencyID) || agency;
+      renderAgencyForm(host, freshAgency, user);
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
   }
 
   async function confirmDeleteAgency(host, agencyId, user) {
@@ -402,6 +869,28 @@
       code = String(1000 + Math.floor(Math.random() * 9000));
     } while (used.has(code));
     return code;
+  }
+
+  // ADDED Sept 2026 — "Add Agency and Staff Data.xlsx" spec: "Role
+  // should not be optional - it should be selected from a drop down of
+  // roles as per Agency selected". Sourced from that agency's Category
+  // of Staff rows (see renderAgencyForm's Category of Staff panel). An
+  // agency with none defined yet (those rows are optional per spec note
+  // a) falls back to a hint + the staff member's own already-saved Role
+  // as a one-off option, rather than a dead-end empty dropdown that
+  // would silently wipe it on save.
+  function roleOptionsHtml(agencyId, selectedRole) {
+    if (!agencyId) return '<option value="">— Select an agency first —</option>';
+    const roles = [...new Set(staffCategoriesCache.filter(c => c.AgencyID === agencyId).map(c => c.Role).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b));
+    if (!roles.length) {
+      return `
+        <option value="">— No roles defined for this agency yet — add Category of Staff on the Agency first —</option>
+        ${selectedRole ? `<option value="${escapeHtml(selectedRole)}" selected>${escapeHtml(selectedRole)} (existing)</option>` : ''}
+      `;
+    }
+    return '<option value="">— Select —</option>' +
+      roles.map(r => `<option value="${escapeHtml(r)}" ${r === selectedRole ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('');
   }
 
   function renderStaffList(host, user) {
@@ -530,8 +1019,10 @@
             ${agenciesCache.slice().sort((a, b) => a.Name.localeCompare(b.Name)).map(a => `<option value="${escapeHtml(a.AgencyID)}" ${isEdit && staff.AgencyID === a.AgencyID ? 'selected' : ''}>${escapeHtml(a.Name)}</option>`).join('')}
           </select>
         </label>
-        <label>Role (optional)
-          <input type="text" id="att-staff-role" value="${isEdit ? escapeHtml(staff.Role) : ''}" placeholder="e.g. Security guard, Housekeeper">
+        <label>Role
+          <select id="att-staff-role">
+            ${roleOptionsHtml(isEdit ? staff.AgencyID : '', isEdit ? staff.Role : '')}
+          </select>
         </label>
         <label>Phone (optional)
           <input type="tel" id="att-staff-phone" value="${isEdit ? escapeHtml(staff.Phone) : ''}" placeholder="e.g. 98400 12345">
@@ -579,6 +1070,14 @@
     host.querySelector('#att-staff-form-back').addEventListener('click', () => renderStaffList(host, user));
     host.querySelector('#att-staff-cancel').addEventListener('click', () => renderStaffList(host, user));
 
+    // Role is agency-specific (see roleOptionsHtml) — a role picked for
+    // one agency has no meaning against another, so switching agencies
+    // rebuilds just the Role dropdown (not the whole form) and clears
+    // any prior selection rather than silently carrying it over.
+    host.querySelector('#att-staff-agency').addEventListener('change', (e) => {
+      host.querySelector('#att-staff-role').innerHTML = roleOptionsHtml(e.target.value, '');
+    });
+
     host.querySelector('#att-photo-pick').addEventListener('click', async () => {
       const p = await MVOA.capturePhoto({ useCamera: true });
       if (p) {
@@ -599,7 +1098,7 @@
     host.querySelector('#att-staff-save').addEventListener('click', async () => {
       const name = host.querySelector('#att-staff-name').value.trim();
       const agencyId = host.querySelector('#att-staff-agency').value;
-      const role = host.querySelector('#att-staff-role').value.trim();
+      const role = host.querySelector('#att-staff-role').value;
       const phone = host.querySelector('#att-staff-phone').value.trim();
       const bloodGroup = host.querySelector('#att-staff-bloodgroup').value;
       const aadhaarNum = host.querySelector('#att-staff-aadhaar-num').value.trim();
@@ -607,6 +1106,7 @@
       errEl.textContent = '';
       if (!name) { errEl.textContent = 'Full name is required.'; return; }
       if (!agencyId) { errEl.textContent = 'Please select an agency.'; return; }
+      if (!role) { errEl.textContent = 'Please select a Role (add Category of Staff on the Agency first if none are listed).'; return; }
       if (!aadhaarNum) { errEl.textContent = 'Aadhaar card number is required.'; return; }
       if (!pendingAadhaarPhoto && !existingAadhaarUrl) { errEl.textContent = 'Aadhaar card photo is required.'; return; }
       if (!pendingPhoto && !existingPhotoUrl) { errEl.textContent = 'Staff photo is required.'; return; }
