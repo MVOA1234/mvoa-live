@@ -889,7 +889,18 @@
         ${selectedRole ? `<option value="${escapeHtml(selectedRole)}" selected>${escapeHtml(selectedRole)} (existing)</option>` : ''}
       `;
     }
+    // FIXED Sept 2026 — a staff member's already-saved Role that doesn't
+    // exactly match any of this agency's current Category-of-Staff Role
+    // names (enrolled before this feature existed, typed slightly
+    // differently, or its category was since renamed/removed) must
+    // still show up selected here. Without this, opening Edit Staff on
+    // them silently lands on "— Select —" with their real Role nowhere
+    // in the list — an unnoticed Save would then overwrite their Role
+    // with blank, or the Role-required check would block Save entirely
+    // and read as if their data had vanished.
+    const selectedIsKnown = selectedRole && roles.includes(selectedRole);
     return '<option value="">— Select —</option>' +
+      (selectedRole && !selectedIsKnown ? `<option value="${escapeHtml(selectedRole)}" selected>${escapeHtml(selectedRole)} (existing)</option>` : '') +
       roles.map(r => `<option value="${escapeHtml(r)}" ${r === selectedRole ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('');
   }
 
