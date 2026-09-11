@@ -226,7 +226,7 @@
   }
 
   async function loadAll(force) {
-    const [agencyRows, staffRows, logRows, settingsRows, categoryRows, holidayRows] = await Promise.all([
+    const [agencyRows, staffRows, logRows, settingsRows, , categoryRows, holidayRows] = await Promise.all([
       MVOA.sheetsRead(MVOA.TABS.attAgencies),
       MVOA.sheetsRead(MVOA.TABS.attStaff),
       MVOA.sheetsRead(MVOA.TABS.attLog),
