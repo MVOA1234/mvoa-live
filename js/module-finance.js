@@ -238,9 +238,35 @@ const FinanceModule = (function () {
     // Reversible — see toggleDisableAts/isAtsDisabled. Only ever set on
     // a Schedule A/B/C request that's already Status === 'Approved';
     // meaningless (left blank) on everything else.
-    'Disabled'];
+    'Disabled',
+    // ADDED Sept 2026 — "Approve with modified amount" (see decide()'s
+    // amountChange handling). Blank on every request until the FIRST
+    // time an approver revises the amount at any stage — set once, to
+    // whatever Amount held at that moment, and never touched again by
+    // any later revision. This is the permanent record of "what was
+    // originally requested," independent of how many times Amount is
+    // revised afterward (Amount itself always holds the current/live
+    // figure everything else — budget, ATS totals, stage badges —
+    // already reads). Appended at the very end, not inserted earlier,
+    // so every existing row's other columns stay correctly aligned.
+    'OriginalAmount'];
 
-  const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp'];
+  const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp',
+    // ADDED Sept 2026 — "Approve with modified amount". AmountAtDecision
+    // is the request's Amount at the moment THIS decision was recorded
+    // (before any change this same decision makes) — kept on every new
+    // approval row (not just modifying ones) so an approval's own
+    // history can show what it was actually decided against. Blank on
+    // every approval row recorded before this feature shipped — those
+    // rows simply won't show that context, which is fine, it's a
+    // best-effort display detail, not something any logic depends on.
+    // AmountModified ('TRUE'/blank) flags the rows that actually changed
+    // the amount; ModifiedAmount is the new figure it changed to on that
+    // one row. The approver's rationale for the change is stored in the
+    // existing Comment column above (reused — a decision never has both
+    // a rejection reason and a modification reason at once). Appended at
+    // the very end so existing approval rows stay aligned.
+    'AmountAtDecision','AmountModified','ModifiedAmount'];
 
   const NOTE_COLS = ['NoteID','RequestID','Author','Timestamp','Note'];
 
@@ -4733,7 +4759,15 @@ const FinanceModule = (function () {
       const icon = a.Decision === 'Approved' ? '✅' : a.Decision === 'SentBack' ? '🔁' : a.Decision === 'Resubmitted' ? '📤' : '❌';
       const color = a.Decision === 'Approved' ? 'green' : a.Decision === 'SentBack' ? '#8a6d00' : a.Decision === 'Resubmitted' ? '#185fa5' : '#b3261e';
       const verb = a.Decision === 'Resubmitted' ? 'Resubmitted by' : `${a.Decision} by`;
-      return `<p style="margin:3px 0;color:${color};">${icon} ${escapeHtml(label)} — ${verb} ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${a.Comment ? ` — "${escapeHtml(a.Comment)}"` : ''}</p>`;
+      // ADDED Sept 2026 — "Approve with modified amount": show the
+      // revision inline on the event it happened on, in place of the
+      // plain comment display (the rationale IS the comment on these
+      // rows — see APPROVAL_COLS' note — so this replaces rather than
+      // duplicates it).
+      const detail = a.AmountModified === 'TRUE'
+        ? ` — amount revised from ${formatAmount(a.AmountAtDecision)} to ${formatAmount(a.ModifiedAmount)}${a.Comment ? ` (reason: "${escapeHtml(a.Comment)}")` : ''}`
+        : (a.Comment ? ` — "${escapeHtml(a.Comment)}"` : '');
+      return `<p style="margin:3px 0;color:${color};">${icon} ${escapeHtml(label)} — ${verb} ${escapeHtml(a.ApproverName)} on ${formatDate(a.Timestamp)}${detail}</p>`;
     }).join('');
 
     // Whatever's currently pending, from the same state engine every
@@ -4891,6 +4925,7 @@ const FinanceModule = (function () {
       // once actually viewed. This is the real thing: clears the moment
       // anyone opens the thread, resets the moment a new note lands.
       const noteCount = allNotes.filter(n => n.RequestID === a.RequestID).length;
+      const approvalsForThisRequest = allApprovals.filter(x => x.RequestID === a.RequestID);
       return `
         <div class="mvoa-list-item">
           <div class="mvoa-row fin-myapproval-trail-toggle" data-idx="${i}" style="cursor:pointer;">
@@ -4899,7 +4934,27 @@ const FinanceModule = (function () {
           </div>
           ${req && req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
           <p class="muted" style="margin:4px 0;font-size:0.8rem;">${formatDate(a.Timestamp)}${req ? ' · Requested by ' + escapeHtml(req.RequestedBy) : ''}</p>
-          ${a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : ''}
+          ${
+            // ADDED Sept 2026 — "Approve with modified amount": on the row
+            // where YOU were the one who modified it, show the change
+            // itself (Comment holds your rationale, reused here rather
+            // than also printed bare below — see APPROVAL_COLS' note).
+            a.AmountModified === 'TRUE'
+              ? `<p style="margin:4px 0;color:#185fa5;">✏️ You approved this at a modified amount: ${formatAmount(a.AmountAtDecision)} → ${formatAmount(a.ModifiedAmount)}${a.Comment ? ` — reason: "${escapeHtml(a.Comment)}"` : ''}</p>`
+              : (a.Comment ? `<p style="margin:4px 0;">"${escapeHtml(a.Comment)}"</p>` : '')
+          }
+          ${
+            // Per explicit instruction: an earlier approver should see if
+            // the amount they approved was later revised — at ANY later
+            // stage, by anyone, whether or not this row itself was the
+            // revision. req.Amount is always the current, live figure
+            // (every revision only ever moves it forward), so it's always
+            // an accurate "now" to show regardless of how many revisions
+            // happened after this decision.
+            req && approvalsForThisRequest.some(x => x.AmountModified === 'TRUE' && (x.Timestamp || '') > (a.Timestamp || ''))
+              ? `<p style="margin:4px 0;color:#8a6d00;">⚠️ This request's amount was later revised — now ${formatAmount(req.Amount)}.</p>`
+              : ''
+          }
           ${
             // "Visible to the previous level" (Sept 2026 instruction, when
             // Send Back was removed): this approver's OWN decision here was
@@ -4908,7 +4963,7 @@ const FinanceModule = (function () {
             // card instead of leaving it discoverable only via View
             // Details, so a previous-stage approver actually sees it
             // without having to go looking.
-            ok && req && req.Status === 'Rejected' ? rejectionDetailHtml(req, allApprovals.filter(x => x.RequestID === a.RequestID)) : ''
+            ok && req && req.Status === 'Rejected' ? rejectionDetailHtml(req, approvalsForThisRequest) : ''
           }
           ${req && hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
@@ -5296,6 +5351,7 @@ const FinanceModule = (function () {
           <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
           <span class="mvoa-badge" style="color:#185fa5;background:#e6f1fb;">${escapeHtml(state.stage)} approval</span>
         </div>
+        ${req.OriginalAmount && Number(req.OriginalAmount) !== Number(req.Amount) ? `<p class="muted" style="margin:2px 0 4px;font-size:0.78rem;">✏️ Originally requested at ${formatAmount(req.OriginalAmount)} — revised at an earlier stage.</p>` : ''}
         ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
         ${req.Description ? `<p class="muted" style="margin:4px 0;">${escapeHtml(req.Description)}</p>` : ''}
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(req.RequestedBy)} · ${formatDate(req.RequestedDate)}</p>
@@ -5307,6 +5363,7 @@ const FinanceModule = (function () {
         ${!currentSectionCanEdit ? `<p class="muted" style="margin:6px 0;font-size:0.8rem;">👁️ Read only — you can't approve or reject.</p>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           ${!currentSectionCanEdit ? '' : alreadyVoted ? '' : `<button class="btn-primary fin-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Approve</button>`}
+          ${!currentSectionCanEdit ? '' : alreadyVoted ? '' : `<button class="btn-secondary fin-approve-modify-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">✏️ Approve (modify amount)</button>`}
           ${currentSectionCanEdit && state.stage !== 'AGM' ? `<button class="btn-secondary fin-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" data-stage="${escapeHtml(state.stage)}" style="margin:0;">Reject</button>` : ''}
           ${notesButtonHtml(req, noteCount, 'fin-queue-notes-toggle', `data-request-id="${escapeHtml(req.RequestID)}"`)}
         </div>
@@ -5338,6 +5395,9 @@ const FinanceModule = (function () {
     cardsEl.querySelectorAll('.fin-approve-btn').forEach(btn => {
       btn.addEventListener('click', () => runOnce(btn, 'Approving…', () => decide(btn.dataset.requestId, btn.dataset.stage, 'Approved', container)));
     });
+    cardsEl.querySelectorAll('.fin-approve-modify-btn').forEach(btn => {
+      btn.addEventListener('click', () => openModifyAmountDialog(btn.dataset.requestId, btn.dataset.stage, container));
+    });
     cardsEl.querySelectorAll('.fin-reject-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const comment = prompt('Reason for rejecting (required):');
@@ -5352,6 +5412,88 @@ const FinanceModule = (function () {
         if (!isHidden) { notesBody.classList.add('hidden'); btn.textContent = '💬 Ask a question'; return; }
         notesBody.classList.remove('hidden');
         await renderNotesThread(notesBody, id, btn, !isViewingAs(), container);
+      });
+    });
+  }
+
+  // ─── "Approve with modified amount" (ADDED Sept 2026) ───────────
+  // A separate dialog rather than folding into the plain Approve button —
+  // the two are meant to feel like genuinely distinct actions (a silent
+  // approval vs. a deliberate, rationale-required revision), not one
+  // button with a hidden extra step. Reuses the ops-qr-modal/ops-qr-box
+  // classes already used elsewhere in this module (openExpenseEntryDialog
+  // etc.) for visual consistency.
+  function openModifyAmountDialog(requestId, stage, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    const currentAmount = Number(req.Amount) || 0;
+
+    // Same two context sources paymentReferenceLineHtml / the New Payment
+    // Request preview already surface elsewhere — shown here too so the
+    // approver isn't picking a new figure blind.
+    let contextHtml = '';
+    if (req.RequestType === 'PaymentRequest' && req.LinkedSpendRequestID) {
+      const ats = requestsCache.find(r => r.RequestID === req.LinkedSpendRequestID);
+      if (ats) {
+        const committedElsewhere = totalPaymentsAgainstSpend(ats.RequestID, req.RequestID);
+        contextHtml = `<p class="muted" style="margin:4px 0;">🔗 Linked Approval to Spend (${escapeHtml(ats.RequestID)}): <strong>${formatAmount(ats.Amount)}</strong>${committedElsewhere > 0 ? ` — already committed by other payment request(s): <strong>${formatAmount(committedElsewhere)}</strong>` : ''}</p>`;
+      }
+    } else if (req.Category !== 'Petty Cash') {
+      const fy = currentFY();
+      const info = budgetInfoFor(req.Category, fy);
+      contextHtml = info
+        ? `<p class="muted" style="margin:4px 0;">Budget Available (FY ${escapeHtml(fy)}): <strong>${formatAmount(info.available)}</strong> of ${formatAmount(info.total)}</p>`
+        : `<p class="muted" style="margin:4px 0;">No budget line set up yet for "${escapeHtml(req.Category)}" in FY ${escapeHtml(fy)}.</p>`;
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="width:min(480px,96vw);max-width:none;text-align:left;">
+        <button id="fin-modify-close-top" class="btn-secondary" style="float:right;">✕ Close</button>
+        <h3 style="margin-top:0;">Approve with Modified Amount</h3>
+        <p class="muted" style="margin:0 0 8px;">${escapeHtml(req.Category)}${req.Vendor ? ' — ' + escapeHtml(req.Vendor) : ''} · ${escapeHtml(stage)} stage</p>
+        <p style="margin:4px 0;">Currently requested: <strong>${formatAmount(currentAmount)}</strong></p>
+        ${contextHtml}
+        <label>New Amount (₹)
+          <input id="fin-modify-amount" type="number" min="0" step="1" value="${currentAmount}" style="-moz-appearance:textfield;" onwheel="this.blur()">
+        </label>
+        <label>Rationale for the change (required)
+          <textarea id="fin-modify-reason" rows="3" placeholder="Why is this being approved at a different amount?"></textarea>
+        </label>
+        <p class="error-text" id="fin-modify-error" style="min-height:1em;"></p>
+        <div class="mvoa-row" style="margin-top:10px;">
+          <button id="fin-modify-confirm" class="btn-primary">Confirm Approval</button>
+          <button id="fin-modify-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('#fin-modify-close-top').addEventListener('click', close);
+    modal.querySelector('#fin-modify-cancel').addEventListener('click', close);
+    const confirmBtn = modal.querySelector('#fin-modify-confirm');
+    confirmBtn.addEventListener('click', () => {
+      const errEl = modal.querySelector('#fin-modify-error');
+      errEl.textContent = '';
+      const newAmount = Number(modal.querySelector('#fin-modify-amount').value);
+      const reason = modal.querySelector('#fin-modify-reason').value.trim();
+      if (!Number.isFinite(newAmount) || newAmount < 0) { errEl.textContent = 'Enter a valid amount.'; return; }
+      if (newAmount === currentAmount) { errEl.textContent = 'Enter an amount different from the current one — or use the plain Approve button instead.'; return; }
+      if (!reason) { errEl.textContent = 'Please enter a rationale for the change.'; return; }
+      runOnce(confirmBtn, 'Approving…', async () => {
+        await decide(requestId, stage, 'Approved', container, reason, { newAmount });
+        // decide() never rethrows — it catches its own errors and writes
+        // them into the underlying queue card's error paragraph instead
+        // (same pattern Reject already relies on). Check that element
+        // rather than assuming success: render(container) only runs on
+        // decide()'s success path, so a failure leaves the ORIGINAL card
+        // (and its now-populated error text) still in the DOM behind this
+        // modal — copy it here and keep the modal open instead of losing
+        // it once this closes.
+        const queueErrEl = document.querySelector(`.fin-queue-error[data-request-id="${requestId}"]`);
+        if (queueErrEl && queueErrEl.textContent) { errEl.textContent = queueErrEl.textContent; return; }
+        close();
       });
     });
   }
@@ -5418,7 +5560,12 @@ const FinanceModule = (function () {
     return req.RequestType === 'PaymentRequest' ? computePaymentRequestState(req, approvals) : computeRequestState(req, approvals);
   }
 
-  async function decide(requestId, stage, decision, container, comment) {
+  // ADDED Sept 2026 — amountChange (optional, 6th param): {newAmount}, only
+  // meaningful when decision === 'Approved'. See REQUEST_COLS/APPROVAL_COLS
+  // comments for the schema this writes. The approver's rationale for the
+  // change travels in as `comment` (the same param a Rejection reason
+  // already uses) — a decision never needs both at once.
+  async function decide(requestId, stage, decision, container, comment, amountChange) {
     const user = MVOA.getUser();
     const errEl = document.querySelector(`.fin-queue-error[data-request-id="${requestId}"]`);
     let justApprovedForContractPrompt = null;
@@ -5437,12 +5584,40 @@ const FinanceModule = (function () {
       const priorApprovals = await loadApprovalsFor(requestId, true); // BEFORE this decision is appended, for stage comparison below
       const priorState = computeAnyRequestState(req, priorApprovals);
 
+      // isAmountChange guards against a no-op "change" (same figure
+      // re-submitted) so a plain Approve never gets misrecorded as a
+      // revision — AmountModified should mean something actually changed.
+      const isAmountChange = decision === 'Approved' && amountChange &&
+        Number.isFinite(Number(amountChange.newAmount)) && Number(amountChange.newAmount) >= 0 &&
+        Number(amountChange.newAmount) !== (Number(req.Amount) || 0);
+
       const approvalId = await nextApprovalId();
       const row = {
         ApprovalID: approvalId, RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
-        Stage: stage, Decision: decision, Comment: comment || '', Timestamp: new Date().toISOString()
+        Stage: stage, Decision: decision, Comment: comment || '', Timestamp: new Date().toISOString(),
+        AmountAtDecision: req.Amount, AmountModified: isAmountChange ? 'TRUE' : '',
+        ModifiedAmount: isAmountChange ? amountChange.newAmount : ''
       };
       await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, row));
+
+      // The amount-change side effect is orthogonal to which stage-
+      // progression branch runs below (a revision can happen on ANY
+      // approving decision — mid-AND-group, stage-advancing, or the final
+      // approval that closes the chain) — merged into every branch's own
+      // update object rather than duplicated per-branch. Every later
+      // reader of Amount (budget consumption, ATS running totals, stage
+      // badges, the next approver's own queue card) reads it live off the
+      // request, so this is the ONLY place that needs to change for all
+      // of those to pick up the revised figure automatically.
+      const amountFields = isAmountChange ? {
+        Amount: amountChange.newAmount,
+        // Only ever set ONCE — the very first time this request's amount
+        // is ever revised, at whatever Amount it held then. A SECOND
+        // revision (at a later stage) must NOT overwrite it with the
+        // in-between figure, or the permanent "originally requested"
+        // record would silently drift with every edit.
+        OriginalAmount: req.OriginalAmount || req.Amount
+      } : {};
 
       let resultingStatus = req.Status;
       const now = new Date().toISOString();
@@ -5462,7 +5637,7 @@ const FinanceModule = (function () {
           // see disbursementStageOnApproval. Never applies to a Payment
           // Request (no RuleID/rulesCache row to match), so ruleForRequest
           // harmlessly returns {} for those and this is a no-op.
-          const updated = Object.assign({}, req, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now, StageOpenedAt: '', DisbursementStage: disbursementStageOnApproval(ruleForRequest(req)) });
+          const updated = Object.assign({}, req, amountFields, { Status: 'Approved', ECApprovalCount: state.ecCount, StageEnteredAt: now, StageOpenedAt: '', DisbursementStage: disbursementStageOnApproval(ruleForRequest(req)) });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = 'Approved';
           // Offer to register this as a contract so future payments can
@@ -5482,19 +5657,19 @@ const FinanceModule = (function () {
           // off while the other hasn't yet. Not a stage change, so
           // StageEnteredAt is left alone — the still-pending approver
           // already knew about this one.
-          const updated = Object.assign({}, req, { ECApprovalCount: state.ecCount });
+          const updated = Object.assign({}, req, amountFields, { ECApprovalCount: state.ecCount });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = state.stage === 'EC' ? `PendingApproval (${state.ecCount}/${state.quorum} EC)` : `PendingApproval (${state.stage})`;
         } else {
           // Moved on to a genuinely new stage (Administrative→Financial,
           // Financial→EC, EC→AGM) — this is exactly what the 🆕 New
           // indicator for the next approver is keyed off.
-          const updated = Object.assign({}, req, { StageEnteredAt: now, StageOpenedAt: '' });
+          const updated = Object.assign({}, req, amountFields, { StageEnteredAt: now, StageOpenedAt: '' });
           await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
           resultingStatus = `PendingApproval (next: ${state.stage})`;
         }
       }
-      await MVOA.logAudit({ module: 'Finance', requestId, eventType: `${stage} ${decision}`, comment: comment || '', statusAfter: resultingStatus });
+      await MVOA.logAudit({ module: 'Finance', requestId, eventType: `${stage} ${decision}${isAmountChange ? ' (amount revised)' : ''}`, comment: comment || '', statusAfter: resultingStatus });
       await loadAll(true);
       render(container);
       if (justApprovedForContractPrompt) {
