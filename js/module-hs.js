@@ -2432,9 +2432,28 @@ const HSModule = (function () {
     const TANK_CAPACITY = 200; // litres, per DG_Set.docx
     const pctToLitres = (pct) => (pct / 100) * TANK_CAPACITY;
     const round2 = (n) => Math.round(n * 100) / 100;
+    // "Cumulated running hours of DG" readings are stored HH.MM-style —
+    // the two digits after the decimal point are a literal MINUTES label
+    // (00-59), not a true fraction of an hour. E.g. 1921.19 means "1921
+    // hours, 19 minutes", NOT "1921 + 19/100 hours". That's fine for
+    // display, but it must NOT be subtracted directly: 1921.10 − 1920.45
+    // (i.e. 1921h10m − 1920h45m, a real 25-minute run) would naively
+    // compute 0.65, which isn't even a valid HH.MM figure — the minutes
+    // "borrowed" across the hour boundary. Convert each reading to true
+    // decimal hours first, subtract, THEN round — that gives the correct
+    // elapsed run time (25 min → 0.42 true hours) and keeps per-shift
+    // totals meaningfully summable in the report below.
+    const hhmmLabelToTrueHours = (v) => {
+      if (v == null || isNaN(v)) return null;
+      const wholeHours = Math.floor(v + 1e-9); // +epsilon guards float noise like 1920.999999999
+      const minutesLabel = Math.round((v - wholeHours) * 100); // 0-59
+      return wholeHours + minutesLabel / 60;
+    };
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i], next = rows[i + 1];
-      r.hoursRun = (next && r.hours != null && next.hours != null) ? round2(next.hours - r.hours) : null;
+      r.hoursRun = (next && r.hours != null && next.hours != null)
+        ? round2(hhmmLabelToTrueHours(next.hours) - hhmmLabelToTrueHours(r.hours))
+        : null;
       r.kwhGenerated = (next && r.kwh != null && next.kwh != null) ? round2(next.kwh - r.kwh) : null;
       // Sanity guard: a running-hours meter can never advance MORE than
       // the actual wall-clock time that elapsed between the two
