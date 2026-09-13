@@ -4460,6 +4460,49 @@ const HSModule = (function () {
         ? (hasThreshold ? (current.result === 'Fail' ? '✕ Fail — ' : '✓ Pass — ') + current.remarks : current.remarks)
         : '';
       const statusColor = hasThreshold ? (current.result === 'Fail' ? '#b3261e' : current.result === 'Pass' ? 'green' : 'inherit') : 'inherit';
+      // ADDED Sept 2026, per explicit instruction — a cumulative
+      // running-hours meter is entered as two separate boxes (Hours,
+      // whole number + Minutes, to 2 decimal places) instead of one
+      // combined decimal-hours box. This exists specifically to make a
+      // real incorrect entry (a technician meant to type "1921.19" and
+      // typed "192119" instead, losing the decimal point) structurally
+      // impossible going forward — there's no longer a single box where
+      // a missing decimal point can turn 19 minutes into 19,000 hours.
+      // IMPORTANT — the Minutes box maps directly onto the two digits
+      // after the decimal point (hours + minutes/100), NOT true 60-based
+      // clock minutes (hours + minutes/60). That matches how every
+      // existing reading in this sheet already reads — "1920.08" means
+      // 1920 hrs and (what the field calls) "08" minutes, not 1920
+      // hours plus 8/60 of an hour — so Hours=1921 / Minutes=19 must
+      // combine back to 1921.19, and 1921.19 must split back out to
+      // Hours=1921 / Minutes=19, not 11.4. Getting this backwards was a
+      // real bug caught before shipping (round1 of this feature used
+      // /60 and *60 here) — the combined value is still exactly what
+      // flows into numericValue/Result/Remarks below (see
+      // applyNumericEntry in the 'input' listener), so the storage
+      // format, the backwards-reading guard, and every report
+      // calculation that reads this item stay unchanged; only how the
+      // technician types the number in is different.
+      const isRunningHours = /running hours/i.test(item.CheckItem || '');
+      if (isRunningHours) {
+        const existingVal = current.numericValue;
+        const hasExisting = existingVal !== undefined && existingVal !== null && existingVal !== '' && !isNaN(existingVal);
+        const hoursPart = hasExisting ? Math.floor(existingVal) : '';
+        const minutesPart = hasExisting ? Math.round((existingVal - Math.floor(existingVal)) * 10000) / 100 : '';
+        inputHtml = `
+          <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+            <input type="number" step="1" min="0" inputmode="numeric" class="hs-numeric-hours-input" data-item-id="${item.ItemID}" value="${hoursPart === '' ? '' : escapeHtml(String(hoursPart))}" placeholder="Hours" style="flex:1;min-width:80px;">
+            <span class="muted">hr</span>
+            <input type="number" step="0.01" min="0" max="59.99" inputmode="decimal" class="hs-numeric-minutes-input" data-item-id="${item.ItemID}" value="${minutesPart === '' ? '' : escapeHtml(String(minutesPart))}" placeholder="Minutes" style="flex:1;min-width:80px;">
+            <span class="muted">min</span>
+          </div>
+          <p class="hs-numeric-status" data-item-id="${item.ItemID}" style="margin:4px 0 0;font-size:0.85rem;font-weight:700;color:${statusColor};">${escapeHtml(statusText)}</p>
+          <label class="hs-outlier-confirm-wrap ${current.outlierFlag ? '' : 'hidden'}" data-item-id="${item.ItemID}" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.85rem;color:#b3261e;">
+            <input type="checkbox" class="hs-outlier-confirm-cb" data-item-id="${item.ItemID}" ${current.outlierConfirmed ? 'checked' : ''}>
+            I've rechecked — this reading is correct, submit it anyway
+          </label>
+        `;
+      } else {
       inputHtml = `
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
           <input type="number" step="any" inputmode="decimal" class="hs-numeric-input" data-item-id="${item.ItemID}" value="${current.numericValue !== undefined ? escapeHtml(String(current.numericValue)) : ''}" placeholder="Enter value" style="flex:1;">
@@ -4471,6 +4514,7 @@ const HSModule = (function () {
           I've rechecked — this reading is correct, submit it anyway
         </label>
       `;
+      }
     } else if (item.InputType === 'Dropdown') {
       const opts = itemOptionsCache.filter(o => o.ItemID === item.ItemID).sort((a, b) => (parseInt(a.OptionOrder, 10) || 0) - (parseInt(b.OptionOrder, 10) || 0));
       inputHtml = `
@@ -4662,6 +4706,135 @@ const HSModule = (function () {
       saveDraft();
     });
 
+    // Shared numeric-entry pipeline — takes an already-parsed, combined
+    // decimal value and runs it through the outlier guard / threshold
+    // Pass-Fail evaluation / running-hours backwards-reading guard /
+    // Result+Remarks construction, exactly as before. Extracted out of
+    // the 'input' listener below (ADDED Sept 2026) so BOTH the plain
+    // single-box Numeric field AND the new split Hours+Minutes
+    // running-hours field (same section, per explicit instruction) feed
+    // into one identical code path — neither the storage format nor any
+    // of the existing guards change, only how the technician types the
+    // number in.
+    function applyNumericEntry(itemId, item, val, statusEl) {
+      if (!item || isNaN(val)) {
+        pendingResults[itemId] = {};
+        if (statusEl) { statusEl.textContent = ''; }
+        return;
+      }
+      const unit = item.Unit || '';
+      const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
+      const confirmWrap = listEl.querySelector(`.hs-outlier-confirm-wrap[data-item-id="${itemId}"]`);
+      const confirmCb = confirmWrap ? confirmWrap.querySelector('.hs-outlier-confirm-cb') : null;
+
+      // Outlier guard — independent of Pass/Fail: a value can be
+      // technically "Pass" (e.g. 32bar isn't below the 3.2bar fail
+      // threshold) yet still be an obvious typo (32 instead of 3.2).
+      // TypicalValue (optional, per item) defines a ±20% plausible
+      // band; outside it, the entry isn't blocked, but it does need
+      // an explicit "yes, I checked, this is right" before it's
+      // accepted — and even then it's flagged through to the
+      // Monthly Report and a Maintenance task, not silently accepted.
+      function applyOutlierGuard(result, remarks) {
+        const typical = parseFloat(item.TypicalValue);
+        const hasTypical = !isNaN(typical) && typical !== 0;
+        const outOfRange = hasTypical && (val < typical * 0.8 || val > typical * 1.2);
+        if (!outOfRange) {
+          pendingResults[itemId] = { result, remarks, numericValue: val };
+          if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
+          return false;
+        }
+        pendingResults[itemId] = { result, remarks, numericValue: val, outlierFlag: true, outlierConfirmed: false };
+        if (confirmWrap) { confirmWrap.classList.remove('hidden'); if (confirmCb) confirmCb.checked = false; }
+        return true;
+      }
+
+      if (!hasThreshold) {
+        // Plain data-capture field (e.g. Running Hours in Shift) —
+        // no pass/fail meaning, just record the number as-is — EXCEPT
+        // for a running-hours meter, which gets a live backwards-
+        // reading guard: a cumulative meter can't decrease, so a
+        // lower value than last time is flagged before it's ever
+        // accepted, not just discovered later in the report.
+        if (/running hours/i.test(item.CheckItem)) {
+          const last = lastReadingCache[itemId];
+          if (last && val < last.value) {
+            pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, belowLastReading: true };
+            if (statusEl) {
+              statusEl.innerHTML = `⚠️ This is LOWER than the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — a running-hours meter can't go backwards. Please double-check this value.`;
+              statusEl.style.color = '#b3261e';
+            }
+            saveDraftDebounced();
+            return;
+          }
+        }
+        // VESTIGIAL as of 26-Aug-2026: "Diesel Level Before Top Up" is
+        // now force-EXCLUDED from this form's items list (see
+        // renderChecklistForm), so this branch can't currently fire —
+        // left in place, harmlessly unreachable, in case that item is
+        // ever reintroduced under this same name. Originally: an
+        // unchanged reading from last time usually means the gauge
+        // wasn't actually rechecked (just re-typed from memory), which
+        // used to silently zero out that shift's Diesel Consumed
+        // figure — see loadDgOperationsData's header comment for the
+        // actual incident this caused.
+        if (/diesel level before top up/i.test(item.CheckItem)) {
+          const last = lastReadingCache[itemId];
+          if (last && val === last.value) {
+            pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, outlierFlag: true, outlierConfirmed: false };
+            if (confirmWrap) { confirmWrap.classList.remove('hidden'); if (confirmCb) confirmCb.checked = false; }
+            if (statusEl) {
+              statusEl.innerHTML = `⚠️ This is the SAME as the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — please recheck the gauge rather than re-entering the same number from memory.`;
+              statusEl.style.color = '#b3261e';
+            }
+            saveDraftDebounced();
+            return;
+          }
+          // Deliberately does NOT run this reading through the generic
+          // ±20%-of-TypicalValue applyOutlierGuard below. That check
+          // assumes a value normally hovers near one typical number —
+          // true for something like an oil pressure gauge, but diesel
+          // level is measured every single shift now and is SUPPOSED to
+          // swing across the whole range every top-up cycle (high right
+          // after a top-up, all the way down toward 0% right before the
+          // next one). Comparing it against a fixed "typical" percentage
+          // would flag that entirely normal low end every time — see the
+          // "same as last reading" check just above instead, which
+          // still catches a genuinely stale/un-rechecked entry without
+          // caring what the actual level is.
+          const remarks = `Recorded: ${val}${unit}`;
+          pendingResults[itemId] = { result: String(val), remarks, numericValue: val };
+          if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
+          if (statusEl) { statusEl.textContent = remarks; statusEl.style.color = 'inherit'; }
+          saveDraftDebounced();
+          return;
+        }
+        const remarks = `Recorded: ${val}${unit}`;
+        const isOutlier = applyOutlierGuard(String(val), remarks);
+        if (statusEl) {
+          statusEl.textContent = isOutlier ? `⚠️ ${remarks} — this looks far outside the usual range. Please recheck the value.` : remarks;
+          statusEl.style.color = isOutlier ? '#b3261e' : 'inherit';
+        }
+        saveDraftDebounced();
+        return;
+      }
+      const threshold = parseFloat(item.FailThreshold);
+      const isFail = item.FailDirection === 'above' ? val > threshold : val < threshold;
+      const result = isFail ? 'Fail' : 'Pass';
+      const remarks = `Entered: ${val}${unit} (fails if ${item.FailDirection === 'above' ? 'above' : 'below'} ${threshold}${unit})`;
+      const isOutlier = applyOutlierGuard(result, remarks);
+      if (statusEl) {
+        if (isOutlier) {
+          statusEl.textContent = `⚠️ ${(isFail ? 'Fail — ' : 'Pass — ') + remarks} — this looks far outside the usual range. Please recheck the value.`;
+          statusEl.style.color = '#b3261e';
+        } else {
+          statusEl.textContent = (isFail ? '✕ Fail — ' : '✓ Pass — ') + remarks;
+          statusEl.style.color = isFail ? '#b3261e' : 'green';
+        }
+      }
+      saveDraftDebounced();
+    }
+
     listEl.addEventListener('input', (e) => {
       const itemId = e.target.dataset.itemId;
       if (!itemId) return;
@@ -4685,123 +4858,48 @@ const HSModule = (function () {
       } else if (e.target.classList.contains('hs-numeric-input')) {
         const item = items.find(i => i.ItemID === itemId);
         const statusEl = listEl.querySelector(`.hs-numeric-status[data-item-id="${itemId}"]`);
-        const val = parseFloat(e.target.value);
-        if (!item || isNaN(val)) {
+        applyNumericEntry(itemId, item, parseFloat(e.target.value), statusEl);
+      } else if (e.target.classList.contains('hs-numeric-hours-input') || e.target.classList.contains('hs-numeric-minutes-input')) {
+        // ADDED Sept 2026, per explicit instruction — the split
+        // Hours/Minutes entry for "Cumulated running hours" style items
+        // (see renderItemRow). Whichever of the two boxes just fired
+        // this event, read BOTH (they share data-item-id) and combine
+        // into the same decimal-hours value the rest of the pipeline
+        // has always expected — this is purely an entry-UI change, not
+        // a storage or calculation change. Built specifically to make
+        // the typo that caused a real incorrect entry (meant "1921.19",
+        // typed "192119", losing the decimal point) structurally
+        // impossible: there's no single box left where a missing
+        // decimal point can silently turn 19 minutes into 19000 hours.
+        // IMPORTANT — combine as hours + minutes/100 (the Minutes box
+        // maps straight onto the two digits after the decimal point),
+        // NOT minutes/60. Hours=1921 / Minutes=19 must produce 1921.19,
+        // matching the "1920.08"-style figures already in this sheet —
+        // real 60-based clock-minute math would wrongly give 1921.32.
+        const item = items.find(i => i.ItemID === itemId);
+        const statusEl = listEl.querySelector(`.hs-numeric-status[data-item-id="${itemId}"]`);
+        const hoursEl = listEl.querySelector(`.hs-numeric-hours-input[data-item-id="${itemId}"]`);
+        const minutesEl = listEl.querySelector(`.hs-numeric-minutes-input[data-item-id="${itemId}"]`);
+        const hoursNum = hoursEl ? parseFloat(hoursEl.value) : NaN;
+        const minutesNum = minutesEl ? parseFloat(minutesEl.value) : NaN;
+        if (isNaN(hoursNum) || isNaN(minutesNum)) {
+          // Either box still blank/invalid — not a complete value yet,
+          // same as the single-box field treating an unparsable string
+          // as "nothing entered".
           pendingResults[itemId] = {};
-          if (statusEl) { statusEl.textContent = ''; }
+          if (statusEl) statusEl.textContent = '';
           return;
         }
-        const unit = item.Unit || '';
-        const hasThreshold = item.FailThreshold !== '' && item.FailThreshold !== undefined;
-        const confirmWrap = listEl.querySelector(`.hs-outlier-confirm-wrap[data-item-id="${itemId}"]`);
-        const confirmCb = confirmWrap ? confirmWrap.querySelector('.hs-outlier-confirm-cb') : null;
-
-        // Outlier guard — independent of Pass/Fail: a value can be
-        // technically "Pass" (e.g. 32bar isn't below the 3.2bar fail
-        // threshold) yet still be an obvious typo (32 instead of 3.2).
-        // TypicalValue (optional, per item) defines a ±20% plausible
-        // band; outside it, the entry isn't blocked, but it does need
-        // an explicit "yes, I checked, this is right" before it's
-        // accepted — and even then it's flagged through to the
-        // Monthly Report and a Maintenance task, not silently accepted.
-        function applyOutlierGuard(result, remarks) {
-          const typical = parseFloat(item.TypicalValue);
-          const hasTypical = !isNaN(typical) && typical !== 0;
-          const outOfRange = hasTypical && (val < typical * 0.8 || val > typical * 1.2);
-          if (!outOfRange) {
-            pendingResults[itemId] = { result, remarks, numericValue: val };
-            if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
-            return false;
-          }
-          pendingResults[itemId] = { result, remarks, numericValue: val, outlierFlag: true, outlierConfirmed: false };
-          if (confirmWrap) { confirmWrap.classList.remove('hidden'); if (confirmCb) confirmCb.checked = false; }
-          return true;
-        }
-
-        if (!hasThreshold) {
-          // Plain data-capture field (e.g. Running Hours in Shift) —
-          // no pass/fail meaning, just record the number as-is — EXCEPT
-          // for a running-hours meter, which gets a live backwards-
-          // reading guard: a cumulative meter can't decrease, so a
-          // lower value than last time is flagged before it's ever
-          // accepted, not just discovered later in the report.
-          if (/running hours/i.test(item.CheckItem)) {
-            const last = lastReadingCache[itemId];
-            if (last && val < last.value) {
-              pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, belowLastReading: true };
-              if (statusEl) {
-                statusEl.innerHTML = `⚠️ This is LOWER than the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — a running-hours meter can't go backwards. Please double-check this value.`;
-                statusEl.style.color = '#b3261e';
-              }
-              saveDraftDebounced();
-              return;
-            }
-          }
-          // VESTIGIAL as of 26-Aug-2026: "Diesel Level Before Top Up" is
-          // now force-EXCLUDED from this form's items list (see
-          // renderChecklistForm), so this branch can't currently fire —
-          // left in place, harmlessly unreachable, in case that item is
-          // ever reintroduced under this same name. Originally: an
-          // unchanged reading from last time usually means the gauge
-          // wasn't actually rechecked (just re-typed from memory), which
-          // used to silently zero out that shift's Diesel Consumed
-          // figure — see loadDgOperationsData's header comment for the
-          // actual incident this caused.
-          if (/diesel level before top up/i.test(item.CheckItem)) {
-            const last = lastReadingCache[itemId];
-            if (last && val === last.value) {
-              pendingResults[itemId] = { result: String(val), remarks: `Recorded: ${val}${unit}`, numericValue: val, outlierFlag: true, outlierConfirmed: false };
-              if (confirmWrap) { confirmWrap.classList.remove('hidden'); if (confirmCb) confirmCb.checked = false; }
-              if (statusEl) {
-                statusEl.innerHTML = `⚠️ This is the SAME as the last recorded reading (${last.value}${unit} on ${formatDate(last.timestamp)}) — please recheck the gauge rather than re-entering the same number from memory.`;
-                statusEl.style.color = '#b3261e';
-              }
-              saveDraftDebounced();
-              return;
-            }
-            // Deliberately does NOT run this reading through the generic
-            // ±20%-of-TypicalValue applyOutlierGuard below. That check
-            // assumes a value normally hovers near one typical number —
-            // true for something like an oil pressure gauge, but diesel
-            // level is measured every single shift now and is SUPPOSED to
-            // swing across the whole range every top-up cycle (high right
-            // after a top-up, all the way down toward 0% right before the
-            // next one). Comparing it against a fixed "typical" percentage
-            // would flag that entirely normal low end every time — see the
-            // "same as last reading" check just above instead, which
-            // still catches a genuinely stale/un-rechecked entry without
-            // caring what the actual level is.
-            const remarks = `Recorded: ${val}${unit}`;
-            pendingResults[itemId] = { result: String(val), remarks, numericValue: val };
-            if (confirmWrap) { confirmWrap.classList.add('hidden'); if (confirmCb) confirmCb.checked = false; }
-            if (statusEl) { statusEl.textContent = remarks; statusEl.style.color = 'inherit'; }
-            saveDraftDebounced();
-            return;
-          }
-          const remarks = `Recorded: ${val}${unit}`;
-          const isOutlier = applyOutlierGuard(String(val), remarks);
-          if (statusEl) {
-            statusEl.textContent = isOutlier ? `⚠️ ${remarks} — this looks far outside the usual range. Please recheck the value.` : remarks;
-            statusEl.style.color = isOutlier ? '#b3261e' : 'inherit';
-          }
-          saveDraftDebounced();
+        if (hoursNum < 0) {
+          if (statusEl) { statusEl.textContent = 'Hours can\'t be negative.'; statusEl.style.color = '#b3261e'; }
           return;
         }
-        const threshold = parseFloat(item.FailThreshold);
-        const isFail = item.FailDirection === 'above' ? val > threshold : val < threshold;
-        const result = isFail ? 'Fail' : 'Pass';
-        const remarks = `Entered: ${val}${unit} (fails if ${item.FailDirection === 'above' ? 'above' : 'below'} ${threshold}${unit})`;
-        const isOutlier = applyOutlierGuard(result, remarks);
-        if (statusEl) {
-          if (isOutlier) {
-            statusEl.textContent = `⚠️ ${(isFail ? 'Fail — ' : 'Pass — ') + remarks} — this looks far outside the usual range. Please recheck the value.`;
-            statusEl.style.color = '#b3261e';
-          } else {
-            statusEl.textContent = (isFail ? '✕ Fail — ' : '✓ Pass — ') + remarks;
-            statusEl.style.color = isFail ? '#b3261e' : 'green';
-          }
+        if (minutesNum < 0 || minutesNum >= 60) {
+          if (statusEl) { statusEl.textContent = 'Minutes must be between 0 and 59.99.'; statusEl.style.color = '#b3261e'; }
+          return;
         }
-        saveDraftDebounced();
+        const combinedVal = Math.round((hoursNum + minutesNum / 100) * 100) / 100;
+        applyNumericEntry(itemId, item, combinedVal, statusEl);
       }
     });
 
