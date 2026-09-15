@@ -80,9 +80,19 @@ const HSModule = (function () {
     'EmailStatus', 'EmailSentDate', 'EmailError'
   ];
   const TAB_WATER_TANKER = 'HSWaterTankerRequests';
-  const WATER_TANKER_TO = 'kongutransports15@gmail.com';
-  const WATER_TANKER_CC = 'secretary@myansvillas.com';
-  const WATER_TANKER_FROM = 'fm@myansvillas.com';
+  // No `from` override — the email is sent as whichever Google account the
+  // Apps Script proxy is deployed under (mvoa.villas@gmail.com), rather
+  // than trying to spoof fm@myansvillas.com as the envelope sender. That
+  // address is included as a CC instead, alongside the Secretary, so the
+  // FM still sees every outgoing request.
+  const WATER_TANKER_CC = 'fm@myansvillas.com,secretary@myansvillas.com';
+  // Supplier "To" address is now an editable setting (see
+  // TAB_WATER_TANKER_SETTINGS/waterTankerSupplierEmail below), not a fixed
+  // constant — this is only the fallback used until a Secretary/Treasurer/
+  // President ever changes it, or if that settings tab doesn't exist yet.
+  const DEFAULT_WATER_TANKER_SUPPLIER_EMAIL = 'kongutransports15@gmail.com';
+  const WATER_TANKER_SETTINGS_COLS = ['Key', 'Value'];
+  const TAB_WATER_TANKER_SETTINGS = 'HSWaterTankerSettings';
 
   let categoriesCache = [];
   let templatesCache = [];
@@ -103,6 +113,9 @@ const HSModule = (function () {
   let waterTankerCache = []; // loaded lazily by renderWaterTankerTab itself (not part of loadAll's
                               // Promise.all) — this is a standalone request/approval screen, not
                               // checklist data, so it only needs to load when actually opened
+  let waterTankerSettingsCache = {}; // Key -> Value (e.g. SupplierEmail) — see loadWaterTankerSettings
+  let waterTankerSettingsRowsCache = []; // raw rows (with rowNumber) so saveWaterTankerSetting can
+                                          // update an existing key's row instead of only appending
 
   let currentScan = null;    // { assetId, assetName, category, qrTarget }
   let currentTemplate = null;
@@ -448,12 +461,18 @@ const HSModule = (function () {
   // (first to act decides, same "any one qualifying role" shape as
   // Attendance's Leave Application approval). On approval, an email is
   // sent (via the same Apps Script proxy used for photo uploads — see
-  // MVOA.sendEmailViaProxy in shared.js) to the tanker supplier, cc'ing
-  // the Secretary, regardless of which of the three roles clicked
-  // Approve — the email always reads as coming from the Facility
-  // Manager, per the exact wording specified. A failed email send does
-  // NOT undo the approval — the request stays Approved either way; the
-  // email outcome is recorded separately (EmailStatus) so a failure is
+  // MVOA.sendEmailViaProxy in shared.js) to the tanker supplier (an
+  // editable setting — see waterTankerSupplierEmail/
+  // renderWaterTankerSupplierSection — not a fixed address, since the
+  // supplier can change), cc'ing both the Facility Manager and the
+  // Secretary, regardless of which of the three approver roles actually
+  // clicked Approve. The email is sent as whichever Google account the
+  // Apps Script proxy runs under (no envelope-From spoofing) — the
+  // "Facility Manager, MVOA" wording only appears in the signature line
+  // of the body text, per the exact wording specified. A failed email
+  // send does NOT undo the approval — the request stays Approved either
+  // way; the email outcome is recorded separately (EmailStatus) so a
+  // failure is
   // visible and can be retried/resent manually if needed.
   // ───────────────────────────────────────────────────────────
   function objToRow(cols, o) { return cols.map(c => (o[c] !== undefined && o[c] !== null) ? o[c] : ''); }
@@ -485,6 +504,34 @@ const HSModule = (function () {
     return rowsToObjs(rows, WATER_TANKER_COLS);
   }
 
+  // Key -> Value settings store for this feature (currently just
+  // SupplierEmail) — same shape as AttSettings in module-attendance.js.
+  // Fails open to an empty cache (falling back to
+  // DEFAULT_WATER_TANKER_SUPPLIER_EMAIL) until the tab exists, i.e. until
+  // someone actually changes the supplier for the first time.
+  async function loadWaterTankerSettings() {
+    const rows = await MVOA.sheetsRead(TAB_WATER_TANKER_SETTINGS).catch(() => []);
+    waterTankerSettingsRowsCache = rowsToObjs(rows, WATER_TANKER_SETTINGS_COLS);
+    waterTankerSettingsCache = {};
+    waterTankerSettingsRowsCache.forEach(o => { waterTankerSettingsCache[o.Key] = o.Value; });
+  }
+  function waterTankerSupplierEmail() {
+    return waterTankerSettingsCache.SupplierEmail || DEFAULT_WATER_TANKER_SUPPLIER_EMAIL;
+  }
+  // Upsert-by-key — updates the existing row if this Key was already
+  // saved once before, otherwise appends a new one (auto-creating the
+  // tab on the very first save, same pattern as every other
+  // sheetsEnsureTab call in this module).
+  async function saveWaterTankerSetting(key, value) {
+    await MVOA.sheetsEnsureTab(TAB_WATER_TANKER_SETTINGS, WATER_TANKER_SETTINGS_COLS);
+    const existing = waterTankerSettingsRowsCache.find(r => r.Key === key);
+    if (existing) {
+      await MVOA.sheetsUpdateRow(TAB_WATER_TANKER_SETTINGS, existing.rowNumber, objToRow(WATER_TANKER_SETTINGS_COLS, { Key: key, Value: value }));
+    } else {
+      await MVOA.sheetsAppend(TAB_WATER_TANKER_SETTINGS, objToRow(WATER_TANKER_SETTINGS_COLS, { Key: key, Value: value }));
+    }
+  }
+
   function renderWaterTankerTab(container) {
     const user = MVOA.getUser();
     const canRequest = isFMPerson(user);
@@ -502,7 +549,7 @@ const HSModule = (function () {
       bodyEl.innerHTML = '<p class="muted">You don\'t have access to Water Tanker Requests. Requests are raised by the Facility Manager; approval is by Secretary, Treasurer or President.</p>';
       return;
     }
-    loadWaterTankerCache().then(rows => {
+    Promise.all([loadWaterTankerCache(), loadWaterTankerSettings()]).then(([rows]) => {
       waterTankerCache = rows;
       renderWaterTankerBody(bodyEl, container, user, canRequest, canApprove);
     }).catch(e => {
@@ -518,6 +565,10 @@ const HSModule = (function () {
     const pending = waterTankerCache.filter(r => r.Status === 'Pending').sort((a, b) => (a.RequestedDate || '').localeCompare(b.RequestedDate || ''));
     const mine = waterTankerCache.filter(r => r.RequestedBy === user.name).sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
     bodyEl.innerHTML = `
+      <div class="card" style="margin-bottom:12px;">
+        <strong>Tanker Supplier</strong>
+        <div id="hs-wt-supplier" style="margin-top:8px;"></div>
+      </div>
       ${canRequest ? `
         <div class="card" style="margin-bottom:12px;">
           <strong>Request a Tanker</strong>
@@ -560,12 +611,61 @@ const HSModule = (function () {
         <div id="hs-wt-months" style="margin-top:8px;"></div>
       </div>
     `;
+    renderWaterTankerSupplierSection(bodyEl.querySelector('#hs-wt-supplier'), container, canApprove);
     if (canRequest) renderWaterTankerRequestForm(bodyEl.querySelector('#hs-wt-request-form'), container, user);
     if (canApprove) {
       bodyEl.querySelectorAll('.hs-wt-approve').forEach(btn => btn.addEventListener('click', () => decideWaterTanker(bodyEl, container, user, btn.dataset.id, 'Approved')));
       bodyEl.querySelectorAll('.hs-wt-reject').forEach(btn => btn.addEventListener('click', () => decideWaterTanker(bodyEl, container, user, btn.dataset.id, 'Rejected')));
     }
     renderWaterTankerMonthView(bodyEl.querySelector('#hs-wt-months'));
+  }
+
+  // Supplier "To" address, editable in place — view-only for the FM
+  // (they need to see who requests go to, but changing the supplier is
+  // an approver-level decision); Secretary/Treasurer/President/admin get
+  // an Edit control. Saved via saveWaterTankerSetting (upserts the
+  // 'SupplierEmail' key), then the whole tab re-renders so every panel
+  // (including the email preview implicit in future sends) picks up the
+  // new address immediately.
+  function renderWaterTankerSupplierSection(hostEl, container, canApprove) {
+    const email = waterTankerSupplierEmail();
+    hostEl.innerHTML = `
+      <p style="margin:0;">Requests are sent to: <strong>${escapeHtml(email)}</strong></p>
+      ${canApprove ? `
+        <button id="hs-wt-supplier-edit-btn" class="btn-secondary" style="margin-top:8px;">✏️ Change Supplier Email</button>
+        <div id="hs-wt-supplier-form" style="margin-top:8px;"></div>
+      ` : ''}
+    `;
+    if (!canApprove) return;
+    hostEl.querySelector('#hs-wt-supplier-edit-btn').addEventListener('click', () => {
+      const formEl = hostEl.querySelector('#hs-wt-supplier-form');
+      formEl.innerHTML = `
+        <input type="email" id="hs-wt-supplier-input" value="${escapeHtml(email)}" placeholder="supplier@example.com" style="width:100%;">
+        <div class="mvoa-row" style="gap:6px;margin-top:6px;">
+          <button id="hs-wt-supplier-save" class="btn-primary" style="flex:1;">Save</button>
+          <button id="hs-wt-supplier-cancel" class="btn-secondary" style="flex:1;">Cancel</button>
+        </div>
+        <p class="error-text" id="hs-wt-supplier-error" style="min-height:1em;margin-top:4px;"></p>
+      `;
+      formEl.querySelector('#hs-wt-supplier-cancel').addEventListener('click', () => { formEl.innerHTML = ''; });
+      formEl.querySelector('#hs-wt-supplier-save').addEventListener('click', async () => {
+        const errEl = formEl.querySelector('#hs-wt-supplier-error');
+        const val = formEl.querySelector('#hs-wt-supplier-input').value.trim();
+        if (!val || val.indexOf('@') === -1) { errEl.textContent = 'Enter a valid email address.'; return; }
+        const btn = formEl.querySelector('#hs-wt-supplier-save');
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        try {
+          await saveWaterTankerSetting('SupplierEmail', val);
+          await MVOA.logAudit({ module: 'WaterTanker', requestId: '', eventType: 'SupplierEmailChanged', comment: `${email} → ${val}` });
+          renderWaterTankerTab(container);
+        } catch (e) {
+          errEl.textContent = 'Could not save: ' + e.message;
+          btn.disabled = false;
+          btn.textContent = 'Save';
+        }
+      });
+    });
   }
 
   function renderWaterTankerRequestForm(formEl, container, user) {
@@ -660,7 +760,7 @@ const HSModule = (function () {
     const subject = `Water Tanker Request — ${req.KL} KL`;
     const body = `Kindly send water tanker with ${req.KL} KL to Myans Villas, Maya Street, 35/3 ECR, Kanathur, 603112. Please acknowledge receipt of this email and confirm.\n\nwith best regards,\nFacility Manager, MVOA`;
     try {
-      await MVOA.sendEmailViaProxy({ to: WATER_TANKER_TO, cc: WATER_TANKER_CC, from: WATER_TANKER_FROM, subject, body });
+      await MVOA.sendEmailViaProxy({ to: waterTankerSupplierEmail(), cc: WATER_TANKER_CC, subject, body });
       await MVOA.sheetsUpdateRow(TAB_WATER_TANKER, req.rowNumber, objToRow(WATER_TANKER_COLS, { ...req, EmailStatus: 'Sent', EmailSentDate: new Date().toISOString(), EmailError: '' }));
     } catch (e) {
       await MVOA.sheetsUpdateRow(TAB_WATER_TANKER, req.rowNumber, objToRow(WATER_TANKER_COLS, { ...req, EmailStatus: 'Failed', EmailError: e.message })).catch(() => {});
