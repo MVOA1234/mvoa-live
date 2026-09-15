@@ -65,6 +65,24 @@ const HSModule = (function () {
   const RESULT_COLS = ['ResultID', 'LogID', 'ItemID', 'Result', 'Remarks'];
   const CATEGORY_ASSET_COLS = ['CategoryKey', 'AssetID', 'AssetLabel', 'Active'];
   const ROUND_WINDOW_COLS = ['RoundKey', 'Label', 'StartHour', 'StartMinute', 'EndHour', 'EndMinute', 'Active'];
+  // ADDED Sept 2026 — Water Tanker Request. KLChoice is the dropdown
+  // selection itself ('36'|'52'|'Other'); KL is the actual litres-in-KL
+  // value used everywhere else (36, 52, or whatever was typed for
+  // Other) — kept as two separate columns so "Other" requests still show
+  // what was picked, not just the number. EmailStatus/EmailSentDate/
+  // EmailError record the outcome of the approval-triggered email
+  // (see sendWaterTankerApprovalEmail) separately from the approval
+  // decision itself — a request is still correctly "Approved" even if
+  // the notification email later fails to send.
+  const WATER_TANKER_COLS = [
+    'RequestID', 'RequestedBy', 'RequestedDate', 'KLChoice', 'KL',
+    'Status', 'DecisionBy', 'DecisionDate', 'DecisionComment',
+    'EmailStatus', 'EmailSentDate', 'EmailError'
+  ];
+  const TAB_WATER_TANKER = 'HSWaterTankerRequests';
+  const WATER_TANKER_TO = 'kongutransports15@gmail.com';
+  const WATER_TANKER_CC = 'secretary@myansvillas.com';
+  const WATER_TANKER_FROM = 'fm@myansvillas.com';
 
   let categoriesCache = [];
   let templatesCache = [];
@@ -82,6 +100,9 @@ const HSModule = (function () {
   let roundWindowsCache = []; // sheet-driven Security round windows — see loadAll's fail-open fallback
                                  // (e.g. all 18 Distribution Panels), so Due Status can show a
                                  // unit that's never been scanned yet, not just ones with a log
+  let waterTankerCache = []; // loaded lazily by renderWaterTankerTab itself (not part of loadAll's
+                              // Promise.all) — this is a standalone request/approval screen, not
+                              // checklist data, so it only needs to load when actually opened
 
   let currentScan = null;    // { assetId, assetName, category, qrTarget }
   let currentTemplate = null;
@@ -247,6 +268,7 @@ const HSModule = (function () {
         <button id="hs-diesel-btn" class="btn-secondary">⛽ Log Diesel Top-Up</button>
         <button id="hs-shiftduty-btn" class="btn-secondary">🗓️ Shift Duty</button>
         <button id="hs-amc-btn" class="btn-secondary">📋 AMC &amp; Compliance</button>
+        <button id="hs-watertanker-btn" class="btn-secondary">💧 Water Tanker Request</button>
       </div>
       <p class="muted" style="margin:0 0 8px;">Recent activity</p>
       <div id="hs-recent"></div>
@@ -269,6 +291,7 @@ const HSModule = (function () {
     container.querySelector('#hs-diesel-btn').addEventListener('click', () => renderDieselTopUpEntry(container));
     container.querySelector('#hs-shiftduty-btn').addEventListener('click', () => renderShiftDuty(container));
     container.querySelector('#hs-amc-btn').addEventListener('click', () => renderAmcCompliance(container));
+    container.querySelector('#hs-watertanker-btn').addEventListener('click', () => renderWaterTankerTab(container));
   }
 
   // ───────────────────────────────────────────────────────────
@@ -417,6 +440,272 @@ const HSModule = (function () {
         });
       });
     });
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // WATER TANKER REQUEST — added Sept 2026. Request is Facility
+  // Manager-only; approval is any ONE of Secretary/Treasurer/President
+  // (first to act decides, same "any one qualifying role" shape as
+  // Attendance's Leave Application approval). On approval, an email is
+  // sent (via the same Apps Script proxy used for photo uploads — see
+  // MVOA.sendEmailViaProxy in shared.js) to the tanker supplier, cc'ing
+  // the Secretary, regardless of which of the three roles clicked
+  // Approve — the email always reads as coming from the Facility
+  // Manager, per the exact wording specified. A failed email send does
+  // NOT undo the approval — the request stays Approved either way; the
+  // email outcome is recorded separately (EmailStatus) so a failure is
+  // visible and can be retried/resent manually if needed.
+  // ───────────────────────────────────────────────────────────
+  function objToRow(cols, o) { return cols.map(c => (o[c] !== undefined && o[c] !== null) ? o[c] : ''); }
+
+  // Same tolerant role/title matching style as module-finance.js's
+  // roleMatchesToken and module-attendance.js's canManageCategoriesAndHolidays
+  // — Role code match first (Roles sheet code, e.g. 'FM'), falling back to
+  // a free-text Title match for anyone whose Role column isn't set to the
+  // exact code. Admin/DEV can always act, same convention used everywhere
+  // else in this app.
+  function isFMPerson(user) {
+    if (!user) return false;
+    if (MVOA.isAdmin(user)) return true;
+    const role = String(user.role || '').toUpperCase();
+    const title = String(user.title || '').toLowerCase();
+    return role === 'FM' || title.indexOf('facility manager') !== -1;
+  }
+  function canApproveWaterTanker(user) {
+    if (!user) return false;
+    if (MVOA.isAdmin(user)) return true;
+    const role = String(user.role || '').toUpperCase();
+    const title = String(user.title || '').toLowerCase();
+    return role === 'SECY' || role === 'TRES' || role === 'PRES' ||
+      title.indexOf('secretary') !== -1 || title.indexOf('treasurer') !== -1 || title.indexOf('president') !== -1;
+  }
+
+  async function loadWaterTankerCache() {
+    const rows = await MVOA.sheetsRead(TAB_WATER_TANKER).catch(() => []);
+    return rowsToObjs(rows, WATER_TANKER_COLS);
+  }
+
+  function renderWaterTankerTab(container) {
+    const user = MVOA.getUser();
+    const canRequest = isFMPerson(user);
+    const canApprove = canApproveWaterTanker(user);
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-home" class="btn-secondary">← Back to Villa Complex Rounds</button>
+        <strong>💧 Water Tanker Request</strong>
+      </div>
+      <div id="hs-wt-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-home').addEventListener('click', () => renderHome(container));
+    const bodyEl = container.querySelector('#hs-wt-body');
+    if (!canRequest && !canApprove) {
+      bodyEl.innerHTML = '<p class="muted">You don\'t have access to Water Tanker Requests. Requests are raised by the Facility Manager; approval is by Secretary, Treasurer or President.</p>';
+      return;
+    }
+    loadWaterTankerCache().then(rows => {
+      waterTankerCache = rows;
+      renderWaterTankerBody(bodyEl, container, user, canRequest, canApprove);
+    }).catch(e => {
+      bodyEl.innerHTML = `<p class="error-text">Could not load Water Tanker Requests: ${escapeHtml(e.message)}</p>`;
+    });
+  }
+
+  function waterTankerKLLabel(r) {
+    return `${escapeHtml(r.KL)} KL${r.KLChoice === 'Other' ? ' (custom)' : ''}`;
+  }
+
+  function renderWaterTankerBody(bodyEl, container, user, canRequest, canApprove) {
+    const pending = waterTankerCache.filter(r => r.Status === 'Pending').sort((a, b) => (a.RequestedDate || '').localeCompare(b.RequestedDate || ''));
+    const mine = waterTankerCache.filter(r => r.RequestedBy === user.name).sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
+    bodyEl.innerHTML = `
+      ${canRequest ? `
+        <div class="card" style="margin-bottom:12px;">
+          <strong>Request a Tanker</strong>
+          <div id="hs-wt-request-form" style="margin-top:10px;"></div>
+        </div>
+        <div class="card" style="margin-bottom:12px;">
+          <strong>Your Requests</strong>
+          <div id="hs-wt-mine" style="margin-top:8px;">
+            ${mine.length ? mine.map(r => `
+              <div class="mvoa-list-item">
+                <strong>${waterTankerKLLabel(r)}</strong> ${MVOA.statusBadgeHtml(r.Status)}
+                <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested ${formatDate(r.RequestedDate)}</p>
+                ${r.DecisionBy ? `<p class="muted" style="margin:0;font-size:0.8rem;">${escapeHtml(r.Status)} by ${escapeHtml(r.DecisionBy)} · ${formatDate(r.DecisionDate)}${r.DecisionComment ? ' — "' + escapeHtml(r.DecisionComment) + '"' : ''}</p>` : ''}
+                ${r.Status === 'Approved' ? (r.EmailStatus === 'Sent' ? `<p style="margin:2px 0 0;font-size:0.8rem;color:#1e6b33;">✅ Supplier email sent ${formatDate(r.EmailSentDate)}</p>` : r.EmailStatus === 'Failed' ? `<p style="margin:2px 0 0;font-size:0.8rem;color:#842029;">⚠️ Supplier email failed to send — let your Secretary/Treasurer/President know.</p>` : '') : ''}
+              </div>
+            `).join('') : '<p class="muted">No requests filed yet.</p>'}
+          </div>
+        </div>
+      ` : ''}
+      ${canApprove ? `
+        <div class="card" style="margin-bottom:12px;">
+          <strong>Pending Approvals${pending.length ? ` (${pending.length})` : ''}</strong>
+          <div id="hs-wt-pending" style="margin-top:8px;">
+            ${pending.length ? pending.map(r => `
+              <div class="mvoa-list-item" data-id="${r.RequestID}">
+                <strong>${waterTankerKLLabel(r)}</strong>
+                <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested by ${escapeHtml(r.RequestedBy)} · ${formatDate(r.RequestedDate)}</p>
+                <div class="mvoa-row" style="gap:6px;">
+                  <button class="btn-primary hs-wt-approve" data-id="${r.RequestID}" style="flex:1;">✅ Approve</button>
+                  <button class="btn-secondary hs-wt-reject" data-id="${r.RequestID}" style="flex:1;">✖️ Reject</button>
+                </div>
+                <p class="error-text hs-wt-decide-error" data-id="${r.RequestID}" style="min-height:1em;margin-top:4px;"></p>
+              </div>
+            `).join('') : '<p class="muted">Nothing pending.</p>'}
+          </div>
+        </div>
+      ` : ''}
+      <div class="card">
+        <strong>Month-wise View</strong>
+        <div id="hs-wt-months" style="margin-top:8px;"></div>
+      </div>
+    `;
+    if (canRequest) renderWaterTankerRequestForm(bodyEl.querySelector('#hs-wt-request-form'), container, user);
+    if (canApprove) {
+      bodyEl.querySelectorAll('.hs-wt-approve').forEach(btn => btn.addEventListener('click', () => decideWaterTanker(bodyEl, container, user, btn.dataset.id, 'Approved')));
+      bodyEl.querySelectorAll('.hs-wt-reject').forEach(btn => btn.addEventListener('click', () => decideWaterTanker(bodyEl, container, user, btn.dataset.id, 'Rejected')));
+    }
+    renderWaterTankerMonthView(bodyEl.querySelector('#hs-wt-months'));
+  }
+
+  function renderWaterTankerRequestForm(formEl, container, user) {
+    formEl.innerHTML = `
+      <label>Quantity
+        <select id="hs-wt-kl-choice">
+          <option value="36">36 KL</option>
+          <option value="52">52 KL</option>
+          <option value="Other">Other (specify)</option>
+        </select>
+      </label>
+      <input type="number" id="hs-wt-kl-other" min="0" step="any" placeholder="Enter KL" style="display:none;margin-top:6px;">
+      <button id="hs-wt-submit-btn" class="btn-primary" style="width:100%;margin-top:10px;">Submit Request</button>
+      <p class="error-text" id="hs-wt-form-error" style="min-height:1em;margin-top:4px;"></p>
+    `;
+    const choiceEl = formEl.querySelector('#hs-wt-kl-choice');
+    const otherEl = formEl.querySelector('#hs-wt-kl-other');
+    choiceEl.addEventListener('change', () => {
+      otherEl.style.display = choiceEl.value === 'Other' ? '' : 'none';
+    });
+    const errEl = formEl.querySelector('#hs-wt-form-error');
+    formEl.querySelector('#hs-wt-submit-btn').addEventListener('click', async () => {
+      errEl.textContent = '';
+      const choice = choiceEl.value;
+      const kl = choice === 'Other' ? parseFloat(otherEl.value) : parseFloat(choice);
+      if (!kl || isNaN(kl) || kl <= 0) { errEl.textContent = 'Enter a valid KL quantity.'; return; }
+      const btn = formEl.querySelector('#hs-wt-submit-btn');
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+      try {
+        await MVOA.sheetsEnsureTab(TAB_WATER_TANKER, WATER_TANKER_COLS);
+        const existingRows = await MVOA.sheetsRead(TAB_WATER_TANKER).catch(() => []);
+        const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+        const requestId = MVOA.nextId('WTR', existingIds);
+        const row = {
+          RequestID: requestId,
+          RequestedBy: user.name,
+          RequestedDate: new Date().toISOString(),
+          KLChoice: choice,
+          KL: String(kl),
+          Status: 'Pending',
+          DecisionBy: '', DecisionDate: '', DecisionComment: '',
+          EmailStatus: '', EmailSentDate: '', EmailError: ''
+        };
+        await MVOA.sheetsAppend(TAB_WATER_TANKER, objToRow(WATER_TANKER_COLS, row));
+        await MVOA.logAudit({ module: 'WaterTanker', requestId, eventType: 'Requested', comment: `${kl} KL`, statusAfter: 'Pending' });
+        renderWaterTankerTab(container);
+      } catch (e) {
+        errEl.textContent = 'Could not submit: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Submit Request';
+      }
+    });
+  }
+
+  async function decideWaterTanker(bodyEl, container, user, requestId, decision) {
+    const req = waterTankerCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    const errEl = bodyEl.querySelector(`.hs-wt-decide-error[data-id="${requestId}"]`);
+    const approveBtn = bodyEl.querySelector(`.hs-wt-approve[data-id="${requestId}"]`);
+    const rejectBtn = bodyEl.querySelector(`.hs-wt-reject[data-id="${requestId}"]`);
+    if (errEl) errEl.textContent = '';
+    if (approveBtn) approveBtn.disabled = true;
+    if (rejectBtn) rejectBtn.disabled = true;
+    try {
+      const decisionRow = {
+        ...req,
+        Status: decision,
+        DecisionBy: user.name,
+        DecisionDate: new Date().toISOString(),
+        DecisionComment: ''
+      };
+      await MVOA.sheetsUpdateRow(TAB_WATER_TANKER, req.rowNumber, objToRow(WATER_TANKER_COLS, decisionRow));
+      await MVOA.logAudit({ module: 'WaterTanker', requestId, eventType: decision, statusAfter: decision });
+      if (decision === 'Approved') {
+        await sendWaterTankerApprovalEmail(decisionRow);
+      }
+      renderWaterTankerTab(container);
+    } catch (e) {
+      if (errEl) errEl.textContent = 'Could not record decision: ' + e.message;
+      if (approveBtn) approveBtn.disabled = false;
+      if (rejectBtn) rejectBtn.disabled = false;
+    }
+  }
+
+  // Fires the supplier notification email and records the outcome on the
+  // SAME row (EmailStatus/EmailSentDate/EmailError) — a failure here is
+  // caught and recorded, never thrown back up to decideWaterTanker, since
+  // the approval itself must stand regardless of whether the email goes
+  // through.
+  async function sendWaterTankerApprovalEmail(req) {
+    const subject = `Water Tanker Request — ${req.KL} KL`;
+    const body = `Kindly send water tanker with ${req.KL} KL to Myans Villas, Maya Street, 35/3 ECR, Kanathur, 603112. Please acknowledge receipt of this email and confirm.\n\nwith best regards,\nFacility Manager, MVOA`;
+    try {
+      await MVOA.sendEmailViaProxy({ to: WATER_TANKER_TO, cc: WATER_TANKER_CC, from: WATER_TANKER_FROM, subject, body });
+      await MVOA.sheetsUpdateRow(TAB_WATER_TANKER, req.rowNumber, objToRow(WATER_TANKER_COLS, { ...req, EmailStatus: 'Sent', EmailSentDate: new Date().toISOString(), EmailError: '' }));
+    } catch (e) {
+      await MVOA.sheetsUpdateRow(TAB_WATER_TANKER, req.rowNumber, objToRow(WATER_TANKER_COLS, { ...req, EmailStatus: 'Failed', EmailError: e.message })).catch(() => {});
+    }
+  }
+
+  function renderWaterTankerMonthView(hostEl) {
+    const byMonth = {};
+    waterTankerCache.forEach(r => {
+      const d = new Date(r.RequestedDate);
+      if (isNaN(d)) return;
+      const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+      (byMonth[key] = byMonth[key] || []).push(r);
+    });
+    const months = Object.keys(byMonth).sort().reverse();
+    hostEl.innerHTML = months.length ? months.map(m => {
+      const rows = byMonth[m].slice().sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
+      const label = new Date(m + '-01T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+      return `
+        <div style="margin-bottom:14px;">
+          <p style="margin:0 0 6px;font-weight:700;">${escapeHtml(label)}</p>
+          <div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+              <thead><tr style="text-align:left;border-bottom:1px solid #ddd;">
+                <th style="padding:4px 6px;">Requested</th><th style="padding:4px 6px;">By</th>
+                <th style="padding:4px 6px;">KL</th><th style="padding:4px 6px;">Status</th>
+                <th style="padding:4px 6px;">Decision</th><th style="padding:4px 6px;">Email</th>
+              </tr></thead>
+              <tbody>
+                ${rows.map(r => `
+                  <tr style="border-bottom:1px solid #eee;">
+                    <td style="padding:4px 6px;">${formatDate(r.RequestedDate)}</td>
+                    <td style="padding:4px 6px;">${escapeHtml(r.RequestedBy)}</td>
+                    <td style="padding:4px 6px;">${waterTankerKLLabel(r)}</td>
+                    <td style="padding:4px 6px;">${MVOA.statusBadgeHtml(r.Status)}</td>
+                    <td style="padding:4px 6px;">${r.DecisionBy ? escapeHtml(r.DecisionBy) + ' · ' + formatDate(r.DecisionDate) : '—'}</td>
+                    <td style="padding:4px 6px;">${r.Status === 'Approved' ? (r.EmailStatus === 'Sent' ? '✅ Sent' : r.EmailStatus === 'Failed' ? '⚠️ Failed' : '—') : '—'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }).join('') : '<p class="muted">No requests yet.</p>';
   }
 
   // Called when a category tab on Home is tapped. RequiresScan=FALSE
