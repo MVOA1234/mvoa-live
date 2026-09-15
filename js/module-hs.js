@@ -80,6 +80,16 @@ const HSModule = (function () {
     'EmailStatus', 'EmailSentDate', 'EmailError'
   ];
   const TAB_WATER_TANKER = 'HSWaterTankerRequests';
+  // Single on/off switch for the whole approval-email side of this
+  // feature — requesting/approving/the month-wise view all work exactly
+  // the same either way; this only controls whether an email actually
+  // gets sent on approval, and whether the Supplier and Email-status UI
+  // shows up at all. Set to false Sept 2026 per user request while the
+  // Apps Script's Gmail authorization is unresolved (the "Sorry, unable
+  // to open the file at present" loop on the consent screen — see
+  // conversation). Flip back to true once that's sorted and the
+  // authorizeGmailAccess test run succeeds.
+  const WATER_TANKER_EMAIL_ENABLED = false;
   // No `from` override — the email is sent as whichever Google account the
   // Apps Script proxy is deployed under (mvoa.villas@gmail.com), rather
   // than trying to spoof fm@myansvillas.com as the envelope sender. That
@@ -565,10 +575,12 @@ const HSModule = (function () {
     const pending = waterTankerCache.filter(r => r.Status === 'Pending').sort((a, b) => (a.RequestedDate || '').localeCompare(b.RequestedDate || ''));
     const mine = waterTankerCache.filter(r => r.RequestedBy === user.name).sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
     bodyEl.innerHTML = `
-      <div class="card" style="margin-bottom:12px;">
-        <strong>Tanker Supplier</strong>
-        <div id="hs-wt-supplier" style="margin-top:8px;"></div>
-      </div>
+      ${WATER_TANKER_EMAIL_ENABLED ? `
+        <div class="card" style="margin-bottom:12px;">
+          <strong>Tanker Supplier</strong>
+          <div id="hs-wt-supplier" style="margin-top:8px;"></div>
+        </div>
+      ` : ''}
       ${canRequest ? `
         <div class="card" style="margin-bottom:12px;">
           <strong>Request a Tanker</strong>
@@ -582,7 +594,7 @@ const HSModule = (function () {
                 <strong>${waterTankerKLLabel(r)}</strong> ${MVOA.statusBadgeHtml(r.Status)}
                 <p class="muted" style="margin:4px 0;font-size:0.8rem;">Requested ${formatDate(r.RequestedDate)}</p>
                 ${r.DecisionBy ? `<p class="muted" style="margin:0;font-size:0.8rem;">${escapeHtml(r.Status)} by ${escapeHtml(r.DecisionBy)} · ${formatDate(r.DecisionDate)}${r.DecisionComment ? ' — "' + escapeHtml(r.DecisionComment) + '"' : ''}</p>` : ''}
-                ${r.Status === 'Approved' ? (r.EmailStatus === 'Sent' ? `<p style="margin:2px 0 0;font-size:0.8rem;color:#1e6b33;">✅ Supplier email sent ${formatDate(r.EmailSentDate)}</p>` : r.EmailStatus === 'Failed' ? `<p style="margin:2px 0 0;font-size:0.8rem;color:#842029;">⚠️ Supplier email failed to send — let your Secretary/Treasurer/President know.</p>` : '') : ''}
+                ${WATER_TANKER_EMAIL_ENABLED && r.Status === 'Approved' ? (r.EmailStatus === 'Sent' ? `<p style="margin:2px 0 0;font-size:0.8rem;color:#1e6b33;">✅ Supplier email sent ${formatDate(r.EmailSentDate)}</p>` : r.EmailStatus === 'Failed' ? `<p style="margin:2px 0 0;font-size:0.8rem;color:#842029;">⚠️ Supplier email failed to send — let your Secretary/Treasurer/President know.</p>` : '') : ''}
               </div>
             `).join('') : '<p class="muted">No requests filed yet.</p>'}
           </div>
@@ -611,7 +623,7 @@ const HSModule = (function () {
         <div id="hs-wt-months" style="margin-top:8px;"></div>
       </div>
     `;
-    renderWaterTankerSupplierSection(bodyEl.querySelector('#hs-wt-supplier'), container, canApprove);
+    if (WATER_TANKER_EMAIL_ENABLED) renderWaterTankerSupplierSection(bodyEl.querySelector('#hs-wt-supplier'), container, canApprove);
     if (canRequest) renderWaterTankerRequestForm(bodyEl.querySelector('#hs-wt-request-form'), container, user);
     if (canApprove) {
       bodyEl.querySelectorAll('.hs-wt-approve').forEach(btn => btn.addEventListener('click', () => decideWaterTanker(bodyEl, container, user, btn.dataset.id, 'Approved')));
@@ -740,7 +752,7 @@ const HSModule = (function () {
       };
       await MVOA.sheetsUpdateRow(TAB_WATER_TANKER, req.rowNumber, objToRow(WATER_TANKER_COLS, decisionRow));
       await MVOA.logAudit({ module: 'WaterTanker', requestId, eventType: decision, statusAfter: decision });
-      if (decision === 'Approved') {
+      if (decision === 'Approved' && WATER_TANKER_EMAIL_ENABLED) {
         await sendWaterTankerApprovalEmail(decisionRow);
       }
       renderWaterTankerTab(container);
@@ -787,7 +799,7 @@ const HSModule = (function () {
               <thead><tr style="text-align:left;border-bottom:1px solid #ddd;">
                 <th style="padding:4px 6px;">Requested</th><th style="padding:4px 6px;">By</th>
                 <th style="padding:4px 6px;">KL</th><th style="padding:4px 6px;">Status</th>
-                <th style="padding:4px 6px;">Decision</th><th style="padding:4px 6px;">Email</th>
+                <th style="padding:4px 6px;">Decision</th>${WATER_TANKER_EMAIL_ENABLED ? '<th style="padding:4px 6px;">Email</th>' : ''}
               </tr></thead>
               <tbody>
                 ${rows.map(r => `
@@ -797,7 +809,7 @@ const HSModule = (function () {
                     <td style="padding:4px 6px;">${waterTankerKLLabel(r)}</td>
                     <td style="padding:4px 6px;">${MVOA.statusBadgeHtml(r.Status)}</td>
                     <td style="padding:4px 6px;">${r.DecisionBy ? escapeHtml(r.DecisionBy) + ' · ' + formatDate(r.DecisionDate) : '—'}</td>
-                    <td style="padding:4px 6px;">${r.Status === 'Approved' ? (r.EmailStatus === 'Sent' ? '✅ Sent' : r.EmailStatus === 'Failed' ? '⚠️ Failed' : '—') : '—'}</td>
+                    ${WATER_TANKER_EMAIL_ENABLED ? `<td style="padding:4px 6px;">${r.Status === 'Approved' ? (r.EmailStatus === 'Sent' ? '✅ Sent' : r.EmailStatus === 'Failed' ? '⚠️ Failed' : '—') : '—'}</td>` : ''}
                   </tr>
                 `).join('')}
               </tbody>
