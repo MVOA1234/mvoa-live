@@ -1507,6 +1507,33 @@ const MVOA = (function () {
     return true;
   }
 
+  // GENERIC EMAIL SEND — via the SAME Apps Script Web App proxy used for
+  // photo uploads (see uploadPhotoToDrive's comment above for why a proxy
+  // is needed at all: this app has no backend of its own to send mail
+  // from). Added Sept 2026 for the Water Tanker Request approval email,
+  // but written generically (to/cc/subject/body/from only) so any future
+  // feature needing outbound email can reuse it rather than adding
+  // another proxy. Requires the Apps Script to have a 'sendEmail' action
+  // added — it won't by default; see deployment notes for the snippet to
+  // add. The script sends via MailApp/GmailApp under whichever real
+  // Google account it's deployed as — for the `from` address to actually
+  // read as a specific address (e.g. fm@myansvillas.com) rather than
+  // that account's own primary address, it must be a verified "Send As"
+  // alias on that account (or the script must be deployed AS that
+  // account directly).
+  async function sendEmailViaProxy({ to, cc = '', subject, body, from = '' }) {
+    if (!CFG.photoUploadUrl) throw new Error('No email/upload proxy URL configured (Settings → Photo Upload URL)');
+    const r = await fetchWithTimeout(CFG.photoUploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight against Apps Script
+      body: JSON.stringify({ secret: CFG.photoUploadSecret, action: 'sendEmail', to, cc, subject, body, from })
+    }, 20000);
+    if (!r.ok) throw new Error('Email proxy error: ' + r.status);
+    const d = await r.json();
+    if (d.error) throw new Error('Email send failed: ' + d.error);
+    return true;
+  }
+
   function fileToBase64(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1635,7 +1662,7 @@ const MVOA = (function () {
     loadFinancePermissionsMatrix, canEditFinanceSection, canViewFinanceSection, getFinancePermissionsMatrixRows,
     loadNotesForTask, appendNote,
     logAudit, nextId, createOpsTask, autoCloseOpsTasks,
-    capturePhoto, pickAttachment, uploadPhotoToDrive, deletePhotoFromDrive,
+    capturePhoto, pickAttachment, uploadPhotoToDrive, deletePhotoFromDrive, sendEmailViaProxy,
     logoSvg,
     statusBadgeHtml, STATUS_STYLES,
     setAppBadge,
