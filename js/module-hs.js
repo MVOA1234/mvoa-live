@@ -953,7 +953,7 @@ const HSModule = (function () {
     const now = new Date(); // actual current time — used below to also lock a shift once ITS window has passed today, not just once the whole day has passed
     const monday = mondayOfWeek(today);
     const days = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday); d.setDate(d.getDate() + i); return d; });
-    const shifts = ['1st', '2nd', '3rd'];
+    const shifts = ['1st', '2nd', '3rd', 'G'];
     const dayLabels = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
     function entryFor(dateStr, shift) {
@@ -961,24 +961,28 @@ const HSModule = (function () {
     }
 
     // Same shift clock windows as isWithinShiftWindow elsewhere in this
-    // file (1st 7am-2pm, 2nd 2pm-9pm, 3rd 9pm-7am). Only 1st and 2nd
-    // need a same-day check here — both start and end within one
-    // calendar day, so a day-level lock alone misses "it's 6pm, 1st
-    // shift ended hours ago, but 2nd/3rd haven't happened yet." 3rd
-    // shift's window for a given date runs into the NEXT calendar day,
-    // so by the time it's actually over, that date has already rolled
-    // into the past and gets caught by the day-level lock below instead
-    // — it deliberately never locks purely from today's clock time.
+    // file (1st 7am-2pm, 2nd 2pm-9pm, 3rd 9pm-7am), plus G (General —
+    // 9am-5pm), which is this roster's own addition and isn't part of
+    // the operational checklist-submission shift system elsewhere in
+    // this file. 1st, 2nd, and G all need a same-day check here — each
+    // starts and ends within one calendar day, so a day-level lock alone
+    // misses "it's 6pm, 1st shift ended hours ago, but 2nd/3rd haven't
+    // happened yet." 3rd shift's window for a given date runs into the
+    // NEXT calendar day, so by the time it's actually over, that date
+    // has already rolled into the past and gets caught by the day-level
+    // lock below instead — it deliberately never locks purely from
+    // today's clock time.
     function shiftEndedToday(shift) {
       const h = now.getHours() + now.getMinutes() / 60;
       if (shift === '1st') return h >= 14;
       if (shift === '2nd') return h >= 21;
+      if (shift === 'G') return h >= 17;
       return false; // 3rd
     }
 
     const cellsHtml = shifts.map(shift => `
       <tr>
-        <td style="font-weight:600;">${shift}</td>
+        <td style="font-weight:600;">${shift}${shift === 'G' ? ' <span class="muted" style="font-weight:400;">(9 AM–5 PM)</span>' : ''}</td>
         ${days.map((d, i) => {
           const dateStr = isoDate(d);
           const isToday = d.getTime() === today.getTime();
@@ -996,7 +1000,7 @@ const HSModule = (function () {
     `).join('');
 
     bodyEl.innerHTML = `
-      <p class="muted" style="margin:0 0 10px;">Past days this week are locked, and today's 1st/2nd shift also locks once that shift's window has ended. The rest of the week can still be adjusted (e.g. for leave/readjustment).</p>
+      <p class="muted" style="margin:0 0 10px;">Past days this week are locked, and today's 1st/2nd/G shift also locks once that shift's window has ended. The rest of the week can still be adjusted (e.g. for leave/readjustment).</p>
       <div class="card" style="max-width:100%;margin:0;max-height:72vh;overflow:auto;-webkit-overflow-scrolling:touch;">
         <table class="mvoa-table">
           <thead><tr><th>Shift</th>${days.map((d, i) => `<th>${dayLabels[i]}<br><span class="muted" style="font-weight:400;">${d.toLocaleDateString()}</span></th>`).join('')}</tr></thead>
