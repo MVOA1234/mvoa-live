@@ -1994,6 +1994,19 @@ const FinanceModule = (function () {
   // Disbursement Officer at the very end since no real bank payment
   // happens — see the isPettyCashSettlement branch in treasurerApprove.
   const PETTY_CASH_PAYMENT_TYPE = 'Petty Cash Payment';
+  // ADDED Oct 2026 — duplicate-submission guard for New Payment Request.
+  // isPaymentSubmitting (see submitPaymentRequest) only blocks a second
+  // click within the SAME page load; it's an in-memory flag that resets
+  // on reload and doesn't exist across a second tab/device. Nothing else
+  // checked whether a near-identical Payment Request had just been filed,
+  // which is how a genuine accidental double-submission (page reload,
+  // "did that go through?", a flaky connection) silently created two full
+  // duplicate FinanceRequests rows — see doSubmitPaymentRequest's
+  // possibleDuplicate check. 10 minutes is deliberately short: long enough
+  // to catch an accidental re-submit, short enough that a real second
+  // payment to the same vendor for the same amount later the same day
+  // isn't endlessly flagged.
+  const DUPLICATE_SUBMIT_WINDOW_MS = 10 * 60 * 1000;
   // Matches a Replenishment either the OLD way (Category='Petty Cash',
   // PettyCashType='Replenishment' — pre-existing rows from before this
   // moved into Payment Requests) or the NEW way (a genuine Payment
@@ -3816,9 +3829,30 @@ const FinanceModule = (function () {
       return;
     }
 
+    // Duplicate-submission guard — see DUPLICATE_SUBMIT_WINDOW_MS comment.
+    // Looks for another not-Rejected Payment Request from THIS requester,
+    // same Payment Type, same Vendor, and same Amount, filed within the
+    // last 10 minutes. Doesn't block it outright (a second genuine
+    // payment to the same vendor for the same amount minutes apart is
+    // real often enough — e.g. two separate invoices that happen to
+    // match) — just makes the requester confirm, with the matching
+    // request's own ID shown so they can go check it first instead.
+    const user = MVOA.getUser();
+    const possibleDuplicate = requestsCache.find(r =>
+      r.RequestType === 'PaymentRequest' && r.RequestedBy === user.name &&
+      r.Category === paymentType && r.Vendor === vendor && (Number(r.Amount) || 0) === amount &&
+      r.Status !== 'Rejected' && r.RequestedDate &&
+      (Date.now() - new Date(r.RequestedDate).getTime()) < DUPLICATE_SUBMIT_WINDOW_MS);
+    if (possibleDuplicate) {
+      const proceed = confirm(`You already submitted a very similar Payment Request — ${formatAmount(possibleDuplicate.Amount)} to ${possibleDuplicate.Vendor || '(no vendor)'} for ${paymentType}, ${formatDate(possibleDuplicate.RequestedDate)} (${possibleDuplicate.RequestID}). Submit this one anyway?`);
+      if (!proceed) {
+        errEl.textContent = `Submission cancelled — matches ${possibleDuplicate.RequestID}, which you filed a few minutes ago.`;
+        return;
+      }
+    }
+
     setBtnBusy(submitBtn, 'Submitting…');
 
-    const user = MVOA.getUser();
     const existingIds = requestsCache.map(r => r.RequestID);
     // ATP ("Approval To Pay") — distinct from spend approvals' ATS prefix,
     // so an ID quoted on a document unambiguously says which kind of
@@ -5583,6 +5617,33 @@ const FinanceModule = (function () {
       }
       const priorApprovals = await loadApprovalsFor(requestId, true); // BEFORE this decision is appended, for stage comparison below
       const priorState = computeAnyRequestState(req, priorApprovals);
+
+      // ADDED Oct 2026 — real guard against the SAME approver's SAME
+      // decision at the SAME stage getting logged twice. Previously
+      // nothing here checked that; the Approval Queue's "alreadyVoted"
+      // (see newItemCardHtml) only hides the button client-side, and a
+      // second click fired before the first round-trip finishes and
+      // re-renders the queue — the exact scenario a comment near that
+      // button wiring already describes — sailed straight through and
+      // appended a second FinanceApprovals row every time. Scoped to
+      // priorState.stage === stage (the CURRENT stage only, loaded fresh
+      // above) rather than this request's whole history, so a legitimate
+      // repeat decision after a Reject + Resubmit cycle (which walks the
+      // stage pointer back to the start) is never blocked — only a true
+      // duplicate of the decision this exact approver already recorded
+      // for THIS pass through THIS stage. Not a perfect lock (two calls
+      // racing within the same instant could still both read "no prior
+      // decision yet" before either write lands) but it closes the
+      // realistic case: a reload, a second tab, or a slow network
+      // reattempt a few seconds apart.
+      const alreadyLogged = priorState.stage === stage &&
+        priorApprovals.some(a => a.Stage === stage && a.Decision === decision && a.ApproverName === user.name);
+      if (alreadyLogged) {
+        if (errEl) errEl.textContent = `You already recorded this exact decision (${decision}) at the ${stage} stage — not logged again.`;
+        await loadAll(true);
+        render(container);
+        return;
+      }
 
       // isAmountChange guards against a no-op "change" (same figure
       // re-submitted) so a plain Approve never gets misrecorded as a
