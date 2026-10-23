@@ -249,7 +249,22 @@ const FinanceModule = (function () {
     // figure everything else — budget, ATS totals, stage badges —
     // already reads). Appended at the very end, not inserted earlier,
     // so every existing row's other columns stay correctly aligned.
-    'OriginalAmount'];
+    'OriginalAmount',
+    // ADDED Oct 2026 — per explicit instruction: "wherever EC approval is
+    // needed, the workflow does not need to move to each EC member to
+    // fulfill the quorum... At the initiation itself, the initiator will
+    // attach the EC approval note in the workflow. It will then follow
+    // the path of admin approval and financial approval with the
+    // attached note. So we will not need the min 6 approvals on the
+    // workflow." A dedicated slot rather than folding into
+    // AttachmentURL_1-3 — those are capped at 3 and already spoken for by
+    // whatever the DoFA Matrix's MinimumDocs independently requires (e.g.
+    // 3 quotations), so a 4th mandatory document for EC-requiring
+    // categories would have nowhere to go. See requiresEcNote/
+    // computeRequestState's comment for how this replaces the old live
+    // EC-quorum stage. Blank for every category that doesn't require EC
+    // approval, and for every Payment Request row (ATP has no EC concept).
+    'ECApprovalNoteURL'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp',
     // ADDED Sept 2026 — "Approve with modified amount". AmountAtDecision
@@ -394,6 +409,11 @@ const FinanceModule = (function () {
   let currentTopTab = 'home'; // 'home' | 'spend' | 'payment' | 'budget' | 'contracts'
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
   let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
+  // ADDED Oct 2026 — the single required EC Approval Note attachment,
+  // kept as its own array (never more than 1 element) purely so it can
+  // reuse renderDocAttachmentPicker's existing chip/remove UI unchanged.
+  // See requiresEcNote/ECApprovalNoteURL.
+  let pendingEcNote = [];
   let fillPrInApp = false; // Submit form: Purchase Requisition fill-in-app toggle
   let fillCsInApp = false; // Submit form: Comparative Statement fill-in-app toggle
   let pettyCashType = 'Expense'; // Submit form: Petty Cash's internal Type toggle
@@ -1941,6 +1961,17 @@ const FinanceModule = (function () {
     if (!rule || !rule.MinimumDocs) return [];
     return rule.MinimumDocs.split('+').map(s => s.trim()).filter(Boolean);
   }
+  // ADDED Oct 2026 — see computeRequestState's comment on why EC approval
+  // is no longer a live voting stage: a category still flagged
+  // ECApprovalRequired ('Yes' or 'Ratification') on the DoFA Matrix now
+  // requires the initiator to attach a scanned EC Approval Note at
+  // submission instead (see ECApprovalNoteURL/renderSubmitForm's EC note
+  // picker/doSubmitRequest's validation of it) — this is the single
+  // source of truth both the submit form and the submit-time validation
+  // check against, so they can never drift out of sync with each other.
+  function requiresEcNote(rule) {
+    return !!rule && (rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification');
+  }
   // A written justification (e.g. "FM Justification", "Emergency
   // Justification Note") is content, not a document that needs scanning
   // and uploading — the requester can just type it in the Description
@@ -2429,11 +2460,28 @@ const FinanceModule = (function () {
     const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
     const adminGroups = parseApproverGroups(rule.AdministrativeApprover);
     const finGroups = parseApproverGroups(rule.FinancialApprover);
-    const ecRequired = rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification';
     const agmRequired = rule.AGMApprovalRequired === 'Yes';
     const quorum = Number(request.QuorumRequired) || Number(rule.QuorumOverride) || DEFAULT_QUORUM;
 
-    const result = walkAtsStageChain(adminGroups, finGroups, ecRequired, agmRequired, quorum, approvals);
+    // REVISED Oct 2026 per explicit instruction: "wherever EC approval is
+    // needed, the workflow does not need to move to each EC member to
+    // fulfill the quorum... the initiator will attach the EC approval
+    // note... It will then follow the path of admin approval and
+    // financial approval with the attached note. So we will not need the
+    // min 6 approvals on the workflow." EC approval is now satisfied at
+    // SUBMISSION time by the initiator attaching the EC Approval Note
+    // (see requiresEcNote/ECApprovalNoteURL and doSubmitRequest's
+    // validation of it) rather than by a live quorum-of-N voting stage —
+    // so 'EC' is never pushed onto the live chain here, hardcoded false
+    // regardless of rule.ECApprovalRequired. ecQualifyingApproverCount/
+    // ecCount/quorum are left in place and still computed below purely so
+    // an already-in-flight request that logged real EC-stage approvals
+    // before this change shipped still shows that history correctly; per
+    // this module's "always re-derive from the log, never snapshot"
+    // philosophy (see ecQualifyingApproverCount's own comment), such a
+    // request is also retroactively treated as past its EC gate the
+    // moment this ships, same as Administrative/Financial.
+    const result = walkAtsStageChain(adminGroups, finGroups, false, agmRequired, quorum, approvals);
     return {
       stage: result.position, groups: result.position === 'Administrative' ? adminGroups : result.position === 'Financial' ? finGroups : undefined,
       rejected: result.rejected, fullyApproved: result.fullyApproved,
@@ -2906,18 +2954,31 @@ const FinanceModule = (function () {
   // toggle with one row per fixed AttachmentURL slot — current link (if
   // any) plus Camera/File pick buttons, mirroring the Camera/File pair
   // renderDocAttachmentPicker already uses for named documents.
+  //
+  // REVISED Oct 2026 per explicit follow-up ("please add edit/replace
+  // option for EC note too"): extends the exact same row/picker/replace
+  // mechanism to ECApprovalNoteURL — shown only for an ATS whose rule
+  // actually requires one (see requiresEcNote); an ATP has no EC concept
+  // at all, and most ATS categories don't need this slot. replaceAttachment
+  // itself needed no change to support this — it already overwrites
+  // whatever field name it's given.
   async function renderAttachmentManager(bodyEl, request, container) {
-    const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3'];
+    const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3']
+      .map((slot, i) => ({ slot, label: `Attachment ${i + 1}` }));
+    if (request.RequestType !== 'PaymentRequest') {
+      const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
+      if (requiresEcNote(rule)) slots.push({ slot: 'ECApprovalNoteURL', label: 'EC Approval Note' });
+    }
     bodyEl.innerHTML = `
       <div style="margin:8px 0 0;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
-        ${slots.map((slot, i) => {
+        ${slots.map(({ slot, label }) => {
           const url = request[slot];
           const verb = url ? 'Replace' : 'Add';
           return `
           <div class="mvoa-row" style="gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px;">
-            <span style="flex:1;min-width:140px;">${url ? `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>` : `<span class="muted">Attachment ${i + 1}: none</span>`}</span>
-            <button class="btn-secondary fin-att-replace-pick" data-slot="${slot}" data-mode="camera" style="padding:6px 10px;margin:0;">📷 ${verb} (Camera)</button>
-            <button class="btn-secondary fin-att-replace-pick" data-slot="${slot}" data-mode="file" style="padding:6px 10px;margin:0;">📄 ${verb} (File)</button>
+            <span style="flex:1;min-width:140px;">${url ? `<a href="${url}" target="_blank" rel="noopener">📎 ${escapeHtml(label)}</a>` : `<span class="muted">${escapeHtml(label)}: none</span>`}</span>
+            <button class="btn-secondary fin-att-replace-pick" data-slot="${slot}" data-label="${escapeHtml(label)}" data-mode="camera" style="padding:6px 10px;margin:0;">📷 ${verb} (Camera)</button>
+            <button class="btn-secondary fin-att-replace-pick" data-slot="${slot}" data-label="${escapeHtml(label)}" data-mode="file" style="padding:6px 10px;margin:0;">📄 ${verb} (File)</button>
           </div>
           <p class="error-text fin-att-replace-error" data-slot="${slot}" style="min-height:1em;margin:0 0 6px;"></p>`;
         }).join('')}
@@ -2925,6 +2986,7 @@ const FinanceModule = (function () {
     bodyEl.querySelectorAll('.fin-att-replace-pick').forEach(btn => {
       btn.addEventListener('click', async () => {
         const slot = btn.dataset.slot;
+        const label = btn.dataset.label || slot;
         const errEl = bodyEl.querySelector(`.fin-att-replace-error[data-slot="${slot}"]`);
         errEl.textContent = '';
         let picked;
@@ -2937,7 +2999,7 @@ const FinanceModule = (function () {
         if (!picked) return; // user cancelled the file/camera dialog
         setBtnBusy(btn, 'Uploading…');
         try {
-          await replaceAttachment(request.RequestID, slot, picked, container);
+          await replaceAttachment(request.RequestID, slot, picked, container, label);
         } catch (e) {
           errEl.textContent = 'Could not save attachment: ' + e.message;
           clearBtnBusy(btn, `${btn.dataset.mode === 'camera' ? '📷' : '📄'} ${request[slot] ? 'Replace' : 'Add'} (${btn.dataset.mode === 'camera' ? 'Camera' : 'File'})`);
@@ -2945,21 +3007,24 @@ const FinanceModule = (function () {
       });
     });
   }
-  // Overwrites exactly one AttachmentURL slot — the counterpart to
+  // Overwrites exactly one attachment-URL field — the counterpart to
   // resubmitRequest's attachment handling, which only ever fills an
-  // EMPTY slot and never touches a filled one. Best-effort delete of the
-  // OLD file: deletePhotoFromDrive throws if the Apps Script's delete
-  // action isn't deployed (see that function's own comment) — that must
-  // never block the replacement itself, so it's wrapped separately and
-  // the sheet's URL is swapped either way.
-  async function replaceAttachment(requestId, slot, picked, container) {
+  // EMPTY slot and never touches a filled one. Works for any such field
+  // by name (AttachmentURL_1-3 or ECApprovalNoteURL — see
+  // renderAttachmentManager), so this itself needed no change to pick up
+  // the EC note. `label` is cosmetic only, for the audit log entry.
+  // Best-effort delete of the OLD file: deletePhotoFromDrive throws if
+  // the Apps Script's delete action isn't deployed (see that function's
+  // own comment) — that must never block the replacement itself, so it's
+  // wrapped separately and the sheet's URL is swapped either way.
+  async function replaceAttachment(requestId, slot, picked, container, label) {
     const req = requestsCache.find(r => r.RequestID === requestId);
     if (!req) return;
     const oldUrl = req[slot];
     const newUrl = await MVOA.uploadPhotoToDrive(picked.file, `${requestId}_${slot}_replace_${picked.name}`);
     const updated = Object.assign({}, req, { [slot]: newUrl });
     await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
-    await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Attachment replaced', comment: slot, statusAfter: req.Status });
+    await MVOA.logAudit({ module: 'Finance', requestId, eventType: `${label || slot} replaced`, comment: '', statusAfter: req.Status });
     if (oldUrl) {
       try { await MVOA.deletePhotoFromDrive(oldUrl); } catch (e) { /* best-effort — see comment above */ }
     }
@@ -4231,6 +4296,12 @@ const FinanceModule = (function () {
           <textarea id="fin-desc" rows="2" placeholder="What is this expense for?"></textarea>
         </label>
         <div id="fin-rule-preview"></div>
+        <div id="fin-ec-note-wrap" class="hidden" style="margin-top:12px;">
+          <p class="muted" style="margin:0 0 6px;font-weight:600;">📋 EC Approval Note (required)</p>
+          <p class="muted" style="margin:0 0 6px;font-size:0.85rem;">This category needs EC approval — attach the signed/minuted EC approval note instead of routing this to each EC member individually.</p>
+          <div id="fin-ec-note-chips"></div>
+          <div id="fin-ec-note-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"></div>
+        </div>
         <div id="fin-pr-toggle-wrap"></div>
         <div id="fin-pr-fields-wrap"></div>
         <div id="fin-cs-toggle-wrap"></div>
@@ -4246,6 +4317,7 @@ const FinanceModule = (function () {
       </div>
     `;
     pendingAttachments = [];
+    pendingEcNote = [];
     renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, [], 3);
 
     const catEl = body.querySelector('#fin-category');
@@ -4345,19 +4417,40 @@ const FinanceModule = (function () {
       renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, docLabels, 3);
     }
 
+    // ADDED Oct 2026 — shows/hides the dedicated EC Approval Note picker
+    // (see requiresEcNote/ECApprovalNoteURL) based on whichever rule the
+    // current category/amount/budget-status combination resolves to.
+    // Pass null to hide it and clear any already-picked file — used by
+    // every refreshRulePreview branch that doesn't have a real rule to
+    // show (category cleared, amount blocked, no matching rule, or the
+    // Petty-Cash "no Spend Approval needed" shortcut).
+    function refreshEcNoteWrap(rule) {
+      const wrap = body.querySelector('#fin-ec-note-wrap');
+      if (!wrap) return;
+      if (!requiresEcNote(rule)) {
+        wrap.classList.add('hidden');
+        pendingEcNote = [];
+        return;
+      }
+      wrap.classList.remove('hidden');
+      renderDocAttachmentPicker(body, '#fin-ec-note-chips', '#fin-ec-note-btns', pendingEcNote, ['EC Approval Note'], 1);
+    }
+
     function refreshRulePreview() {
       body.querySelector('#fin-form-error').textContent = ''; // clear any stale error from a previous category/amount before showing the new preview
       const previewEl = body.querySelector('#fin-rule-preview');
       const category = catEl.value;
       const amount = Number(amtEl.value) || 0;
-      if (!category) { previewEl.innerHTML = ''; return; }
+      if (!category) { previewEl.innerHTML = ''; refreshEcNoteWrap(null); return; }
       const result = resolveRule(category, currentBudgetStatus(), amount, pettyCashType);
       if (result.blocked) {
         previewEl.innerHTML = `<p class="error-text" style="margin-top:10px;">${escapeHtml(result.message)}</p>`;
+        refreshEcNoteWrap(null);
         return;
       }
       if (!result.rule) {
         previewEl.innerHTML = `<p class="muted" style="margin-top:10px;">Enter an amount to see the required approvals for this category.</p>`;
+        refreshEcNoteWrap(null);
         return;
       }
       const rule = result.rule;
@@ -4380,6 +4473,7 @@ const FinanceModule = (function () {
             <p style="margin:0;font-weight:600;">This Petty Cash spend doesn't need Spend Approval.</p>
             <p class="muted" style="margin:6px 0 0;">At ${escapeHtml(formatAmount(amount))}, there's no Administrative/Financial approver required for Petty Cash — submit it directly as a Payment Request instead: <strong>💵 New Payment Request → ${escapeHtml(PETTY_CASH_PAYMENT_TYPE)}</strong> (no linked Approval to Spend needed).</p>
           </div>`;
+        refreshEcNoteWrap(null);
         return;
       }
       const docs = requiredDocsList(rule);
@@ -4403,8 +4497,8 @@ const FinanceModule = (function () {
           <p style="margin:0 0 6px;font-weight:600;">This request will need:</p>
           <p class="muted" style="margin:2px 0;">Administrative approval: ${escapeHtml(rule.AdministrativeApprover || '—')}</p>
           <p class="muted" style="margin:2px 0;">Financial approval: ${escapeHtml(rule.FinancialApprover || '—')}</p>
-          ${rule.ECApprovalRequired === 'Yes' || rule.ECApprovalRequired === 'Ratification'
-            ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — quorum ${rule.QuorumOverride || DEFAULT_QUORUM}</p>` : ''}
+          ${requiresEcNote(rule)
+            ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — attach the EC Approval Note below (no live EC vote needed in-app)</p>` : ''}
           ${rule.AGMApprovalRequired === 'Yes' ? `<p class="muted" style="margin:2px 0;">AGM approval required</p>` : ''}
           ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field above, no attachment needed.' : isDocsConfirmationOnly(docs) ? ' — confirm with the checkbox below, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
           ${isDocsConfirmationOnly(docs) ? `
@@ -4414,6 +4508,7 @@ const FinanceModule = (function () {
             </label>` : ''}
         </div>`;
       refreshAttachmentsLabel();
+      refreshEcNoteWrap(rule);
 
       // Purchase Requisition (FIN-F-004) — offered as a fillable in-app
       // form wherever the DoFA Matrix calls for a "Purchase Request" as
@@ -4764,6 +4859,13 @@ const FinanceModule = (function () {
         : `This category requires at least ${minAttachments} attachment(s): ${docsNeedingUpload.join(', ')}.`;
       return;
     }
+    // ADDED Oct 2026 — see requiresEcNote's comment: this is what replaces
+    // the old live EC-quorum stage for a category still flagged
+    // ECApprovalRequired on the DoFA Matrix.
+    if (requiresEcNote(rule) && !pendingEcNote.length) {
+      errEl.textContent = 'This category needs EC approval — please attach the EC Approval Note.';
+      return;
+    }
     let prFields = {};
     if (fillPrInApp) {
       const val = id => (body.querySelector(id) || { value: '' }).value.trim();
@@ -4835,17 +4937,35 @@ const FinanceModule = (function () {
         }
       }
     }
+    // ADDED Oct 2026 — see requiresEcNote's comment. Uploaded to its own
+    // dedicated slot (ECApprovalNoteURL), never into AttachmentURL_1-3 —
+    // those are already spoken for by whatever MinimumDocs independently
+    // requires.
+    let ecApprovalNoteUrl = '';
+    if (requiresEcNote(rule) && pendingEcNote.length) {
+      try {
+        ecApprovalNoteUrl = await MVOA.uploadPhotoToDrive(pendingEcNote[0].file, `${requestId}_ecnote_${pendingEcNote[0].name}`);
+      } catch (e) {
+        errEl.textContent = `EC Approval Note upload failed: ${e.message}`;
+        clearBtnBusy(submitBtn, 'Submit Request');
+        return;
+      }
+    }
 
     const requestType = category === 'Petty Cash' ? (pettyCashType === 'Replenishment' ? 'PettyCashReplenishment' : 'PettyCashExpense')
       : category === 'Emergency Expenditure' ? 'Emergency' : 'Standard';
 
-    // A rule with no Administrative/Financial/EC/AGM requirement at all
-    // (e.g. Petty Cash Expense ≤₹1,000) has nothing left for anyone to
-    // click "Approve" on — settle it as Approved immediately rather than
-    // leaving it stuck at PendingApproval forever with no path forward.
+    // A rule with no Administrative/Financial/AGM requirement at all (e.g.
+    // Petty Cash Expense ≤₹1,000) has nothing left for anyone to click
+    // "Approve" on — settle it as Approved immediately rather than leaving
+    // it stuck at PendingApproval forever with no path forward. EC is
+    // deliberately NOT part of this check anymore — see requiresEcNote's
+    // comment: an EC-only requirement is already fully satisfied by the
+    // attached note above, so a category needing EC approval alone (no
+    // Administrative/Financial/AGM) now settles straight to Approved too,
+    // same as one needing nothing at all.
     const hasNoApprovalStages = parseApproverGroups(rule.AdministrativeApprover).length === 0 &&
       parseApproverGroups(rule.FinancialApprover).length === 0 &&
-      rule.ECApprovalRequired !== 'Yes' && rule.ECApprovalRequired !== 'Ratification' &&
       rule.AGMApprovalRequired !== 'Yes';
     const initialStatus = hasNoApprovalStages ? 'Approved' : 'PendingApproval';
 
@@ -4858,7 +4978,8 @@ const FinanceModule = (function () {
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '',
       DisbursementStage: initialStatus === 'Approved' ? disbursementStageOnApproval(rule) : '', ExpenseTab: '', ExpenseRow: '',
-      StageEnteredAt: now, StageOpenedAt: '', PettyCashType: category === 'Petty Cash' ? pettyCashType : ''
+      StageEnteredAt: now, StageOpenedAt: '', PettyCashType: category === 'Petty Cash' ? pettyCashType : '',
+      ECApprovalNoteURL: ecApprovalNoteUrl
     }, prFields, csFields);
 
     try {
@@ -4929,6 +5050,7 @@ const FinanceModule = (function () {
     }
 
     pendingAttachments = [];
+    pendingEcNote = [];
     fillPrInApp = false;
     fillCsInApp = false;
     pettyCashType = 'Expense';
@@ -5825,7 +5947,16 @@ const FinanceModule = (function () {
     // rather than patching each call site separately.
     const procurementLink = r.ProcurementInvoiceURL
       ? `<a href="${r.ProcurementInvoiceURL}" target="_blank" rel="noopener">🧾 Vendor Invoice (Disbursement Officer)</a>` : '';
-    const all = [links, procurementLink].filter(Boolean).join(' · ');
+    // ADDED Oct 2026 — see requiresEcNote's comment: this is the Admin/
+    // Financial approver's only way to actually see the EC approval this
+    // category required, since there's no live EC stage left for them to
+    // encounter it through. Surfaced through the same chokepoint every
+    // other attachment link already goes through, so it reaches every
+    // approver-facing card (Approval Queue, My Approvals trail, My
+    // Requests) with no separate wiring per view.
+    const ecNoteLink = r.ECApprovalNoteURL
+      ? `<a href="${r.ECApprovalNoteURL}" target="_blank" rel="noopener">📋 EC Approval Note</a>` : '';
+    const all = [links, ecNoteLink, procurementLink].filter(Boolean).join(' · ');
     return all ? `<p class="muted" style="font-size:0.8rem;">${all}</p>` : '';
   }
 
