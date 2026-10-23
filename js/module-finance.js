@@ -264,7 +264,22 @@ const FinanceModule = (function () {
     // computeRequestState's comment for how this replaces the old live
     // EC-quorum stage. Blank for every category that doesn't require EC
     // approval, and for every Payment Request row (ATP has no EC concept).
-    'ECApprovalNoteURL'];
+    'ECApprovalNoteURL',
+    // ADDED Oct 2026 — per explicit request: "in the disbursement officer
+    // view for 'Release Payment', add a box for 'remarks' and 'date of
+    // release of payment'." PaymentReleaseDate is the Disbursement
+    // Officer's own explicit date (raw yyyy-mm-dd from the date picker,
+    // same convention as ProcurementDate just above), kept separate from
+    // PaymentDate — PaymentDate stays exactly what it always was (the
+    // in-app timestamp of the moment the Release Payment button was
+    // clicked, still relied on for month-bucketing/sorting elsewhere), so
+    // nothing already reading PaymentDate needed to change. See
+    // disbursePayment/markPaid for where this is written, and
+    // renderRequestTrailHtml's "Payment released" step for where it's
+    // shown — it also now drives the actual Expense Sheet 'Date' column
+    // (see disbursePayment), which previously always auto-stamped
+    // "today" regardless of when the payment was really released.
+    'PaymentReleaseDate','PaymentRemarks'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp',
     // ADDED Sept 2026 — "Approve with modified amount". AmountAtDecision
@@ -1777,6 +1792,28 @@ const FinanceModule = (function () {
     const d = date || new Date();
     if (isNaN(d)) return '';
     return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  // ADDED Oct 2026 — displays a plain yyyy-mm-dd value (e.g.
+  // PaymentReleaseDate, straight from an <input type="date">) as
+  // dd-mm-yyyy with no time component. formatDate() would technically
+  // "work" here too (new Date('2026-10-23') parses fine), but it always
+  // appends a time via toLocaleTimeString() — midnight, since a bare date
+  // string carries none — which reads as a fabricated timestamp for
+  // something that was only ever a date. Falls back to the raw string for
+  // anything that isn't a clean yyyy-mm-dd.
+  function formatDateOnly(ymd) {
+    if (!ymd) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : ymd;
+  }
+  // ADDED Oct 2026 — default value for the "Date of Release of Payment"
+  // picker (see disbursePayment) in the native <input type="date"> format
+  // (yyyy-mm-dd), in the Disbursement Officer's own local time rather
+  // than UTC (toISOString().slice(0,10) would roll over to the wrong
+  // calendar day for anyone west of UTC late at night).
+  function todayYmd() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
   function formatKB(bytes) {
     return bytes > 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round((bytes||0) / 1024) + ' KB';
@@ -5224,14 +5261,21 @@ const FinanceModule = (function () {
       }
       const loggedStamp = expenseEntry && expenseEntry.row.PassedBy ? ` — ${escapeHtml(expenseEntry.row.PassedBy)}` : '';
       const reviewedStamp = expenseEntry && expenseEntry.row.ApprovedBy ? ` — ${escapeHtml(expenseEntry.row.ApprovedBy)}` : '';
-      const paidStamp = stage === 'Paid' && request.PaymentDate ? ` — ${formatDate(request.PaymentDate)}` : '';
+      // ADDED Oct 2026 — prefer the Disbursement Officer's own explicit
+      // PaymentReleaseDate over the in-app click timestamp (PaymentDate)
+      // whenever it's on file — see markPaid/disbursePayment — falling
+      // back to PaymentDate for any request Paid before this shipped,
+      // which has no PaymentReleaseDate at all.
+      const paidStamp = stage === 'Paid' && (request.PaymentReleaseDate || request.PaymentDate)
+        ? ` — ${request.PaymentReleaseDate ? formatDateOnly(request.PaymentReleaseDate) : formatDate(request.PaymentDate)}` : '';
+      const remarksStamp = stage === 'Paid' && request.PaymentRemarks ? ` — "${escapeHtml(request.PaymentRemarks)}"` : '';
       const steps = [];
       if (isProcurementFlow) {
         steps.push({ done: !!request.ProcuredBy, label: `Purchase made & invoice attached (Disbursement Officer)${request.ProcuredBy ? ' — ' + escapeHtml(request.ProcuredBy) : ''}` });
       }
       steps.push({ done: !!stage && stage !== 'PendingProcurement', label: `Expense Sheet entry logged (Accountant)${loggedStamp}` });
       steps.push({ done: stage === 'PendingPayment' || stage === 'Paid', label: `Treasurer review${reviewedStamp}` });
-      steps.push({ done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}${paidStamp}` });
+      steps.push({ done: stage === 'Paid', label: `Payment released${request.PaymentRef ? ' — Ref: ' + escapeHtml(request.PaymentRef) : ''}${paidStamp}${remarksStamp}` });
       paymentsTrailHtml = `
         <p style="margin:10px 0 3px;font-weight:600;">Payment release:</p>
         ${stage === 'NeedsCorrection' ? '<p style="margin:3px 0;color:#b3261e;">🔁 Sent back by Treasurer for correction — waiting on Accountant</p>' : ''}
@@ -6331,13 +6375,19 @@ const FinanceModule = (function () {
   // Final step of the Schedule D workflow — called by the Disbursement
   // Officer's action in the Payments tab once UDNumber/Date have been
   // written into the Expense Sheet row itself (see renderPayments).
-  async function markPaid(requestId, paymentRef) {
+  // ADDED Oct 2026 — `extra` ({releaseDate, remarks}) per explicit
+  // request for the Release Payment box: PaymentDate below is left
+  // completely untouched (still the in-app click timestamp everything
+  // else already keys off — month-bucketing, sorting, dashboards), while
+  // releaseDate/remarks land in their own new, purely-additive fields.
+  async function markPaid(requestId, paymentRef, extra) {
     const req = requestsCache.find(r => r.RequestID === requestId);
     if (!req) return;
     const user = MVOA.getUser();
     const now = new Date().toISOString();
     const updated = Object.assign({}, req, {
       PaymentStatus: 'Paid', PaymentDate: now, PaymentRef: paymentRef || '',
+      PaymentReleaseDate: (extra && extra.releaseDate) || '', PaymentRemarks: (extra && extra.remarks) || '',
       DisbursementStage: 'Paid', ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now, StageOpenedAt: ''
     });
     await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
@@ -6675,6 +6725,10 @@ const FinanceModule = (function () {
               <option value="Amazon Pay Balance">Amazon Pay Balance</option>
             </select>
             <input type="text" class="fin-ud-number" data-request-id="${escapeHtml(req.RequestID)}" placeholder="UD Number / Cheque / UTR" style="width:100%;margin-bottom:6px;">
+            <label style="font-size:0.8rem;" class="muted">Date of Release of Payment
+              <input type="date" class="fin-pay-release-date" data-request-id="${escapeHtml(req.RequestID)}" value="${todayYmd()}" style="width:100%;margin-bottom:6px;box-sizing:border-box;">
+            </label>
+            <textarea class="fin-pay-remarks" data-request-id="${escapeHtml(req.RequestID)}" rows="2" placeholder="Remarks (optional)" style="width:100%;margin-bottom:6px;box-sizing:border-box;"></textarea>
             <button class="btn-primary fin-disburse-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Release Payment</button>
           </div>
           <p class="error-text fin-disburse-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
@@ -6956,22 +7010,34 @@ const FinanceModule = (function () {
   }
 
   // ─── Disbursement Officer: release payment ────────────────────
+  // REVISED Oct 2026 per explicit request: "add a box for 'remarks' and
+  // 'date of release of payment'." The release date typed here now also
+  // drives the Expense Sheet's own 'Date' column below (previously always
+  // auto-stamped to "today" via formatStampDate() regardless of when the
+  // payment was actually released — a real gap if this is logged a day or
+  // two after the fact) — same conversion submitProcurement already uses
+  // for its own date picker, so both stay consistent with each other.
   async function disbursePayment(requestId, scopeEl, container) {
     const req = requestsCache.find(r => r.RequestID === requestId);
     if (!req || !req.ExpenseTab) return;
     const errEl = scopeEl.querySelector(`.fin-disburse-error[data-request-id="${requestId}"]`);
     const udInput = scopeEl.querySelector(`.fin-ud-number[data-request-id="${requestId}"]`);
     const bankSelect = scopeEl.querySelector(`.fin-bank-select[data-request-id="${requestId}"]`);
+    const releaseDateInput = scopeEl.querySelector(`.fin-pay-release-date[data-request-id="${requestId}"]`);
+    const remarksInput = scopeEl.querySelector(`.fin-pay-remarks[data-request-id="${requestId}"]`);
     const udNumber = udInput ? udInput.value.trim() : '';
     const bank = bankSelect ? bankSelect.value : '';
+    const releaseDate = releaseDateInput ? releaseDateInput.value : '';
+    const remarks = remarksInput ? remarksInput.value.trim() : '';
     if (!bank) { if (errEl) errEl.textContent = 'Please select which Bank this was paid from.'; return; }
     if (!udNumber) { if (errEl) errEl.textContent = 'Please enter a UD Number / Cheque / UTR reference.'; return; }
+    if (!releaseDate) { if (errEl) errEl.textContent = 'Please enter the date of release of payment.'; return; }
     try {
       const entry = await readExpenseRow(req.ExpenseTab, requestId);
       if (!entry) throw new Error('Expense Sheet entry not found');
-      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: formatStampDate(), Bank: bank });
+      const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: formatStampDate(new Date(releaseDate)), Bank: bank });
       await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, updatedEntry));
-      await markPaid(requestId, udNumber);
+      await markPaid(requestId, udNumber, { releaseDate, remarks });
       await loadAll(true);
       render(container);
     } catch (e) {
