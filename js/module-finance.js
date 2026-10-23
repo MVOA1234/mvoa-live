@@ -2564,6 +2564,14 @@ const FinanceModule = (function () {
     return result;
   }
   function stageDescriptionInner(request, approvals) {
+    // ADDED Oct 2026 — must be checked before everything below it, same
+    // as Rejected: Status 'Cancelled' is a brand-new terminal state (see
+    // cancelRequest) that isn't PendingApproval, isn't Rejected, and
+    // would otherwise fall straight into the Approved/DisbursementStage
+    // switch at the bottom of this function and show something actively
+    // wrong, like "awaiting Expense Sheet entry," for a request that was
+    // withdrawn.
+    if (request.Status === 'Cancelled') return { text: `🚫 Withdrawn by requester${sinceText(request)}`, cls: 'rejected' };
     if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
     if (request.Status === 'PendingApproval') {
       if (request.RequestType === 'PaymentRequest') {
@@ -2754,6 +2762,211 @@ const FinanceModule = (function () {
     }
     render(container);
   }
+
+  // ───────────────────────────────────────────────────────────
+  // WITHDRAW (Cancel) — ADDED Oct 2026, per explicit request: "sometimes
+  // a wrong ATS or ATP gets submitted which the initiator realizes later.
+  // Need provision for cancelling of ATS or ATP by initiator. In this
+  // case, if subsequently levels have approved it, there should be a
+  // message to them indicating that this particular ATS or ATP has been
+  // withdrawn." Sets a brand-new terminal Status value, 'Cancelled' —
+  // every stage-engine/badge/queue-filter site that branches on Status
+  // was checked and either already handles it for free (computeQueueCards/
+  // updateBadge's Status==='PendingApproval' filters, renderRequestTrailHtml's
+  // decision-icon lookup) or has an explicit new branch added for it
+  // (decide(), stageDescriptionInner, displayStatusInner,
+  // cancellationDetailHtml wired into My Approvals/My Requests — see
+  // those functions' own comments).
+  //
+  // REVISED Oct 2026 per explicit follow-up, after the first version
+  // blocked Withdraw on an Approved ATS the moment ANY Payment Request
+  // was linked to it at all: "If a particular ATP against an ATS has
+  // been approved and payment initiated, the ATS cannot be cancelled by
+  // initiator — it should only be possible to disable ATS. Withdrawing
+  // of ATS should be possible by initiator as long as payment is not
+  // made for an ATP associated with that ATS." So the real line is
+  // whether money has actually moved (DisbursementStage reaches 'Paid'
+  // — see markPaid), not whether a payment merely exists or is even
+  // fully approved. "If an ATS is cancelled and its ATP is already
+  // initiated, then the ATP would also need to be withdrawn" — cancelRequest
+  // below cascades the withdrawal to every still-unpaid linked Payment
+  // Request automatically, which is exactly what makes allowing Withdraw
+  // here (instead of just blocking it) safe: by the time this function
+  // returns true, cancelRequest is able to pull every loose end with it in
+  // the same action. Once even ONE linked payment has been Paid, Withdraw
+  // is no longer offered for the ATS at all — Disable/Enable (see
+  // disableAtsButtonHtml) is the only retirement path left from there.
+  // For an ATP (Payment Request) itself, eligible any time before IT is
+  // actually Paid.
+  // ───────────────────────────────────────────────────────────
+  function linkedPaymentsFor(atsRequestId) {
+    return requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === atsRequestId);
+  }
+  function canCancelRequest(request, user) {
+    if (!request || !user || request.RequestedBy !== user.name) return false;
+    if (request.Status === 'PendingApproval') return true;
+    if (request.Status !== 'Approved') return false;
+    if (request.RequestType === 'PaymentRequest') return request.DisbursementStage !== 'Paid';
+    if (isAtsDisabled(request)) return false;
+    const hasPaidLinkedPayment = linkedPaymentsFor(request.RequestID).some(p => p.DisbursementStage === 'Paid');
+    return !hasPaidLinkedPayment;
+  }
+  // Still-open linked payments a Withdraw of this ATS would cascade to —
+  // used both to size the heads-up in the Withdraw prompt and by
+  // cancelRequest itself, so the two never drift out of sync.
+  function cascadeCancelTargets(atsRequestId) {
+    return linkedPaymentsFor(atsRequestId).filter(p => p.Status !== 'Cancelled' && p.Status !== 'Rejected' && p.DisbursementStage !== 'Paid');
+  }
+  function cancelButtonHtml(request) {
+    // Write action attributed to the real logged-in identity — hidden
+    // outright while View As is active rather than offered against the
+    // impersonated person's name (same rule as every other write action
+    // in this module — see effectiveUser's own comment).
+    if (isViewingAs() || !canCancelRequest(request, MVOA.getUser())) return '';
+    return `<button class="fin-cancel-request-btn btn-secondary" data-request-id="${escapeHtml(request.RequestID)}" style="font-size:0.8rem;padding:4px 10px;color:#b3261e;border-color:#b3261e;">🚫 Withdraw</button>`;
+  }
+  // The actual sheet write for a single request's withdrawal — split out
+  // of cancelRequest so the same logic can run once for the request the
+  // user clicked Withdraw on, and again for each linked payment it
+  // cascades to, without duplicating the FinanceApprovals/FinanceRequests
+  // write pair.
+  async function writeCancellation(req, reason) {
+    const user = MVOA.getUser();
+    const approvals = await loadApprovalsFor(req.RequestID, true);
+    const state = computeAnyRequestState(req, approvals);
+    const approvalId = await nextApprovalId();
+    const row = {
+      ApprovalID: approvalId, RequestID: req.RequestID, ApproverName: user.name, ApproverRole: user.role || '',
+      Stage: state.stage || req.Status, Decision: 'Cancelled', Comment: reason || '', Timestamp: new Date().toISOString()
+    };
+    await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, row));
+    const now = new Date().toISOString();
+    const updated = Object.assign({}, req, { Status: 'Cancelled', ClosedDate: now, ClosedBy: user.name, StageEnteredAt: now, StageOpenedAt: '' });
+    await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+    await MVOA.logAudit({ module: 'Finance', requestId: req.RequestID, eventType: 'Withdrawn by requester', comment: reason || '', statusAfter: 'Cancelled' });
+  }
+  // Shared handler wired up wherever cancelButtonHtml's button appears
+  // (currently My Requests only) — mirrors toggleDisableAts's shape:
+  // write the sheet, log it (here as a genuine FinanceApprovals row
+  // rather than via the Notes table — see the "Add Note" NoteID bug
+  // noted elsewhere in this file, deliberately not reused for this),
+  // refresh, re-render. For an ATS, cascades to every still-unpaid linked
+  // Payment Request (see cascadeCancelTargets/canCancelRequest's comment)
+  // — each one gets its own FinanceApprovals 'Cancelled' row explaining
+  // it was pulled automatically because its linked ATS was withdrawn, so
+  // the same "visible to the previous level" surfacing (cancellationDetailHtml)
+  // picks it up on the payment's own approvers' My Approvals cards too.
+  async function cancelRequest(requestId, reason, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    try {
+      await writeCancellation(req, reason);
+      if (req.RequestType !== 'PaymentRequest') {
+        const cascadeTargets = cascadeCancelTargets(req.RequestID);
+        for (const p of cascadeTargets) {
+          const cascadeReason = `Withdrawn automatically — its linked Approval to Spend (${req.RequestID}) was withdrawn by ${MVOA.getUser().name}${reason ? `: "${reason}"` : '.'}`;
+          await writeCancellation(p, cascadeReason);
+        }
+      }
+    } catch (e) {
+      alert(`Could not withdraw: ${e.message}`);
+      return;
+    }
+    await loadAll(true);
+    render(container);
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // ATTACHMENT REPLACE — ADDED Oct 2026, per explicit request: "in both
+  // cases, ATS and ATP, sometimes the user attaches the wrong document
+  // and there is no provision of edit the uploaded document or photo.
+  // Need to add this provision." A dedicated 1:1 slot picker rather than
+  // reusing renderDocAttachmentPicker verbatim — that one only ever fills
+  // an EMPTY slot (see resubmitRequest's own comment on that exact
+  // limitation); this one's whole point is overwriting a FILLED slot.
+  //
+  // Eligibility is intentionally a bit more permissive than
+  // canCancelRequest just above: an ATS still blocks Withdraw once a
+  // linked payment has actually been Paid (see that function), but
+  // swapping out a wrong photo/document on the ATS itself doesn't touch
+  // that payment's own trail at all, so this never needs that check.
+  // ───────────────────────────────────────────────────────────
+  function canEditOwnRequest(request, user) {
+    if (!request || !user || request.RequestedBy !== user.name) return false;
+    if (request.Status === 'PendingApproval') return true;
+    if (request.Status !== 'Approved') return false;
+    if (request.RequestType === 'PaymentRequest') return request.DisbursementStage !== 'Paid';
+    return !isAtsDisabled(request);
+  }
+  function manageAttachmentsButtonHtml(request) {
+    if (isViewingAs() || !canEditOwnRequest(request, MVOA.getUser())) return '';
+    return `<button class="fin-manage-attachments-toggle btn-secondary" data-request-id="${escapeHtml(request.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">📎 Manage Attachments</button>`;
+  }
+  // Fills (or refills) the hidden body div under the Manage Attachments
+  // toggle with one row per fixed AttachmentURL slot — current link (if
+  // any) plus Camera/File pick buttons, mirroring the Camera/File pair
+  // renderDocAttachmentPicker already uses for named documents.
+  async function renderAttachmentManager(bodyEl, request, container) {
+    const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3'];
+    bodyEl.innerHTML = `
+      <div style="margin:8px 0 0;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);">
+        ${slots.map((slot, i) => {
+          const url = request[slot];
+          const verb = url ? 'Replace' : 'Add';
+          return `
+          <div class="mvoa-row" style="gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px;">
+            <span style="flex:1;min-width:140px;">${url ? `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>` : `<span class="muted">Attachment ${i + 1}: none</span>`}</span>
+            <button class="btn-secondary fin-att-replace-pick" data-slot="${slot}" data-mode="camera" style="padding:6px 10px;margin:0;">📷 ${verb} (Camera)</button>
+            <button class="btn-secondary fin-att-replace-pick" data-slot="${slot}" data-mode="file" style="padding:6px 10px;margin:0;">📄 ${verb} (File)</button>
+          </div>
+          <p class="error-text fin-att-replace-error" data-slot="${slot}" style="min-height:1em;margin:0 0 6px;"></p>`;
+        }).join('')}
+      </div>`;
+    bodyEl.querySelectorAll('.fin-att-replace-pick').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const slot = btn.dataset.slot;
+        const errEl = bodyEl.querySelector(`.fin-att-replace-error[data-slot="${slot}"]`);
+        errEl.textContent = '';
+        let picked;
+        try {
+          picked = await MVOA.pickAttachment({ photoOnly: btn.dataset.mode === 'camera', useCamera: btn.dataset.mode === 'camera' });
+        } catch (e) {
+          errEl.textContent = 'Could not open picker: ' + e.message;
+          return;
+        }
+        if (!picked) return; // user cancelled the file/camera dialog
+        setBtnBusy(btn, 'Uploading…');
+        try {
+          await replaceAttachment(request.RequestID, slot, picked, container);
+        } catch (e) {
+          errEl.textContent = 'Could not save attachment: ' + e.message;
+          clearBtnBusy(btn, `${btn.dataset.mode === 'camera' ? '📷' : '📄'} ${request[slot] ? 'Replace' : 'Add'} (${btn.dataset.mode === 'camera' ? 'Camera' : 'File'})`);
+        }
+      });
+    });
+  }
+  // Overwrites exactly one AttachmentURL slot — the counterpart to
+  // resubmitRequest's attachment handling, which only ever fills an
+  // EMPTY slot and never touches a filled one. Best-effort delete of the
+  // OLD file: deletePhotoFromDrive throws if the Apps Script's delete
+  // action isn't deployed (see that function's own comment) — that must
+  // never block the replacement itself, so it's wrapped separately and
+  // the sheet's URL is swapped either way.
+  async function replaceAttachment(requestId, slot, picked, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) return;
+    const oldUrl = req[slot];
+    const newUrl = await MVOA.uploadPhotoToDrive(picked.file, `${requestId}_${slot}_replace_${picked.name}`);
+    const updated = Object.assign({}, req, { [slot]: newUrl });
+    await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+    await MVOA.logAudit({ module: 'Finance', requestId, eventType: 'Attachment replaced', comment: slot, statusAfter: req.Status });
+    if (oldUrl) {
+      try { await MVOA.deletePhotoFromDrive(oldUrl); } catch (e) { /* best-effort — see comment above */ }
+    }
+    await loadAll(true);
+    render(container);
+  }
+
   // A condensed, click-to-open card for a New item — shows just enough to
   // identify it plus the 🆕 badge; clicking it marks it Opened (shared,
   // permanent) and re-renders the tab so it now shows in full with its
@@ -4757,6 +4970,24 @@ const FinanceModule = (function () {
       </div>`;
   }
 
+  // ADDED Oct 2026 — same purpose as rejectionDetailHtml just above, for
+  // the new Withdraw action (see cancelRequest): whoever already approved
+  // this request at an earlier stage needs to actually SEE that it was
+  // pulled, not just have it silently vanish from their queue. Shown on
+  // My Approvals (an approver who already acted) via the same
+  // "visible to the previous level" pattern already used for a later
+  // Rejection, and on My Requests for the requester's own record.
+  function cancellationDetailHtml(request, approvals) {
+    const cancellation = (approvals || []).find(a => a.Decision === 'Cancelled');
+    const by = (cancellation && cancellation.ApproverName) || request.ClosedBy || 'the requester';
+    const comment = cancellation ? (cancellation.Comment || '').trim() : '';
+    return `
+      <div class="mvoa-list-item" style="margin:6px 0 0;background:#fbeaea;">
+        <p style="margin:0;font-weight:600;color:#b3261e;">🚫 Withdrawn by ${escapeHtml(by)}</p>
+        <p class="muted" style="margin:4px 0 0;">${comment ? `"${escapeHtml(comment)}"` : 'No reason given.'}</p>
+      </div>`;
+  }
+
   // Full workflow trail for a single request — every stage this
   // request's rule actually requires, in order, with who acted on it and
   // when (or "still pending"), plus the attachments uploaded and, once
@@ -4908,6 +5139,7 @@ const FinanceModule = (function () {
     return statusBadge(text, inner.cls);
   }
   function displayStatusInner(request) {
+    if (request.Status === 'Cancelled') return { text: `🚫 Withdrawn by requester${request.ClosedDate ? ' · ' + formatDate(request.ClosedDate) : ''}`, cls: 'rejected' };
     if (request.Status === 'Rejected') return { text: 'Rejected', cls: 'rejected' };
     if (request.Status === 'Approved' && request.PaymentStatus === 'Paid') return { text: 'Paid', cls: 'paid' };
     if (request.Status === 'Approved' && (isPettyCashExpense(request) || requiresLinkedPaymentRequest(request))) return { text: `Approved — awaiting linked Payment Request${sinceText(request)}`, cls: 'approved' };
@@ -4998,6 +5230,14 @@ const FinanceModule = (function () {
             // Details, so a previous-stage approver actually sees it
             // without having to go looking.
             ok && req && req.Status === 'Rejected' ? rejectionDetailHtml(req, approvalsForThisRequest) : ''
+          }
+          ${
+            // Same "visible to the previous level" pattern as the Rejected
+            // block just above, for the new Withdraw action (see
+            // cancelRequest) — an approver who already acted at an earlier
+            // stage needs to actually see that the requester pulled this
+            // request, not just have it silently vanish from their queue.
+            ok && req && req.Status === 'Cancelled' ? cancellationDetailHtml(req, approvalsForThisRequest) : ''
           }
           ${req && hasUnreadNote(req, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
           ${req ? `<button class="fin-myapproval-trail-toggle-btn btn-secondary" data-idx="${i}" style="font-size:0.8rem;padding:4px 10px;margin-top:6px;">🔍 View Details</button>` : ''}
@@ -5095,14 +5335,18 @@ const FinanceModule = (function () {
         <p class="muted" style="margin:4px 0;font-size:0.8rem;">Submitted ${formatDate(r.RequestedDate)}</p>
         ${paymentReferenceLineHtml(r)}
         ${r.Status === 'Rejected' ? rejectionDetailHtml(r, approvals) : ''}
+        ${r.Status === 'Cancelled' ? cancellationDetailHtml(r, approvals) : ''}
         ${hasUnreadNote(r, noteCount) ? `<p style="margin:4px 0;color:#b3261e;font-weight:600;">🆕 New note</p>` : ''}
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
           <button class="fin-mine-trail-toggle-btn btn-secondary" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">🔍 View Details</button>
           ${notesButtonHtml(r, noteCount, 'fin-mine-notes-toggle', `data-request-id="${escapeHtml(r.RequestID)}"`)}
           ${disableAtsButtonHtml(r)}
+          ${manageAttachmentsButtonHtml(r)}
+          ${cancelButtonHtml(r)}
         </div>
         <div class="fin-mine-trail-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
         <div class="fin-mine-notes-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
+        <div class="fin-mine-attachments-body hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
       </div>
     `; }).join('');
     wireNewItemCards(body, () => render(container));
@@ -5138,6 +5382,36 @@ const FinanceModule = (function () {
 
     body.querySelectorAll('.fin-disable-ats-toggle').forEach(btn => {
       btn.addEventListener('click', () => toggleDisableAts(btn.dataset.requestId, container));
+    });
+
+    body.querySelectorAll('.fin-manage-attachments-toggle').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.requestId;
+        const mgrBody = body.querySelector(`.fin-mine-attachments-body[data-request-id="${id}"]`);
+        const isHidden = mgrBody.classList.contains('hidden');
+        if (!isHidden) { mgrBody.classList.add('hidden'); return; }
+        mgrBody.classList.remove('hidden');
+        const r = list.find(x => x.RequestID === id);
+        if (r) await renderAttachmentManager(mgrBody, r, container);
+      });
+    });
+
+    body.querySelectorAll('.fin-cancel-request-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.requestId;
+        const r = list.find(x => x.RequestID === id);
+        // Heads-up baked right into the same prompt (no extra dialog,
+        // matching this app's existing Reject/Disable-ATS pattern) when
+        // withdrawing this ATS will also cascade-withdraw Payment
+        // Requests already linked to it — see cancelRequest/
+        // cascadeCancelTargets.
+        const cascadeCount = r && r.RequestType !== 'PaymentRequest' ? cascadeCancelTargets(id).length : 0;
+        const promptMsg = cascadeCount
+          ? `Reason for withdrawing this request (required).\n\nNote: ${cascadeCount} Payment Request${cascadeCount > 1 ? 's' : ''} already linked to it (not yet paid) will be withdrawn automatically too.`
+          : 'Reason for withdrawing this request (required):';
+        const reason = prompt(promptMsg);
+        if (reason && reason.trim()) runOnce(btn, 'Withdrawing…', () => cancelRequest(id, reason.trim(), container));
+      });
     });
   }
 
@@ -5605,6 +5879,20 @@ const FinanceModule = (function () {
     let justApprovedForContractPrompt = null;
     try {
       const req = requestsCache.find(r => r.RequestID === requestId);
+      // ADDED Oct 2026 — the requester's own Withdraw action (see
+      // cancelRequest) sets Status to 'Cancelled', which already drops the
+      // request out of computeQueueCards' pending list (Status !==
+      // 'PendingApproval') so it won't be offered to anyone who hasn't
+      // acted yet. This is the belt-and-suspenders backstop for a stale
+      // queue card someone was already looking at before the withdrawal
+      // happened, the same way the SentBack check right below guards
+      // against a stale page.
+      if (req && req.Status === 'Cancelled') {
+        if (errEl) errEl.textContent = 'This request was withdrawn by the requester — no further action is possible.';
+        await loadAll(true);
+        render(container);
+        return;
+      }
       // Server-side (well, function-side) backstop for the same rule the
       // Approval Queue UI already enforces by hiding the button — belt and
       // suspenders, since the UI check alone can't be trusted against a
