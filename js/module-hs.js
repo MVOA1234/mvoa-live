@@ -1186,7 +1186,7 @@ const HSModule = (function () {
       btn.addEventListener('click', () => openAmcMarkDoneDialog(btn.dataset.assetId, assets, container));
     });
     bodyEl.querySelectorAll('.hs-amc-history-btn').forEach(btn => {
-      btn.addEventListener('click', () => openAmcHistoryDialog(btn.dataset.assetId, assets));
+      btn.addEventListener('click', () => openAmcHistoryDialog(btn.dataset.assetId, assets, container));
     });
     bodyEl.querySelectorAll('.hs-amc-edit-btn').forEach(btn => {
       btn.addEventListener('click', () => openAmcEditDialog(btn.dataset.assetId, assets, container));
@@ -1196,9 +1196,18 @@ const HSModule = (function () {
   // History modal — every past completion for one asset, newest first,
   // pulled straight from HSAMCLog (never overwritten; Mark Done always
   // appends there, only HSAMCAssets.LastDone gets updated in place).
-  // Read-only — this is the "how do I see an old report" gap the app
-  // previously had no answer for.
-  async function openAmcHistoryDialog(assetId, assets) {
+  //
+  // REVISED Oct 2026 per explicit report: "by mistake the AMC for DG set
+  // was closed instead by attaching the reports instead of Grundfoss
+  // pumps. Can we provide an edit feature to correct such mistakes" — a
+  // mistaken Mark Done (wrong asset, wrong date, or the wrong report
+  // attached) previously had no fix short of editing the Google Sheet
+  // directly. Now each entry gets ✏️ Edit (reassign the asset, change the
+  // date, swap the attachments) and 🗑️ Delete (remove it outright), both
+  // routed through recomputeAmcLastDone afterward so HSAMCAssets.LastDone
+  // — and therefore the Due/Overdue table — is never left pointing at a
+  // completion that's since been corrected or removed.
+  async function openAmcHistoryDialog(assetId, assets, container) {
     const asset = assets.find(a => a.AssetID === assetId);
     if (!asset) return;
     const modal = document.createElement('div');
@@ -1214,27 +1223,206 @@ const HSModule = (function () {
     modal.querySelector('#hs-amc-history-close').addEventListener('click', () => modal.remove());
 
     const bodyEl = modal.querySelector('#hs-amc-history-body');
+
+    async function loadAndRender() {
+      bodyEl.innerHTML = `<p class="muted">Loading…</p>`;
+      try {
+        const logRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcLog);
+        const entries = rowsToObjs(logRows, AMC_LOG_COLS)
+          .filter(l => l.AssetID === assetId)
+          .sort((a, b) => b.CompletedDate.localeCompare(a.CompletedDate));
+        bodyEl.innerHTML = entries.length
+          ? entries.map(l => {
+              const attachments = parseReportUrls(l.ReportURL);
+              const links = attachments.length
+                ? attachments.map(a => `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener">${a.kind === 'PHOTO' ? '📷' : a.kind === 'DOC' ? '📄' : '📎'} View ${a.kind === 'PHOTO' ? 'photo' : a.kind === 'DOC' ? 'document' : 'report'}</a>`).join(' &nbsp; ')
+                : '<span class="muted">No report attached</span>';
+              return `
+              <div style="margin:6px 0;padding-bottom:6px;border-bottom:1px solid #eee;">
+                <p style="margin:0;">
+                  ${new Date(l.CompletedDate).toLocaleDateString()} — ${escapeHtml(l.CompletedBy)}<br>
+                  ${links}
+                </p>
+                <div style="margin-top:4px;">
+                  <button class="btn-secondary hs-amc-log-edit-btn" data-log-id="${escapeHtml(l.LogID)}" style="font-size:0.78rem;padding:3px 8px;margin:0 6px 0 0;">✏️ Edit</button>
+                  <button class="btn-secondary hs-amc-log-delete-btn" data-log-id="${escapeHtml(l.LogID)}" style="font-size:0.78rem;padding:3px 8px;margin:0;color:#b3261e;border-color:#b3261e;">🗑️ Delete</button>
+                </div>
+              </div>
+            `;
+            }).join('')
+          : '<p class="muted">No completions logged yet.</p>';
+        bodyEl.querySelectorAll('.hs-amc-log-edit-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const log = entries.find(l => l.LogID === btn.dataset.logId);
+            if (log) openAmcLogEditDialog(log, assets, container, loadAndRender);
+          });
+        });
+        bodyEl.querySelectorAll('.hs-amc-log-delete-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const log = entries.find(l => l.LogID === btn.dataset.logId);
+            if (log) deleteAmcLogEntry(log, container, loadAndRender);
+          });
+        });
+      } catch (e) {
+        bodyEl.innerHTML = `<p class="error-text">Could not load history: ${e.message}</p>`;
+      }
+    }
+    await loadAndRender();
+  }
+
+  // Recomputes HSAMCAssets.LastDone for one asset purely from its own
+  // remaining HSAMCLog history (the most recent CompletedDate among
+  // whatever entries are left for it) — called after an edit reassigns a
+  // log entry away from/to an asset, or a delete removes one outright, so
+  // a correction is reflected immediately in the Due/Overdue table
+  // instead of leaving LastDone pointing at a completion that no longer
+  // belongs there. Blank (not "today", not left stale) when no log
+  // entries remain for this asset at all.
+  async function recomputeAmcLastDone(assetId) {
+    const [assetRows, logRows] = await Promise.all([
+      MVOA.sheetsRead(MVOA.TABS.hsAmcAssets),
+      MVOA.sheetsRead(MVOA.TABS.hsAmcLog)
+    ]);
+    const assetObjs = rowsToObjs(assetRows, AMC_COLS);
+    const asset = assetObjs.find(a => a.AssetID === assetId);
+    if (!asset) return;
+    const entries = rowsToObjs(logRows, AMC_LOG_COLS).filter(l => l.AssetID === assetId);
+    const latest = entries.length
+      ? entries.reduce((max, l) => (l.CompletedDate > max ? l.CompletedDate : max), entries[0].CompletedDate)
+      : '';
+    if (latest === asset.LastDone) return; // already correct — skip the write
+    const updated = Object.assign({}, asset, { LastDone: latest });
+    await MVOA.sheetsUpdateRow(MVOA.TABS.hsAmcAssets, asset.rowNumber, AMC_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
+  }
+
+  // Edit dialog for one existing HSAMCLog entry — lets the Asset it's
+  // attributed to be corrected (the exact DG Set / Grundfos pumps mix-up
+  // reported), along with its date and attached docs/photos. Reuses the
+  // same doc/photo picker shape as Mark Done (3 of each max), pre-loaded
+  // with whatever's already attached so nothing already on file is lost
+  // unless explicitly removed.
+  function openAmcLogEditDialog(log, assets, container, onDone) {
+    const existing = parseReportUrls(log.ReportURL);
+    let docs = existing.filter(a => a.kind === 'DOC').map(a => ({ existing: true, url: a.url, name: a.url.split('/').pop() }));
+    let photos = existing.filter(a => a.kind === 'PHOTO').map(a => ({ existing: true, url: a.url, name: a.url.split('/').pop() }));
+    // Anything saved before the DOC::/PHOTO:: tagging existed (plain
+    // REPORT kind) is shown and kept as-is under "Other attachments" —
+    // editable only by removing it outright, since there's no "kind" to
+    // sort it back into on re-save.
+    let others = existing.filter(a => a.kind !== 'DOC' && a.kind !== 'PHOTO').map(a => ({ existing: true, url: a.url, name: a.url.split('/').pop() }));
+
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;">
+        <h3>Edit Completion Entry</h3>
+        <label>Asset
+          <select id="hs-amc-logedit-asset">
+            ${assets.map(a => `<option value="${escapeHtml(a.AssetID)}" ${a.AssetID === log.AssetID ? 'selected' : ''}>${escapeHtml(a.AssetName)} (${escapeHtml(a.AssetCode)})</option>`).join('')}
+          </select>
+        </label>
+        <label>Completed Date
+          <input type="date" id="hs-amc-logedit-date" value="${escapeHtml(log.CompletedDate)}">
+        </label>
+        <div id="hs-amc-logedit-docs-list" style="margin-top:10px;"></div>
+        <button id="hs-amc-logedit-doc-btn" class="btn-secondary" style="width:100%;">📄 Attach Document (up to 3)</button>
+        <div id="hs-amc-logedit-photos-list" style="margin-top:10px;"></div>
+        <button id="hs-amc-logedit-photo-btn" class="btn-secondary" style="width:100%;margin-top:6px;">📷 Attach Photo (up to 3)</button>
+        <div id="hs-amc-logedit-others-list" style="margin-top:10px;"></div>
+        <button id="hs-amc-logedit-save" class="btn-primary" style="margin-top:10px;">Save</button>
+        <button id="hs-amc-logedit-cancel" class="btn-secondary">Cancel</button>
+        <p class="error-text" id="hs-amc-logedit-error"></p>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    function renderLists() {
+      modal.querySelector('#hs-amc-logedit-docs-list').innerHTML = docs.map((d, i) =>
+        `<p class="muted" style="margin:2px 0;">📄 ${d.existing ? `<a href="${escapeHtml(d.url)}" target="_blank" rel="noopener">${escapeHtml(d.name)}</a>` : escapeHtml(d.name)} <a href="#" class="hs-amc-logedit-remove-doc" data-idx="${i}">✕</a></p>`).join('');
+      modal.querySelector('#hs-amc-logedit-photos-list').innerHTML = photos.map((p, i) =>
+        `<p class="muted" style="margin:2px 0;">📷 ${p.existing ? `<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${escapeHtml(p.name)}</a>` : escapeHtml(p.name)} <a href="#" class="hs-amc-logedit-remove-photo" data-idx="${i}">✕</a></p>`).join('');
+      modal.querySelector('#hs-amc-logedit-others-list').innerHTML = others.map((o, i) =>
+        `<p class="muted" style="margin:2px 0;">📎 <a href="${escapeHtml(o.url)}" target="_blank" rel="noopener">${escapeHtml(o.name)}</a> <a href="#" class="hs-amc-logedit-remove-other" data-idx="${i}">✕</a></p>`).join('');
+      modal.querySelector('#hs-amc-logedit-doc-btn').disabled = docs.length >= 3;
+      modal.querySelector('#hs-amc-logedit-photo-btn').disabled = photos.length >= 3;
+      modal.querySelectorAll('.hs-amc-logedit-remove-doc').forEach(el => el.addEventListener('click', (e) => { e.preventDefault(); docs.splice(+el.dataset.idx, 1); renderLists(); }));
+      modal.querySelectorAll('.hs-amc-logedit-remove-photo').forEach(el => el.addEventListener('click', (e) => { e.preventDefault(); photos.splice(+el.dataset.idx, 1); renderLists(); }));
+      modal.querySelectorAll('.hs-amc-logedit-remove-other').forEach(el => el.addEventListener('click', (e) => { e.preventDefault(); others.splice(+el.dataset.idx, 1); renderLists(); }));
+    }
+
+    modal.querySelector('#hs-amc-logedit-cancel').addEventListener('click', () => modal.remove());
+    modal.querySelector('#hs-amc-logedit-doc-btn').addEventListener('click', async () => {
+      if (docs.length >= 3) return;
+      const a = await MVOA.pickAttachment({ photoOnly: false, useCamera: false });
+      if (a) { docs.push(a); renderLists(); }
+    });
+    modal.querySelector('#hs-amc-logedit-photo-btn').addEventListener('click', async () => {
+      if (photos.length >= 3) return;
+      const a = await MVOA.pickAttachment({ photoOnly: true, useCamera: false });
+      if (a) { photos.push(a); renderLists(); }
+    });
+    modal.querySelector('#hs-amc-logedit-save').addEventListener('click', async () => {
+      const errEl = modal.querySelector('#hs-amc-logedit-error');
+      const newAssetId = modal.querySelector('#hs-amc-logedit-asset').value;
+      const dateVal = modal.querySelector('#hs-amc-logedit-date').value;
+      if (!newAssetId || !dateVal) { errEl.textContent = 'Please pick an asset and a date.'; return; }
+      const newAsset = assets.find(a => a.AssetID === newAssetId);
+      if (!newAsset) { errEl.textContent = 'Could not find that asset.'; return; }
+      const saveBtn = modal.querySelector('#hs-amc-logedit-save');
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        const urlParts = [];
+        for (const o of others) urlParts.push(o.url); // untagged legacy entries kept as-is
+        for (let i = 0; i < docs.length; i++) {
+          if (docs[i].existing) { urlParts.push(`DOC::${docs[i].url}`); continue; }
+          saveBtn.textContent = `Uploading document ${i + 1}/${docs.length}…`;
+          const url = await MVOA.uploadPhotoToDrive(docs[i].file, `AMC_${newAsset.AssetCode}_${dateVal}_doc${i + 1}_${docs[i].name}`);
+          urlParts.push(`DOC::${url}`);
+        }
+        for (let i = 0; i < photos.length; i++) {
+          if (photos[i].existing) { urlParts.push(`PHOTO::${photos[i].url}`); continue; }
+          saveBtn.textContent = `Uploading photo ${i + 1}/${photos.length}…`;
+          const url = await MVOA.uploadPhotoToDrive(photos[i].file, `AMC_${newAsset.AssetCode}_${dateVal}_photo${i + 1}_${photos[i].name}`);
+          urlParts.push(`PHOTO::${url}`);
+        }
+        const reportUrl = urlParts.join('|');
+        const oldAssetId = log.AssetID;
+        const updatedLog = Object.assign({}, log, { AssetID: newAssetId, CompletedDate: dateVal, ReportURL: reportUrl });
+        await MVOA.sheetsUpdateRow(MVOA.TABS.hsAmcLog, log.rowNumber, AMC_LOG_COLS.map(c => updatedLog[c] !== undefined ? updatedLog[c] : ''));
+        await MVOA.logAudit({ module: 'AMC', requestId: log.LogID, eventType: 'Completion entry edited', comment: oldAssetId !== newAssetId ? `Reassigned ${oldAssetId} → ${newAssetId}` : '' });
+        // Recompute LastDone for whichever asset(s) this touches — both
+        // sides of a reassignment (the entry it just left, and the one it
+        // now belongs to), or just the one asset if only the date/
+        // attachments changed.
+        await recomputeAmcLastDone(oldAssetId);
+        if (newAssetId !== oldAssetId) await recomputeAmcLastDone(newAssetId);
+        modal.remove();
+        await renderAmcCompliance(container);
+        if (onDone) await onDone();
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+      }
+    });
+    renderLists();
+  }
+
+  // Deletes one HSAMCLog entry outright (e.g. a Mark Done logged against
+  // the wrong asset with nothing worth keeping, rather than one that just
+  // needs reassigning — see openAmcLogEditDialog for that case) and
+  // recomputes the asset's LastDone from whatever history remains.
+  async function deleteAmcLogEntry(log, container, onDone) {
+    if (!confirm(`Delete this completion entry (${new Date(log.CompletedDate).toLocaleDateString()} — ${log.CompletedBy})? This cannot be undone.`)) return;
     try {
-      const logRows = await MVOA.sheetsRead(MVOA.TABS.hsAmcLog);
-      const entries = rowsToObjs(logRows, AMC_LOG_COLS)
-        .filter(l => l.AssetID === assetId)
-        .sort((a, b) => b.CompletedDate.localeCompare(a.CompletedDate));
-      bodyEl.innerHTML = entries.length
-        ? entries.map(l => {
-            const attachments = parseReportUrls(l.ReportURL);
-            const links = attachments.length
-              ? attachments.map(a => `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener">${a.kind === 'PHOTO' ? '📷' : a.kind === 'DOC' ? '📄' : '📎'} View ${a.kind === 'PHOTO' ? 'photo' : a.kind === 'DOC' ? 'document' : 'report'}</a>`).join(' &nbsp; ')
-              : '<span class="muted">No report attached</span>';
-            return `
-            <p style="margin:6px 0;padding-bottom:6px;border-bottom:1px solid #eee;">
-              ${new Date(l.CompletedDate).toLocaleDateString()} — ${escapeHtml(l.CompletedBy)}<br>
-              ${links}
-            </p>
-          `;
-          }).join('')
-        : '<p class="muted">No completions logged yet.</p>';
+      await MVOA.sheetsDeleteRows(MVOA.TABS.hsAmcLog, [log.rowNumber]);
+      await MVOA.logAudit({ module: 'AMC', requestId: log.LogID, eventType: 'Completion entry deleted', comment: `${log.AssetID} — ${log.CompletedDate}` });
+      await recomputeAmcLastDone(log.AssetID);
+      await renderAmcCompliance(container);
+      if (onDone) await onDone();
     } catch (e) {
-      bodyEl.innerHTML = `<p class="error-text">Could not load history: ${e.message}</p>`;
+      alert('Could not delete: ' + e.message);
     }
   }
 
