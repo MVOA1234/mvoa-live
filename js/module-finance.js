@@ -2179,9 +2179,17 @@ const FinanceModule = (function () {
   // too, pre-filled with the original approved-to-spend amount rather
   // than the real payment amount, and easy to log against by mistake
   // instead of the actual linked Payment Request.
+  // REVISED Oct 2026 — a linked Payment Request that was Rejected (e.g.
+  // by the Treasurer at payment review, see treasurerReject) or
+  // Withdrawn no longer counts: it will never be paid, so the ATS goes
+  // back to "approved — awaiting linked Payment Request" instead of
+  // staying stuck showing "Payment in progress" for a dead request.
+  function liveLinkedPayments(atsRequestId) {
+    return requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === atsRequestId &&
+      p.Status !== 'Rejected' && p.Status !== 'Cancelled');
+  }
   function isSupersededByPaymentRequest(r) {
-    return r.RequestType !== 'PaymentRequest' &&
-      requestsCache.some(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === r.RequestID);
+    return r.RequestType !== 'PaymentRequest' && liveLinkedPayments(r.RequestID).length > 0;
   }
   // Bug found in testing: nothing stopped a second Replenishment request
   // from being submitted while an earlier one was still in flight (not yet
@@ -2687,7 +2695,7 @@ const FinanceModule = (function () {
     // while its own Payment Release checklist correctly stayed all-
     // pending, since neither had actually moved for THIS record).
     if (isSupersededByPaymentRequest(request)) {
-      const linked = requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === request.RequestID);
+      const linked = liveLinkedPayments(request.RequestID);
       const paid = linked.find(p => p.DisbursementStage === 'Paid');
       if (paid) return { text: `Paid via linked Payment Request ${paid.RequestID}${paid.PaymentRef ? ' (Ref: ' + paid.PaymentRef + ')' : ''}`, cls: 'paid' };
       const active = linked[0];
@@ -5120,10 +5128,17 @@ const FinanceModule = (function () {
   // knows not just THAT it was rejected but by whom, at which stage
   // (rejection can happen at Secretary OR Treasurer level, even after an
   // earlier stage already approved), and what reason was given.
+  // ADDED Oct 2026 — Stage value written on the FinanceApprovals row when
+  // the Treasurer rejects a Payment Request AFTER its approval chain
+  // finished (at Expense Sheet review, or before disbursement). Deliberately
+  // not one of the chain's own stage keys (FM/OpsHead/Secretary/Treasurer/
+  // President) so the stage engine, which only reacts to a Rejected row
+  // at the stage it's currently on, ignores it — Status carries the result.
+  const PAYMENT_REVIEW_STAGE = 'PaymentReview';
   function rejectionDetailHtml(request, approvals) {
     const rejection = (approvals || []).find(a => a.Decision === 'Rejected');
     const by = (rejection && rejection.ApproverName) || request.ClosedBy || 'Unknown';
-    const stage = rejection ? rejection.Stage : '';
+    const stage = rejection ? (rejection.Stage === PAYMENT_REVIEW_STAGE ? 'Treasurer payment review' : rejection.Stage) : '';
     const comment = rejection ? (rejection.Comment || '').trim() : '';
     return `
       <div class="mvoa-list-item" style="margin:6px 0 0;background:#fbeaea;">
@@ -5179,6 +5194,7 @@ const FinanceModule = (function () {
       if (rule.AGMApprovalRequired === 'Yes') stageLabels['AGM'] = 'AGM Approval';
     }
     stageLabels['Initiator'] = 'With Requester';
+    stageLabels[PAYMENT_REVIEW_STAGE] = 'Treasurer — payment review';
 
     const sortedApprovals = approvals.slice().sort((a, b) => (a.Timestamp || '').localeCompare(b.Timestamp || ''));
     const eventRowsHtml = sortedApprovals.map(a => {
@@ -5218,7 +5234,7 @@ const FinanceModule = (function () {
       // See stageDescription's matching branch — this ATS's own checklist
       // never moves; the real disbursement happened off the linked
       // Payment Request instead.
-      const linked = requestsCache.filter(p => p.RequestType === 'PaymentRequest' && p.LinkedSpendRequestID === request.RequestID);
+      const linked = liveLinkedPayments(request.RequestID);
       const paid = linked.find(p => p.DisbursementStage === 'Paid');
       const active = linked[0];
       paymentsTrailHtml = paid
@@ -6744,6 +6760,10 @@ const FinanceModule = (function () {
       ${(isTres || isAdminUser) ? `
         <h3 style="color:var(--mvoa-blue);margin:20px 0 8px;">Awaiting your review</h3>
         ${pendingTreasurer.length ? '<div id="fin-pay-treasurer"></div>' : '<p class="muted">Nothing awaiting your review.</p>'}
+        ${pendingPayment.filter(canTreasurerReject).length ? `
+          <h3 style="color:var(--mvoa-blue);margin:20px 0 4px;">Approved by you — awaiting disbursement</h3>
+          <p class="muted" style="margin:0 0 8px;font-size:0.85rem;">Payment hasn't been released yet, so you can still reject any of these.</p>
+          <div id="fin-pay-tres-disb"></div>` : ''}
       ` : ''}
       ${(isDisb || isAdminUser) ? `
         <h3 style="color:var(--mvoa-blue);margin:0 0 8px;">🛒 Approved — awaiting purchase</h3>
@@ -6872,6 +6892,7 @@ const FinanceModule = (function () {
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn-primary fin-treasurer-approve-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Approve</button>
               <button class="btn-secondary fin-treasurer-sendback-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;">Send Back with Query</button>
+              ${canTreasurerReject(req) ? `<button class="btn-secondary fin-treasurer-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;color:#b3261e;">🚫 Reject</button>` : ''}
             </div>
             <p class="error-text fin-treasurer-error" data-request-id="${escapeHtml(req.RequestID)}" style="min-height:1em;margin-top:4px;"></p>
             ` : `<p class="muted" style="margin:8px 0 0 0;">👁️ Read only — you can't approve or send back this request.</p>`}
@@ -6882,11 +6903,23 @@ const FinanceModule = (function () {
               const q = prompt('What needs to be corrected? (this will be sent to the Accountant)');
               if (q && q.trim()) runOnce(e.currentTarget, 'Sending…', () => treasurerSendBack(req.RequestID, q.trim(), container));
             });
+            const rejBtn = div.querySelector('.fin-treasurer-reject-btn');
+            if (rejBtn) rejBtn.addEventListener('click', () => openTreasurerRejectDialog(req.RequestID, container));
           }
         });
       } catch (e) {
         el.innerHTML = `<p class="error-text">Could not display items awaiting review: ${escapeHtml(e.message)}. Try ↻ Refresh, or open the browser console for details.</p>`;
       }
+    }
+    if ((isTres || isAdminUser) && body.querySelector('#fin-pay-tres-disb')) {
+      const el = body.querySelector('#fin-pay-tres-disb');
+      el.innerHTML = pendingPayment.filter(canTreasurerReject).map(req => baseCard(req,
+        `<span class="mvoa-badge" style="color:#0f6e56;background:#eaf5ef;">Awaiting Disbursement Officer</span>`,
+        `${currentSectionCanEdit ? `<div style="margin-top:6px;"><button class="btn-secondary fin-treasurer-reject-btn" data-request-id="${escapeHtml(req.RequestID)}" style="margin:0;color:#b3261e;">🚫 Reject before payment</button></div>` : ''}`
+      )).join('');
+      el.querySelectorAll('.fin-treasurer-reject-btn').forEach(btn => {
+        btn.addEventListener('click', () => openTreasurerRejectDialog(btn.dataset.requestId, container));
+      });
     }
     if ((isDisb || isAdminUser) && pendingProcurement.length) {
       const el = body.querySelector('#fin-pay-procurement');
@@ -7207,6 +7240,113 @@ const FinanceModule = (function () {
     }
   }
 
+  // ADDED Oct 2026 — Treasurer REJECT on a Payment Request, at either of
+  // the two points after its approval chain is done and before money
+  // moves: (1) Expense Sheet entry submitted for review (DisbursementStage
+  // 'PendingTreasurer', alongside the existing Send Back) and (2) already
+  // approved by the Treasurer but not yet released by the Disbursement
+  // Officer ('PendingPayment'). Either way the Payment Request is closed
+  // for good (Status 'Rejected'); if it's still needed the requester raises
+  // a fresh one. Payment Requests only, and not ones whose purchase the
+  // Disbursement Officer already paid (ProcurementRef) — money has already
+  // moved on those, so rejecting would misrepresent reality.
+  function canTreasurerReject(req) {
+    return !!req && req.RequestType === 'PaymentRequest' && req.Status === 'Approved' &&
+      (req.DisbursementStage === 'PendingTreasurer' || req.DisbursementStage === 'PendingPayment') &&
+      !req.ProcurementRef;
+  }
+  function openTreasurerRejectDialog(requestId, container) {
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req || !canTreasurerReject(req)) return;
+    const beforePay = req.DisbursementStage === 'PendingPayment';
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;max-height:85vh;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+        <h3 style="margin-top:0;color:#b3261e;">🚫 Reject Payment Request</h3>
+        <p style="margin:0 0 4px;"><strong>${escapeHtml(req.RequestID)} · ${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong></p>
+        ${req.Vendor ? `<p class="muted" style="margin:0 0 8px;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+        <p class="muted" style="margin:0 0 8px;font-size:0.85rem;">${beforePay ? 'You have already approved this and it is waiting for the Disbursement Officer; no payment has been released yet. ' : ''}Rejecting cancels this Payment Request. If it still needs to be paid, the requester will have to raise a new one.</p>
+        <textarea id="fin-trej-reason" rows="4" placeholder="Reason for rejection (required) — the requester and Accountant will see this" style="width:100%;box-sizing:border-box;margin-bottom:6px;"></textarea>
+        <p class="error-text" id="fin-trej-err" style="min-height:1em;margin:0 0 6px;"></p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="fin-trej-confirm" class="btn-primary" style="margin:0;background:#b3261e;">Reject Payment Request</button>
+          <button id="fin-trej-cancel" class="btn-secondary" style="margin:0;">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => { if (modal.parentNode) modal.parentNode.removeChild(modal); };
+    modal.querySelector('#fin-trej-cancel').addEventListener('click', close);
+    const confirmBtn = modal.querySelector('#fin-trej-confirm');
+    confirmBtn.addEventListener('click', async () => {
+      const reason = modal.querySelector('#fin-trej-reason').value.trim();
+      const errEl = modal.querySelector('#fin-trej-err');
+      if (!reason) { errEl.textContent = 'Please enter the reason for rejecting this Payment Request.'; return; }
+      errEl.textContent = '';
+      setBtnBusy(confirmBtn, 'Rejecting…');
+      try {
+        await treasurerReject(requestId, reason);
+        close();
+        await loadAll(true);
+        render(container);
+      } catch (e) {
+        errEl.textContent = 'Could not reject: ' + e.message;
+        clearBtnBusy(confirmBtn, 'Reject Payment Request');
+      }
+    });
+  }
+  async function treasurerReject(requestId, reason) {
+    // Re-read the live row rather than trusting the dialog's snapshot — the
+    // Disbursement Officer may have released payment in the meantime.
+    await loadAll(true);
+    const req = requestsCache.find(r => r.RequestID === requestId);
+    if (!req) throw new Error('Request not found');
+    if (!canTreasurerReject(req)) throw new Error('This Payment Request has already moved on (it may have just been paid or sent back) — refresh and check its status.');
+    const user = MVOA.getUser();
+    const now = new Date().toISOString();
+    const wasBeforePay = req.DisbursementStage === 'PendingPayment';
+    const approvalId = await nextApprovalId();
+    await MVOA.sheetsAppend(TAB_APPROVALS, objToRow(APPROVAL_COLS, {
+      ApprovalID: approvalId, RequestID: requestId, ApproverName: user.name, ApproverRole: user.role || '',
+      Stage: PAYMENT_REVIEW_STAGE, Decision: 'Rejected', Comment: reason, Timestamp: now,
+      AmountAtDecision: req.Amount, AmountModified: '', ModifiedAmount: ''
+    }));
+    // DisbursementStage is cleared so the request drops out of every
+    // Accountant / Treasurer / Disbursement Officer queue (they all filter
+    // on it); ExpenseTab/ExpenseRow are kept for reference.
+    const updated = Object.assign({}, req, {
+      Status: 'Rejected', DisbursementStage: '', ClosedDate: now, ClosedBy: user.name,
+      StageEnteredAt: now, StageOpenedAt: '', NotesOpenedAt: ''
+    });
+    await MVOA.sheetsUpdateRow(TAB_REQUESTS, req.rowNumber, objToRow(REQUEST_COLS, updated));
+    // Same rationale also goes into the Notes thread so the Accountant and
+    // requester (who may not open the approval trail) see it.
+    try {
+      const noteId = MVOA.nextId('FNOTE', []);
+      await MVOA.sheetsAppend(TAB_NOTES, objToRow(NOTE_COLS, {
+        NoteID: noteId, RequestID: requestId, Author: user.name, Timestamp: now,
+        Note: '🚫 Rejected by Treasurer' + (wasBeforePay ? ' (before disbursement)' : ' (payment review)') + ': ' + reason
+      }));
+    } catch (e) { /* the approval row + status are the record; the note is a convenience */ }
+    // Mark the Expense Sheet row so it doesn't read as a live, unpaid
+    // entry. Best-effort — the request itself is already rejected.
+    try {
+      if (req.ExpenseTab) {
+        const entry = await readExpenseRow(req.ExpenseTab, requestId);
+        if (entry) {
+          await MVOA.sheetsUpdateRow(req.ExpenseTab, entry.rowNumber, objToRow(EXPENSE_COLS, Object.assign({}, entry.row, {
+            UDNumber: `REJECTED by Treasurer ${user.name} · ${formatStampDate()}`
+          })));
+        }
+      }
+    } catch (e) { /* non-critical */ }
+    await MVOA.logAudit({
+      module: 'Finance', requestId,
+      eventType: wasBeforePay ? 'Treasurer rejected (before disbursement)' : 'Treasurer rejected (payment review)',
+      comment: reason, statusAfter: 'Rejected'
+    });
+  }
+
   async function treasurerSendBack(requestId, query, container) {
     const req = requestsCache.find(r => r.RequestID === requestId);
     if (!req) return;
@@ -7262,6 +7402,15 @@ const FinanceModule = (function () {
     if (!udNumber) { if (errEl) errEl.textContent = 'Please enter a UD Number / Cheque / UTR reference.'; return; }
     if (!releaseDate) { if (errEl) errEl.textContent = 'Please enter the date of release of payment.'; return; }
     try {
+      // ADDED Oct 2026 — the Treasurer can now reject a Payment Request
+      // up until payment is released (see treasurerReject), so re-check
+      // the live row first: this screen may be stale and still showing a
+      // request that was rejected after it loaded.
+      await loadAll(true);
+      const live = requestsCache.find(r => r.RequestID === requestId);
+      if (!live || live.Status !== 'Approved' || live.DisbursementStage !== 'PendingPayment') {
+        throw new Error('This request is no longer awaiting payment (it may have been rejected by the Treasurer). Refresh to see its current status.');
+      }
       const entry = await readExpenseRow(req.ExpenseTab, requestId);
       if (!entry) throw new Error('Expense Sheet entry not found');
       const updatedEntry = Object.assign({}, entry.row, { UDNumber: udNumber, Date: formatStampDate(new Date(releaseDate)), Bank: bank });
