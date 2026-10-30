@@ -1660,7 +1660,12 @@ const HSModule = (function () {
   // failed photo upload). This is what the live list/Monthly Report use
   // to mark a "✏️ Backfilled" entry distinctly from a "📝 manual
   // (no signal)" one, even though both can have VehicleDetails set.
-  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails', 'BackfilledAt'];
+  // ADDED Oct 2026 — 'EditedBy'/'EditedAt': blank on every entry that has
+  // never been corrected; set by openInOutEditDialog when someone fixes a
+  // wrong entry (see that function), so a corrected entry is visibly
+  // marked in the live list rather than silently indistinguishable from
+  // an original one. Appended at the very end, position-safe.
+  const INOUT_LOG_COLS = ['LogID', 'Type', 'Direction', 'Timestamp', 'PhotoURL', 'LoggedBy', 'VehicleDetails', 'BackfilledAt', 'EditedBy', 'EditedAt'];
   // weeklyMin: null means "frequency not defined" per the spec — no
   // Fail concept at all for that type, logging only.
   // allowBackfill: ADDED Sept 2026, originally Sewage Disposal/Water
@@ -1750,8 +1755,9 @@ const HSModule = (function () {
           </div>
           ${currentlyIn ? `<p class="muted" style="margin:0 0 8px;font-size:0.8rem;">Currently IN — log OUT before logging IN again.</p>` : ''}
           ${t.allowBackfill ? `<button class="btn-secondary hs-backfill-btn" data-type="${escapeHtml(t.key)}" style="width:100%;margin-bottom:8px;">✏️ Add Missed Entry (past ${BACKFILL_MAX_DAYS_AGO + 1} days)</button>` : ''}
+          <button class="btn-secondary hs-inout-recent-btn" data-type="${escapeHtml(t.key)}" style="width:100%;margin-bottom:8px;">🕘 Recent entries — edit / delete (past ${BACKFILL_MAX_DAYS_AGO + 1} days)</button>
           <p class="muted" style="margin:0 0 4px;font-size:0.8rem;font-weight:600;">Today:</p>
-          ${entries.length ? entries.map(e => `<p class="${e.BackfilledAt ? '' : 'muted'}" style="margin:2px 0;font-size:0.85rem;${e.BackfilledAt ? 'color:#8a6d00;font-weight:600;' : ''}">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${e.PhotoURL}" target="_blank" rel="noopener">📷</a>` : ''}${e.BackfilledAt ? ` · ✏️ ${escapeHtml(e.VehicleDetails || '')} (backfilled — added ${formatDate(e.BackfilledAt)})` : e.VehicleDetails ? ` · 🚚 ${escapeHtml(e.VehicleDetails)} (manual entry — no signal)` : ''}</p>`).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
+          ${entries.length ? entries.map(e => inOutEntryRowHtml(e)).join('') : '<p class="muted" style="font-size:0.85rem;">No entries today yet.</p>'}
         </div>
       `;
     }).join('');
@@ -1771,6 +1777,199 @@ const HSModule = (function () {
     bodyEl.querySelectorAll('.hs-backfill-btn').forEach(btn => {
       btn.addEventListener('click', () => openBackfillEntry(btn.dataset.type, container));
     });
+    bodyEl.querySelectorAll('.hs-inout-recent-btn').forEach(btn => {
+      btn.addEventListener('click', () => openInOutRecentDialog(btn.dataset.type, container));
+    });
+    wireInOutEntryButtons(bodyEl, logs, container, null);
+  }
+
+  // ADDED Oct 2026 — per explicit request: "a provision also needed for
+  // editing or deleting a wrong entry done in all categories." One entry
+  // row, shared by the live "Today" list and the Recent-entries dialog so
+  // both look and behave the same.
+  function inOutEntryRowHtml(e) {
+    return `<p class="${e.BackfilledAt ? '' : 'muted'}" style="margin:2px 0;font-size:0.85rem;${e.BackfilledAt ? 'color:#8a6d00;font-weight:600;' : ''}">${e.Direction} — ${formatDate(e.Timestamp)}${e.PhotoURL ? ` · <a href="${escapeHtml(e.PhotoURL)}" target="_blank" rel="noopener">📷</a>` : ''}${e.BackfilledAt ? ` · ✏️ ${escapeHtml(e.VehicleDetails || '')} (backfilled — added ${formatDate(e.BackfilledAt)})` : e.VehicleDetails ? ` · 🚚 ${escapeHtml(e.VehicleDetails)} (manual entry — no signal)` : ''}${e.EditedAt ? ` · <span style="color:#185fa5;">✎ corrected by ${escapeHtml(e.EditedBy || '')}</span>` : ''}
+      <button class="btn-secondary hs-inout-edit-btn" data-log-id="${escapeHtml(e.LogID)}" style="font-size:0.72rem;padding:2px 7px;margin:0 0 0 6px;">✏️</button>
+      <button class="btn-secondary hs-inout-delete-btn" data-log-id="${escapeHtml(e.LogID)}" style="font-size:0.72rem;padding:2px 7px;margin:0 0 0 2px;color:#b3261e;border-color:#b3261e;">🗑️</button></p>`;
+  }
+  function wireInOutEntryButtons(scopeEl, logs, container, onDone) {
+    scopeEl.querySelectorAll('.hs-inout-edit-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const log = logs.find(l => l.LogID === btn.dataset.logId);
+        if (log) openInOutEditDialog(log, container, onDone);
+      });
+    });
+    scopeEl.querySelectorAll('.hs-inout-delete-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const log = logs.find(l => l.LogID === btn.dataset.logId);
+        if (log) deleteInOutEntry(log, container, onDone);
+      });
+    });
+  }
+
+  // Everything logged for one type in the last BACKFILL_MAX_DAYS_AGO+1
+  // days, newest first — the live card only ever shows TODAY, so a wrong
+  // entry from yesterday (or a backfilled one) would otherwise have no way
+  // to be reached for correction.
+  async function openInOutRecentDialog(typeKey, container) {
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;max-height:85vh;overflow-y:auto;">
+        <h3 style="margin-top:0;">Recent entries — ${escapeHtml(typeKey)}</h3>
+        <div id="hs-inout-recent-body"><p class="muted">Loading…</p></div>
+        <button id="hs-inout-recent-close" class="btn-secondary" style="margin-top:10px;">Close</button>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#hs-inout-recent-close').addEventListener('click', () => modal.remove());
+    const bodyEl = modal.querySelector('#hs-inout-recent-body');
+    async function loadAndRender() {
+      try {
+        const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+        const from = new Date(); from.setHours(0, 0, 0, 0); from.setDate(from.getDate() - BACKFILL_MAX_DAYS_AGO);
+        const entries = rowsToObjs(rows, INOUT_LOG_COLS)
+          .filter(l => l.Type === typeKey && l.Timestamp && new Date(l.Timestamp) >= from)
+          .sort((a, b) => b.Timestamp.localeCompare(a.Timestamp));
+        bodyEl.innerHTML = entries.length ? entries.map(inOutEntryRowHtml).join('') : '<p class="muted">No entries in the last 7 days.</p>';
+        wireInOutEntryButtons(bodyEl, entries, container, loadAndRender);
+      } catch (e) {
+        bodyEl.innerHTML = `<p class="error-text">Could not load: ${escapeHtml(e.message)}</p>`;
+      }
+    }
+    await loadAndRender();
+  }
+
+  // How many back-to-back same-direction pairs (IN,IN or OUT,OUT) a
+  // type's timeline has — used to warn if an edit would make the IN/OUT
+  // alternation worse than it already was.
+  function inOutAdjacentDupCount(entries) {
+    const sorted = entries.slice().sort((a, b) => a.Timestamp.localeCompare(b.Timestamp));
+    let n = 0;
+    for (let i = 1; i < sorted.length; i++) if (sorted[i].Direction === sorted[i - 1].Direction) n++;
+    return n;
+  }
+
+  // Edit one existing entry — direction, date, time, vehicle details, and
+  // (for the photo-required types) replace the photo. Writes the SAME row
+  // in place so weekly compliance, dashboards and the Monthly Report all
+  // pick the correction up automatically. Looks the row up fresh by LogID
+  // at save time rather than trusting the rowNumber from when the list was
+  // drawn — a delete elsewhere in the meantime shifts every row below it.
+  function openInOutEditDialog(log, container, onDone) {
+    const typeDef = IN_OUT_TYPES.find(t => t.key === log.Type) || {};
+    const ts = new Date(log.Timestamp);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const minDateStr = isoDate(new Date(today.getTime() - BACKFILL_MAX_DAYS_AGO * 86400000));
+    const maxDateStr = isoDate(today);
+    const timeStr = String(ts.getHours()).padStart(2, '0') + ':' + String(ts.getMinutes()).padStart(2, '0');
+    let newPhoto = null;
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;">
+        <h3 style="margin-top:0;">Correct Entry — ${escapeHtml(log.Type)}</h3>
+        <label style="display:block;margin-bottom:8px;">Direction
+          <select id="hs-ioedit-dir" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+            <option value="IN" ${log.Direction === 'IN' ? 'selected' : ''}>IN</option>
+            <option value="OUT" ${log.Direction === 'OUT' ? 'selected' : ''}>OUT</option>
+          </select>
+        </label>
+        <div class="mvoa-row" style="gap:10px;">
+          <label style="flex:1;">Date
+            <input type="date" id="hs-ioedit-date" min="${minDateStr}" max="${maxDateStr}" value="${isoDate(ts)}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+          </label>
+          <label style="flex:1;">Time
+            <input type="time" id="hs-ioedit-time" value="${timeStr}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+          </label>
+        </div>
+        <label style="display:block;margin-top:8px;">Vehicle Details
+          <input type="text" id="hs-ioedit-vehicle" value="${escapeHtml(log.VehicleDetails || '')}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+        </label>
+        ${typeDef.needsPhoto ? `
+        <p class="muted" style="margin:8px 0 2px;font-size:0.85rem;">${log.PhotoURL ? `Current photo: <a href="${escapeHtml(log.PhotoURL)}" target="_blank" rel="noopener">📷 view</a>` : 'No photo on this entry.'} <span id="hs-ioedit-photo-note"></span></p>
+        <button id="hs-ioedit-photo-btn" class="btn-secondary" style="width:100%;">📷 ${log.PhotoURL ? 'Replace' : 'Add'} photo</button>` : ''}
+        <p class="error-text" id="hs-ioedit-err" style="min-height:1.2em;margin:8px 0 0;"></p>
+        <div class="mvoa-row" style="margin-top:10px;">
+          <button id="hs-ioedit-save" class="btn-primary">Save Correction</button>
+          <button id="hs-ioedit-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const errEl = modal.querySelector('#hs-ioedit-err');
+    modal.querySelector('#hs-ioedit-cancel').addEventListener('click', () => modal.remove());
+    const photoBtn = modal.querySelector('#hs-ioedit-photo-btn');
+    if (photoBtn) photoBtn.addEventListener('click', async () => {
+      const a = await MVOA.pickAttachment({ photoOnly: true, useCamera: false });
+      if (a) { newPhoto = a; modal.querySelector('#hs-ioedit-photo-note').textContent = `→ will be replaced with ${a.name}`; }
+    });
+    let isSaving = false;
+    modal.querySelector('#hs-ioedit-save').addEventListener('click', async () => {
+      if (isSaving) return;
+      errEl.textContent = '';
+      const direction = modal.querySelector('#hs-ioedit-dir').value;
+      const dateStr = modal.querySelector('#hs-ioedit-date').value;
+      const time = modal.querySelector('#hs-ioedit-time').value;
+      const vehicle = modal.querySelector('#hs-ioedit-vehicle').value.trim();
+      if (!dateStr || dateStr < minDateStr || dateStr > maxDateStr) { errEl.textContent = `Pick a date within the last ${BACKFILL_MAX_DAYS_AGO + 1} days.`; return; }
+      if (!time) { errEl.textContent = 'Enter the time.'; return; }
+      const [y, mo, d] = dateStr.split('-').map(Number);
+      const [h, mi] = time.split(':').map(Number);
+      const newTs = new Date(y, mo - 1, d, h, mi, 0, 0);
+      if (newTs > new Date()) { errEl.textContent = 'The time cannot be in the future.'; return; }
+      isSaving = true;
+      errEl.textContent = 'Saving…';
+      try {
+        const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+        const all = rowsToObjs(rows, INOUT_LOG_COLS);
+        const fresh = all.find(l => l.LogID === log.LogID);
+        if (!fresh) throw new Error('This entry no longer exists — it may have been deleted.');
+        const sameType = all.filter(l => l.Type === fresh.Type);
+        const after = sameType.map(l => l.LogID === fresh.LogID ? Object.assign({}, l, { Direction: direction, Timestamp: newTs.toISOString() }) : l);
+        if (inOutAdjacentDupCount(after) > inOutAdjacentDupCount(sameType) &&
+            !confirm(`This change would leave two ${direction === fresh.Direction ? direction : 'IN/OUT'} entries back-to-back for ${fresh.Type} (an IN without an OUT, or the reverse). Save anyway?`)) {
+          isSaving = false; errEl.textContent = ''; return;
+        }
+        let photoUrl = fresh.PhotoURL;
+        if (newPhoto) {
+          errEl.textContent = 'Uploading photo…';
+          photoUrl = await MVOA.uploadPhotoToDrive(newPhoto.file, `${fresh.LogID}_corrected_${newPhoto.name}`);
+        }
+        const user = MVOA.getUser();
+        const updated = Object.assign({}, fresh, {
+          Direction: direction, Timestamp: newTs.toISOString(), VehicleDetails: vehicle, PhotoURL: photoUrl,
+          EditedBy: user.name, EditedAt: new Date().toISOString()
+        });
+        await MVOA.sheetsUpdateRow(TAB_HS_INOUT_LOG, fresh.rowNumber, INOUT_LOG_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
+        try {
+          await MVOA.logAudit({ module: 'InOutLog', requestId: fresh.LogID, eventType: 'Entry corrected',
+            comment: `${fresh.Type}: ${fresh.Direction} ${fresh.Timestamp} → ${direction} ${newTs.toISOString()}` });
+        } catch (e) { /* best-effort */ }
+        modal.remove();
+        await renderInOutLog(container);
+        if (onDone) await onDone();
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        isSaving = false;
+      }
+    });
+  }
+
+  async function deleteInOutEntry(log, container, onDone) {
+    if (!confirm(`Delete this ${log.Type} ${log.Direction} entry (${formatDate(log.Timestamp)})? This cannot be undone.`)) return;
+    try {
+      const rows = await MVOA.sheetsRead(TAB_HS_INOUT_LOG);
+      const fresh = rowsToObjs(rows, INOUT_LOG_COLS).find(l => l.LogID === log.LogID);
+      if (!fresh) throw new Error('This entry no longer exists — it may already have been deleted.');
+      await MVOA.sheetsDeleteRows(TAB_HS_INOUT_LOG, [fresh.rowNumber]);
+      try {
+        await MVOA.logAudit({ module: 'InOutLog', requestId: fresh.LogID, eventType: 'Entry deleted',
+          comment: `${fresh.Type}: ${fresh.Direction} ${fresh.Timestamp} (logged by ${fresh.LoggedBy})` });
+      } catch (e) { /* best-effort */ }
+      await renderInOutLog(container);
+      if (onDone) await onDone();
+    } catch (e) {
+      alert('Could not delete: ' + e.message);
+    }
   }
 
   let isLoggingInOut = false;
