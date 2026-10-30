@@ -902,7 +902,7 @@ const FinanceModule = (function () {
   // MVOA.canViewFinanceSection/canEditFinanceSection) — one per top-level
   // tab. Must match exactly what an admin types as the "Section" for that
   // tab's rows in the PermissionsMatrix_Finance sheet.
-  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard', pettycash: 'Petty Cash', approvedats: 'Approved ATS' };
+  const FINANCE_TOP_TAB_SECTION = { spend: 'Spend Approval', payment: 'Payment Approval', budget: 'Budget', contracts: 'Contracts', dashboard: 'Dashboard', pettycash: 'Petty Cash', approvedats: 'Approved ATS', overview: 'Overview' };
   // Recomputed at the top of render() for whichever top-level tab is
   // currently open — 'Edit' lets every action through exactly as before;
   // 'ReadOnly' (a Title with an explicit Read Only row for this tab) hides
@@ -941,7 +941,7 @@ const FinanceModule = (function () {
     ];
     return [];
   }
-  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard', pettycash: 'pettycash', approvedats: 'approvedats' };
+  const TOP_TAB_DEFAULT_VIEW = { spend: 'mine', payment: 'payreq', budget: 'budget', contracts: 'contracts', dashboard: 'dashboard', pettycash: 'pettycash', approvedats: 'approvedats', overview: 'overview' };
 
   function render(container) {
     const realUser = MVOA.getUser();
@@ -1026,6 +1026,7 @@ const FinanceModule = (function () {
       // Permissions Matrix (a tab with no matrix rows yet stays open to
       // everyone — see canViewFinanceSection).
       const ALL_TOP_TABS = [
+        { key: 'overview', label: '🗂️ Overview' },
         { key: 'dashboard', label: '📈 Dashboard' },
         { key: 'spend', label: '📝 Spend Approval' },
         { key: 'payment', label: '💵 Payment Approval' },
@@ -1049,6 +1050,7 @@ const FinanceModule = (function () {
       // "new"; Contracts reuses the expiring-soon count already computed
       // for the banner above. Dashboard has no queue of its own.
       const topTabAlert = {
+        overview: null,
         dashboard: null,
         spend: (queueCountsSpend.newCount + mineCountsSpend.newCount + myApprovalsNewNoteCounts.spend) || null,
         payment: (queueCountsPayment.newCount + mineCountsPayment.newCount + paymentsCounts.newCount + myApprovalsNewNoteCounts.payment) || null,
@@ -1104,7 +1106,7 @@ const FinanceModule = (function () {
     // hiding that tab from the nav.
     if (!currentSectionCanEdit && (currentView === 'submit' || currentView === 'payreq')) currentView = 'mine';
     const subTabs = subTabsFor(currentTopTab, currentSectionCanEdit);
-    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'pettycash' ? '💰 Petty Cash' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : currentTopTab === 'approvedats' ? '🔒 Approved ATS' : '📄 Contracts';
+    const groupLabel = currentTopTab === 'spend' ? '📝 Spend Approval' : currentTopTab === 'payment' ? '💵 Payment Approval' : currentTopTab === 'pettycash' ? '💰 Petty Cash' : currentTopTab === 'budget' ? '📊 Budget' : currentTopTab === 'dashboard' ? '📈 Dashboard' : currentTopTab === 'approvedats' ? '🔒 Approved ATS' : currentTopTab === 'overview' ? '🗂️ Overview' : '📄 Contracts';
     const newNoteCount = currentTopTab === 'spend' ? myApprovalsNewNoteCounts.spend : myApprovalsNewNoteCounts.payment;
     const tabLabelHtml = (t) => t.view === 'myapprovals'
       ? `${t.label}${newNoteCount > 0 ? ` <span style="color:#b3261e;">(🆕 ${newNoteCount} new)</span>` : ''}`
@@ -1157,6 +1159,7 @@ const FinanceModule = (function () {
     else if (currentView === 'dashboard') renderDashboardTab(body, container);
     else if (currentView === 'pettycash') renderPettyCashLedger(body, container);
     else if (currentView === 'approvedats') renderApprovedAtsList(body, container);
+    else if (currentView === 'overview') renderOverviewTab(body, container);
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
   }
 
@@ -5670,6 +5673,232 @@ const FinanceModule = (function () {
   // Disable/Enable button itself still gates on canDisableAts (checked
   // against the REAL logged-in identity, same as everywhere else).
   // ───────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // OVERVIEW (ADDED Oct 2026) — one read-only place to see EVERY
+  // Approval to Spend (ATS) and Payment Request (ATP) that has ever been
+  // initiated, with where each one currently stands. Requested because
+  // the other tabs are all scoped to a workflow step (my requests, my
+  // queue, approved-only…), so there was no single "show me everything"
+  // view. Two ways to slice the same data:
+  //   • 'ats' — each ATS as a card with the ATPs raised against it nested
+  //     underneath (so you can see approved vs. actually-paid at a glance).
+  //   • 'atp' — every ATP grouped by what it was raised AGAINST: an ATS,
+  //     a Contract, or neither (Salaries, utilities, petty cash, etc. —
+  //     grouped by their Payment Type, which is stored in Category).
+  // Purely a reader: it never writes anything, so it's safe under View As
+  // and Read Only. Status text/colours come from the same stageDescription
+  // the other tabs use, so this can never disagree with them.
+  // ───────────────────────────────────────────────────────────
+  let overviewMode = 'ats';       // 'ats' | 'atp'
+  let overviewBucket = 'all';     // 'all' | 'pending' | 'approved' | 'paid' | 'rejected'
+  let overviewSearch = '';
+
+  const OVERVIEW_BUCKETS = [
+    { key: 'all', label: 'All' },
+    { key: 'pending', label: '⏳ Pending approval' },
+    { key: 'approved', label: '✅ Approved · not yet paid' },
+    { key: 'paid', label: '💰 Paid' },
+    { key: 'rejected', label: '🚫 Rejected / Withdrawn' }
+  ];
+  function overviewBucketOf(r) {
+    if (r.Status === 'Cancelled' || r.Status === 'Rejected') return 'rejected';
+    if (r.Status !== 'Approved') return 'pending';
+    let cls = '';
+    try { cls = stageDescriptionInner(r, []).cls; } catch (e) { /* fall through to 'approved' */ }
+    return cls === 'paid' ? 'paid' : 'approved';
+  }
+  // Where an ATP was raised against. An ATS link wins when that ATS
+  // actually exists; otherwise a ContractID; otherwise it's a standalone
+  // payment (Salaries, utilities, Petty Cash…). Both views use this one
+  // function so they always partition the ATPs identically.
+  function overviewAtpSource(p) {
+    if (p.LinkedSpendRequestID && requestsCache.some(x => x.RequestID === p.LinkedSpendRequestID)) return 'ats';
+    if (p.ContractID) return 'contract';
+    return 'other';
+  }
+
+  async function renderOverviewTab(body, container) {
+    body.innerHTML = `<p class="muted">Loading overview…</p>`;
+    let allApprovals = [];
+    try {
+      const approvalRows = await MVOA.sheetsRead(TAB_APPROVALS);
+      allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
+    } catch (e) { /* badges fall back to the coarse status below */ }
+
+    const byDateDesc = (a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || '');
+    const allAts = requestsCache.filter(r => r.RequestType !== 'PaymentRequest').sort(byDateDesc);
+    const allAtp = requestsCache.filter(r => r.RequestType === 'PaymentRequest').sort(byDateDesc);
+    const bucketCache = {};
+    const bucketOf = (r) => bucketCache[r.RequestID] || (bucketCache[r.RequestID] = overviewBucketOf(r));
+
+    const contractFor = (id) => contractsCache.find(c => c.ContractID === id);
+    const haystack = (r) => {
+      const parts = [r.RequestID, r.Category, r.Vendor, r.Description, r.RequestedBy, r.ContractID, r.LinkedSpendRequestID, r.PaymentRef];
+      const c = r.ContractID ? contractFor(r.ContractID) : null;
+      if (c) parts.push(c.Vendor, c.Nature);
+      const a = r.LinkedSpendRequestID ? requestsCache.find(x => x.RequestID === r.LinkedSpendRequestID) : null;
+      if (a) parts.push(a.Vendor, a.Category);
+      return parts.filter(Boolean).join(' ').toLowerCase();
+    };
+    const matches = (r) => {
+      if (overviewBucket !== 'all' && bucketOf(r) !== overviewBucket) return false;
+      const q = overviewSearch.trim().toLowerCase();
+      return !q || haystack(r).includes(q);
+    };
+
+    body.innerHTML = `
+      <div class="mvoa-row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+        <button class="ops-tab-btn ov-mode-btn" data-mode="ats">📋 By Approval to Spend (ATS)</button>
+        <button class="ops-tab-btn ov-mode-btn" data-mode="atp">💵 By Payment Request (ATP)</button>
+      </div>
+      <input id="ov-search" type="search" placeholder="Search ID, vendor, category, contract, requester…" style="width:100%;box-sizing:border-box;margin-bottom:8px;" value="${escapeHtml(overviewSearch)}">
+      <div id="ov-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;"></div>
+      <p id="ov-totals" class="muted" style="margin:0 0 10px;"></p>
+      <div id="ov-list"></div>`;
+
+    const trailCache = {};
+
+    function itemHtml(r, opts) {
+      const approvals = allApprovals.filter(a => a.RequestID === r.RequestID);
+      let badge;
+      try { badge = stageBadgeHtml(r, approvals); } catch (e) { badge = displayStatus(r); }
+      const isAtp = r.RequestType === 'PaymentRequest';
+      const bucket = bucketOf(r);
+      const paidOn = bucket === 'paid' && isAtp ? (r.PaymentReleaseDate ? formatDateOnly(r.PaymentReleaseDate) : r.PaymentDate ? formatDate(r.PaymentDate) : '') : '';
+      return `
+        <div class="mvoa-list-item" style="${opts && opts.nested ? 'margin:6px 0 0 14px;' : ''}">
+          <div class="mvoa-row">
+            <strong>${escapeHtml(r.RequestID)} · ${escapeHtml(r.Category)} — ${formatAmount(r.Amount)}</strong>
+            ${badge}
+          </div>
+          ${r.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(r.Vendor)}</p>` : ''}
+          ${opts && opts.showRef ? paymentReferenceLineHtml(r) : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">By ${escapeHtml(r.RequestedBy)} · ${formatDate(r.RequestedDate)}${paidOn ? ` · Paid ${escapeHtml(paidOn)}` : ''}${r.PaymentRef && bucket === 'paid' ? ` · Ref ${escapeHtml(r.PaymentRef)}` : ''}</p>
+          <button class="btn-secondary ov-detail-btn" data-request-id="${escapeHtml(r.RequestID)}" style="font-size:0.8rem;padding:4px 10px;">🔍 View Details</button>
+          <div class="ov-trail hidden" data-request-id="${escapeHtml(r.RequestID)}"></div>
+        </div>`;
+    }
+
+    function sumAmount(list) { return list.reduce((s, r) => s + (Number(r.Amount) || 0), 0); }
+
+    function drawChips() {
+      const base = overviewMode === 'ats' ? allAts : allAtp;
+      const count = (k) => k === 'all' ? base.length : base.filter(r => bucketOf(r) === k).length;
+      body.querySelector('#ov-chips').innerHTML = OVERVIEW_BUCKETS.map(b => {
+        const active = overviewBucket === b.key;
+        return `<button class="ov-chip" data-bucket="${b.key}" style="border-radius:14px;padding:4px 10px;font-size:0.82rem;cursor:pointer;border:1px solid var(--mvoa-blue);${active ? 'background:var(--mvoa-blue);color:#fff;' : 'background:#fff;color:var(--mvoa-blue);'}">${b.label} (${count(b.key)})</button>`;
+      }).join('');
+      body.querySelectorAll('.ov-chip').forEach(btn => btn.addEventListener('click', () => {
+        overviewBucket = btn.dataset.bucket;
+        drawChips(); drawList();
+      }));
+      body.querySelectorAll('.ov-mode-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.mode === overviewMode));
+    }
+
+    function drawList() {
+      const listEl = body.querySelector('#ov-list');
+      const totalsEl = body.querySelector('#ov-totals');
+      if (overviewMode === 'ats') drawAtsView(listEl, totalsEl); else drawAtpView(listEl, totalsEl);
+      listEl.querySelectorAll('.ov-detail-btn').forEach(btn => btn.addEventListener('click', async () => {
+        const id = btn.dataset.requestId;
+        const trailBody = listEl.querySelector(`.ov-trail[data-request-id="${id}"]`);
+        if (!trailBody.classList.contains('hidden')) { trailBody.classList.add('hidden'); return; }
+        trailBody.classList.remove('hidden');
+        const r = requestsCache.find(x => x.RequestID === id);
+        trailBody.innerHTML = `<p class="muted">Loading…</p>`;
+        try {
+          trailBody.innerHTML = await renderRequestTrailHtml(r, allApprovals.filter(a => a.RequestID === id));
+        } catch (e) {
+          trailBody.innerHTML = `<p class="error-text">Could not load the full trail: ${escapeHtml(e.message)}</p>`;
+        }
+      }));
+    }
+
+    function drawAtsView(listEl, totalsEl) {
+      const atpsOf = (ats) => allAtp.filter(p => p.LinkedSpendRequestID === ats.RequestID && overviewAtpSource(p) === 'ats');
+      const shown = [];
+      allAts.forEach(a => {
+        const kids = atpsOf(a);
+        const selfMatch = matches(a);
+        const kidMatches = kids.filter(matches);
+        if (!selfMatch && !kidMatches.length) return;
+        shown.push({ ats: a, kids: selfMatch ? kids : kidMatches });
+      });
+      const approvedAts = allAts.filter(a => ['approved', 'paid'].includes(bucketOf(a)));
+      const liveAtp = allAtp.filter(p => !['rejected'].includes(bucketOf(p)));
+      const paidAtp = allAtp.filter(p => bucketOf(p) === 'paid');
+      totalsEl.textContent = `${allAts.length} ATS · approved ${formatAmount(sumAmount(approvedAts))} · ${liveAtp.length} payment requests raised (${formatAmount(sumAmount(liveAtp))}) · ${paidAtp.length} paid (${formatAmount(sumAmount(paidAtp))})`;
+      const notAts = allAtp.filter(p => overviewAtpSource(p) !== 'ats');
+      const contractCount = notAts.filter(p => overviewAtpSource(p) === 'contract').length;
+      listEl.innerHTML = (shown.length ? shown.map(({ ats, kids }) => {
+        const live = atpsOf(ats).filter(p => bucketOf(p) !== 'rejected');
+        const raised = sumAmount(live);
+        const paid = sumAmount(live.filter(p => bucketOf(p) === 'paid'));
+        const summary = (bucketOf(ats) === 'approved' || bucketOf(ats) === 'paid') && atpsOf(ats).length
+          ? `<p class="muted" style="margin:4px 0;font-size:0.8rem;">Approved ${formatAmount(ats.Amount)} · payment requests raised ${formatAmount(raised)} · paid ${formatAmount(paid)}${raised > (Number(ats.Amount) || 0) ? ' <span style="color:#b3261e;">· ⚠️ exceeds approved spend</span>' : ''}</p>` : '';
+        return `<div style="margin-bottom:12px;">
+          ${itemHtml(ats)}
+          ${summary}
+          ${kids.length ? `<div style="margin-left:4px;"><p class="muted" style="margin:6px 0 0 14px;font-size:0.8rem;">💵 Payment requests against ${escapeHtml(ats.RequestID)}</p>${kids.map(k => itemHtml(k, { nested: true })).join('')}</div>` : ''}
+        </div>`;
+      }).join('') : `<p class="muted">Nothing matches the current filter.</p>`) +
+        (notAts.length ? `<p class="muted" style="margin-top:14px;">💵 ${notAts.length} payment request${notAts.length === 1 ? '' : 's'} aren't tied to an ATS (${contractCount} against contracts, ${notAts.length - contractCount} salaries / utilities / other). <a href="#" id="ov-to-atp">See them in the ATP view →</a></p>` : '');
+      const link = listEl.querySelector('#ov-to-atp');
+      if (link) link.addEventListener('click', (e) => { e.preventDefault(); overviewMode = 'atp'; drawChips(); drawList(); });
+    }
+
+    function drawAtpView(listEl, totalsEl) {
+      const live = allAtp.filter(p => bucketOf(p) !== 'rejected');
+      const paid = allAtp.filter(p => bucketOf(p) === 'paid');
+      totalsEl.textContent = `${allAtp.length} payment requests · ${formatAmount(sumAmount(live))} raised (excl. rejected/withdrawn) · ${paid.length} paid (${formatAmount(sumAmount(paid))})`;
+      const filtered = allAtp.filter(matches);
+      if (!filtered.length) { listEl.innerHTML = `<p class="muted">Nothing matches the current filter.</p>`; return; }
+      const group = (list, keyFn, titleFn) => {
+        const map = new Map();
+        list.forEach(p => { const k = keyFn(p); if (!map.has(k)) map.set(k, []); map.get(k).push(p); });
+        return [...map.entries()].map(([k, items]) => ({ key: k, title: titleFn(k, items), items }));
+      };
+      const section = (icon, title, list, subgroups) => {
+        if (!list.length) return '';
+        return `<details open style="margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:700;color:var(--mvoa-blue);margin-bottom:6px;">${icon} ${title} <span class="muted" style="font-weight:400;">· ${list.length} · ${formatAmount(sumAmount(list))}</span></summary>
+          ${subgroups.map(g => `
+            <details open style="margin:6px 0 6px 8px;">
+              <summary style="cursor:pointer;font-weight:600;">${g.title} <span class="muted" style="font-weight:400;">· ${g.items.length} · ${formatAmount(sumAmount(g.items))}</span></summary>
+              ${g.items.map(p => itemHtml(p, { showRef: g.showRef })).join('')}
+            </details>`).join('')}
+        </details>`;
+      };
+      const atsList = filtered.filter(p => overviewAtpSource(p) === 'ats');
+      const conList = filtered.filter(p => overviewAtpSource(p) === 'contract');
+      const othList = filtered.filter(p => overviewAtpSource(p) === 'other');
+      const atsGroups = group(atsList, p => p.LinkedSpendRequestID, (id) => {
+        const a = requestsCache.find(x => x.RequestID === id);
+        return `${escapeHtml(id)}${a ? ' — ' + escapeHtml(a.Category) + (a.Vendor ? ' — ' + escapeHtml(a.Vendor) : '') + ' (' + formatAmount(a.Amount) + ')' : ''}`;
+      });
+      const conGroups = group(conList, p => p.ContractID, (id) => {
+        const c = contractFor(id);
+        return c ? `${escapeHtml(c.Vendor)} — ${escapeHtml(c.Nature || c.Category)} (${escapeHtml(id)})` : `Contract ${escapeHtml(id)} (not found)`;
+      });
+      const othGroups = group(othList, p => p.Category || 'Other', (cat) => escapeHtml(cat));
+      listEl.innerHTML =
+        section('📋', 'Against an Approval to Spend', atsList, atsGroups) +
+        section('📄', 'Against a Contract', conList, conGroups) +
+        section('🧾', 'Salaries, utilities &amp; other (no ATS or contract)', othList, othGroups);
+    }
+
+    body.querySelector('#ov-search').addEventListener('input', (e) => {
+      overviewSearch = e.target.value;
+      drawList();
+    });
+    body.querySelectorAll('.ov-mode-btn').forEach(btn => btn.addEventListener('click', () => {
+      overviewMode = btn.dataset.mode;
+      drawChips(); drawList();
+    }));
+    drawChips();
+    drawList();
+  }
+
   async function renderApprovedAtsList(body, container) {
     const list = requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
       .sort((a, b) => (b.StageEnteredAt || b.RequestedDate || '').localeCompare(a.StageEnteredAt || a.RequestedDate || ''));
