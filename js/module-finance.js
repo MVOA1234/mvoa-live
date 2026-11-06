@@ -3525,10 +3525,10 @@ const FinanceModule = (function () {
     // approved" by, falling back to RequestedDate for any older row from
     // before StageEnteredAt existed), and last few actually paid.
     const recentApprovedSpend = requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
-      .sort((a, b) => (b.StageEnteredAt || b.RequestedDate || '').localeCompare(a.StageEnteredAt || a.RequestedDate || ''))
+      .sort(compareRequestedDesc)
       .slice(0, 5);
     const recentPaid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
-      .sort((a, b) => (b.PaymentDate || b.ClosedDate || '').localeCompare(a.PaymentDate || a.ClosedDate || ''))
+      .sort(compareRequestedDesc)
       .slice(0, 5);
 
     // The .card divs below get an explicit width:100%;box-sizing:border-box
@@ -3626,11 +3626,11 @@ const FinanceModule = (function () {
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:16px;">
           <div>
             <strong style="font-size:0.85rem;">📝 Recent Approval to Spend</strong>
-            ${recentApprovedSpend.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentApprovedSpend.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.StageEnteredAt || r.RequestedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
+            ${recentApprovedSpend.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentApprovedSpend.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — initiated ${formatDate(r.RequestedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
           </div>
           <div>
             <strong style="font-size:0.85rem;">💰 Recently Paid</strong>
-            ${recentPaid.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentPaid.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — ${formatDate(r.PaymentDate || r.ClosedDate)}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
+            ${recentPaid.length ? `<div class="muted" style="font-size:0.8rem;margin-top:4px;">${recentPaid.map(r => `${escapeHtml(r.Category)} — ${formatAmount(r.Amount)} — initiated ${formatDate(r.RequestedDate)}${(r.PaymentDate || r.ClosedDate) ? ' · paid ' + formatDate(r.PaymentDate || r.ClosedDate) : ''}`).join('<br>')}</div>` : `<p class="muted" style="font-size:0.8rem;margin-top:4px;">None yet.</p>`}
           </div>
         </div>
       </div>
@@ -5376,7 +5376,16 @@ const FinanceModule = (function () {
         if (!req) return true; // don't hide history just because the request record can't be found
         return filterMode === 'spend' ? req.RequestType !== 'PaymentRequest' : req.RequestType === 'PaymentRequest';
       })
-      .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
+      // REVISED Nov 2026 — newest-INITIATED request first (same as every
+      // other list); the decision time only breaks ties between several
+      // decisions on the same request.
+      .sort((a, b) => {
+        const ra = requestsCache.find(r => r.RequestID === a.RequestID);
+        const rb = requestsCache.find(r => r.RequestID === b.RequestID);
+        if (ra && rb && ra.RequestID !== rb.RequestID) return compareRequestedDesc(ra, rb);
+        if (!!ra !== !!rb) return ra ? -1 : 1; // history with no matching request sinks to the bottom
+        return (b.Timestamp || '').localeCompare(a.Timestamp || '');
+      });
     if (!mine.length) {
       body.innerHTML = `<p class="muted">You haven't approved or rejected anything yet.</p>`;
       return;
@@ -6748,7 +6757,7 @@ const FinanceModule = (function () {
     const pendingTreasurer = requestsCache.filter(r => r.DisbursementStage === 'PendingTreasurer');
     const pendingPayment = requestsCache.filter(r => r.DisbursementStage === 'PendingPayment');
     const paid = requestsCache.filter(r => r.DisbursementStage === 'Paid')
-      .sort((a, b) => (b.ClosedDate || '').localeCompare(a.ClosedDate || '')).slice(0, 10);
+      .sort(compareRequestedDesc).slice(0, 10);
     body.innerHTML = `<p class="muted">Loading…</p>`;
     // Gap found in testing: "Sent back for correction" was the one
     // section in the whole app without a new-note flag — its Treasurer
