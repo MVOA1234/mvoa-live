@@ -662,7 +662,12 @@ const FinanceModule = (function () {
       MVOA.sheetsRead(TAB_NOTES, force).catch(() => null)
     ]);
     rulesCache = ruleRows.slice(1).map((r, i) => rowToObj(RULE_COLS, r, i + 2)).filter(r => r.RuleID);
-    requestsCache = reqRows.slice(1).map((r, i) => rowToObj(REQUEST_COLS, r, i + 2)).filter(r => r.RequestID);
+    // ADDED Nov 2026 — newest-initiated first, everywhere: every list in
+    // this module is built by filtering requestsCache, so sorting it once
+    // here (rather than in each list) keeps all of them consistent.
+    // rowNumber is stamped from the ORIGINAL sheet position by rowToObj, so
+    // reordering the in-memory array never affects sheet writes.
+    requestsCache = reqRows.slice(1).map((r, i) => rowToObj(REQUEST_COLS, r, i + 2)).filter(r => r.RequestID).sort(compareRequestedDesc);
     if (roleRows.length) {
       const rolesCols = buildRolesCols(roleRows[0]);
       rolesCache = roleRows.slice(1).map((r, i) => rowToObj(rolesCols, r, i + 2)).filter(r => r.Name);
@@ -1768,6 +1773,14 @@ const FinanceModule = (function () {
     renderContractsList(body, container);
   }
 
+  // Newest RequestedDate first; ties (and any unparseable date) fall back to
+  // RequestID descending so the order is always stable and deterministic.
+  function compareRequestedDesc(a, b) {
+    const ta = Date.parse(a.RequestedDate), tb = Date.parse(b.RequestedDate);
+    if (!isNaN(ta) && !isNaN(tb) && ta !== tb) return tb - ta;
+    if (isNaN(ta) !== isNaN(tb)) return isNaN(ta) ? 1 : -1; // undated rows sink to the bottom
+    return String(b.RequestID || '').localeCompare(String(a.RequestID || ''), undefined, { numeric: true });
+  }
   function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
@@ -3091,6 +3104,7 @@ const FinanceModule = (function () {
           <strong>${escapeHtml(req.Category)} — ${formatAmount(req.Amount)}</strong>
           <span class="mvoa-badge" style="color:#8a4b00;background:#fff1de;">🆕 New — tap to open</span>
         </div>
+        <p class="muted" style="margin:4px 0;font-size:0.8rem;">Initiated by ${escapeHtml(req.RequestedBy || '—')} · ${formatDate(req.RequestedDate)}</p>
         ${summaryLine || ''}
       </div>`;
   }
@@ -5478,7 +5492,7 @@ const FinanceModule = (function () {
     const user = effectiveUser();
     const list = requestsCache.filter(r => r.RequestedBy === user.name)
       .filter(r => !filterMode || (filterMode === 'spend' ? r.RequestType !== 'PaymentRequest' : r.RequestType === 'PaymentRequest'))
-      .sort((a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || ''));
+      .sort(compareRequestedDesc);
     if (!list.length) {
       body.innerHTML = `<p class="muted">You haven't submitted any requests yet.</p>`;
       return;
@@ -5741,7 +5755,7 @@ const FinanceModule = (function () {
       allApprovals = approvalRows.slice(1).map((r, i) => rowToObj(APPROVAL_COLS, r, i + 2));
     } catch (e) { /* badges fall back to the coarse status below */ }
 
-    const byDateDesc = (a, b) => (b.RequestedDate || '').localeCompare(a.RequestedDate || '');
+    const byDateDesc = compareRequestedDesc;
     const allAts = requestsCache.filter(r => r.RequestType !== 'PaymentRequest').sort(byDateDesc);
     const allAtp = requestsCache.filter(r => r.RequestType === 'PaymentRequest').sort(byDateDesc);
     const bucketCache = {};
@@ -5917,7 +5931,7 @@ const FinanceModule = (function () {
 
   async function renderApprovedAtsList(body, container) {
     const list = requestsCache.filter(r => r.RequestType !== 'PaymentRequest' && r.Status === 'Approved')
-      .sort((a, b) => (b.StageEnteredAt || b.RequestedDate || '').localeCompare(a.StageEnteredAt || a.RequestedDate || ''));
+      .sort(compareRequestedDesc);
     if (!list.length) {
       body.innerHTML = `<p class="muted">No Approval-to-Spend requests have been fully approved yet.</p>`;
       return;
@@ -6884,6 +6898,7 @@ const FinanceModule = (function () {
               <span class="mvoa-badge" style="color:#8a6d00;background:#fdf1cf;">Awaiting review</span>
             </div>
             ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+            <p class="muted" style="margin:4px 0;font-size:0.85rem;">Initiated by <strong>${escapeHtml(req.RequestedBy || '—')}</strong> · ${formatDate(req.RequestedDate)}</p>
             ${entry ? `
               <p class="muted" style="margin:4px 0;font-size:0.85rem;">Invoice ${escapeHtml(entry.row.InvoiceNumber || '—')} · Gross ${formatAmount(entry.row.GrossAmount)} · GST ${escapeHtml(entry.row.GST || '0')} · TDS ${escapeHtml(entry.row.TDS || '0')} · Net ${formatAmount(entry.row.NetAmount)}</p>
             ` : '<p class="error-text" style="font-size:0.85rem;">Could not load the Expense Sheet entry.</p>'}
@@ -6978,6 +6993,7 @@ const FinanceModule = (function () {
             <span class="mvoa-badge" style="color:#0f6e56;background:#eaf5ef;">Treasurer approved</span>
           </div>
           ${req.Vendor ? `<p class="muted" style="margin:4px 0;">To: ${escapeHtml(req.Vendor)}</p>` : ''}
+          <p class="muted" style="margin:4px 0;font-size:0.8rem;">Initiated by ${escapeHtml(req.RequestedBy || '—')} · ${formatDate(req.RequestedDate)}</p>
           ${currentSectionCanEdit ? `
           <div style="margin-top:8px;">
             <select class="fin-bank-select" data-request-id="${escapeHtml(req.RequestID)}" style="width:100%;margin-bottom:6px;">
