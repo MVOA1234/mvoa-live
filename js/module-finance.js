@@ -634,7 +634,7 @@ const FinanceModule = (function () {
     // (.catch(() => null) instead of try/catch — same effect).
     const [
       ruleRows, reqRows, roleRows,
-      budgetRows, revRows, contractRows, pRuleRows
+      budgetRows, revRows, contractRows, pRuleRows, /* approvals prefetch */ , /* notes prefetch */ , pcEntryRows, pcMonthRows
     ] = await Promise.all([
       MVOA.sheetsRead(TAB_RULES, force),
       MVOA.sheetsRead(TAB_REQUESTS, force),
@@ -659,8 +659,12 @@ const FinanceModule = (function () {
       // code), but sheetsRead() caches each tab for ~12s, so those reads
       // now land on a warm cache instead of making fresh network calls.
       MVOA.sheetsRead(TAB_APPROVALS, force).catch(() => null),
-      MVOA.sheetsRead(TAB_NOTES, force).catch(() => null)
+      MVOA.sheetsRead(TAB_NOTES, force).catch(() => null),
+      // Petty Cash register (added Nov 2026) — optional tabs, auto-created on first save
+      MVOA.sheetsRead(TAB_PC_ENTRIES, force).catch(() => null),
+      MVOA.sheetsRead(TAB_PC_MONTHS, force).catch(() => null)
     ]);
+    pcSetCaches(pcEntryRows, pcMonthRows);
     rulesCache = ruleRows.slice(1).map((r, i) => rowToObj(RULE_COLS, r, i + 2)).filter(r => r.RuleID);
     // ADDED Nov 2026 — newest-initiated first, everywhere: every list in
     // this module is built by filtering requestsCache, so sorting it once
@@ -996,7 +1000,16 @@ const FinanceModule = (function () {
           ${rolesCache.filter(p => p.Name && p.Name !== realUser.name).map(p => `<option value="${escapeHtml(p.Name)}" ${viewAsPerson && viewAsPerson.Name === p.Name ? 'selected' : ''}>${escapeHtml(p.Name)}</option>`).join('')}
         </select>
       </span>` : '';
+    // ADDED Nov 2026 — Petty Cash register flag: a past month whose entries
+    // haven't been confirmed complete by the 7th of the following month.
+    // Only shown to the people who can see the register.
+    const pcOverdue = pcIsViewer(pcViewPerson()) ? pcOverdueMonths() : [];
     const headerHtml = `
+      ${pcOverdue.length ? `
+        <div class="mvoa-list-item" style="border:1px solid #b3261e;margin-bottom:12px;">
+          <p style="margin:0 0 4px;font-weight:600;color:#b3261e;">💰 Petty Cash — entries not confirmed complete</p>
+          <p style="margin:2px 0;">${pcOverdue.map(k => escapeHtml(pcMonthLabel(k))).join(', ')} — due by the ${PC_DUE_DAY}th of the following month. The FM should record any remaining entries and confirm the month complete in 💰 Petty Cash.</p>
+        </div>` : ''}
       ${expiringContracts.length ? `
         <div class="mvoa-list-item" style="border:1px solid #b3261e;margin-bottom:12px;">
           <p style="margin:0 0 8px;font-weight:600;color:#b3261e;">📄 Contract Expiring Soon</p>
@@ -1060,18 +1073,22 @@ const FinanceModule = (function () {
         spend: (queueCountsSpend.newCount + mineCountsSpend.newCount + myApprovalsNewNoteCounts.spend) || null,
         payment: (queueCountsPayment.newCount + mineCountsPayment.newCount + paymentsCounts.newCount + myApprovalsNewNoteCounts.payment) || null,
         budget: pendingBudgetRevisionsCount || null,
-        contracts: expiringContracts.length || null
+        contracts: expiringContracts.length || null,
+        pettycash: pcOverdue.length || null
       };
       const topTabAlertHtml = (key) => {
         const n = topTabAlert[key];
         if (!n) return '';
         const isNew = key === 'spend' || key === 'payment';
-        const color = isNew || key === 'contracts' ? '#b3261e' : '#8a6d00';
-        const bg = isNew || key === 'contracts' ? '#fbeaea' : '#fdf1cf';
-        const text = isNew ? `🆕 ${n} new` : key === 'contracts' ? `⚠️ ${n} expiring` : `${n} pending`;
+        const color = isNew || key === 'contracts' || key === 'pettycash' ? '#b3261e' : '#8a6d00';
+        const bg = isNew || key === 'contracts' || key === 'pettycash' ? '#fbeaea' : '#fdf1cf';
+        const text = isNew ? `🆕 ${n} new` : key === 'contracts' ? `⚠️ ${n} expiring` : key === 'pettycash' ? `⚠️ ${n} month${n === 1 ? '' : 's'} overdue` : `${n} pending`;
         return ` <span style="color:${color};background:${bg};border-radius:10px;padding:1px 7px;font-size:0.8rem;font-weight:600;">${text}</span>`;
       };
-      const visibleTopTabs = ALL_TOP_TABS.filter(t => MVOA.canViewFinanceSection(FINANCE_TOP_TAB_SECTION[t.key], user));
+      const visibleTopTabs = ALL_TOP_TABS.filter(t => MVOA.canViewFinanceSection(FINANCE_TOP_TAB_SECTION[t.key], user))
+        // Petty Cash register: FM / Treasurer / Secretary / President (and admins) only,
+        // regardless of the permissions matrix.
+        .filter(t => t.key !== 'pettycash' || pcIsViewer(pcViewPerson()));
       container.innerHTML = `
         ${headerHtml}
         ${visibleTopTabs.length ? `
@@ -1162,7 +1179,7 @@ const FinanceModule = (function () {
     }
     else if (currentView === 'contracts') { if (contractsSubView === 'form') renderContractForm(body, container); else renderContractsList(body, container); }
     else if (currentView === 'dashboard') renderDashboardTab(body, container);
-    else if (currentView === 'pettycash') renderPettyCashLedger(body, container);
+    else if (currentView === 'pettycash') renderPettyCashRegister(body, container);
     else if (currentView === 'approvedats') renderApprovedAtsList(body, container);
     else if (currentView === 'overview') renderOverviewTab(body, container);
     else renderMine(body, container, currentTopTab === 'spend' ? 'spend' : currentTopTab === 'payment' ? 'payment' : null);
@@ -1199,6 +1216,542 @@ const FinanceModule = (function () {
       myApprovalsNewNoteCounts = await computeMyApprovalsNewNoteCounts(false, effectiveUser());
     } catch (e) { /* best-effort — worst case these two catch up on the next Refresh */ }
     render(container);
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // PETTY CASH REGISTER (ADDED Nov 2026) — replaces the old request/
+  // approval flow for Petty Cash. Initiation and approval now happen OFF
+  // the app; the FM records every cash-in and expense here, mirroring the
+  // "Details for Cash expenses" sheet (Date | Cash on hand (opening) | Inv
+  // No. | Name of the party | Expense incurred by | Nature of the expense |
+  // Amount | Document upload (optional) | Cash on hand (closing)).
+  //
+  // Two new sheet tabs (auto-created on first save):
+  //   FinancePettyCashRegister — one row per entry (PC_ENTRY_COLS).
+  //   FinancePettyCashMonths   — one row per month that has been given an
+  //     explicit opening balance and/or confirmed complete (PC_MONTH_COLS).
+  //
+  // Opening/closing "cash on hand" are never stored per row: they are
+  // recomputed in date order every time (pcBuildLedger), so editing or
+  // deleting an entry automatically re-flows every balance after it.
+  // A month's opening is the previous month's closing, unless that month
+  // has an explicit OpeningBalance row (the first-ever opening, or a
+  // Treasurer adjustment).
+  //
+  // Who: visible to FM, Treasurer, Secretary, President (and admins).
+  // FM adds entries and edits them while the month is open; the Treasurer
+  // (and admins) can edit any entry at any time, delete with a reason, and
+  // reopen a completed month. FM confirms a past month "complete"; until
+  // then a flag is raised from the 7th of the following month.
+  // ══════════════════════════════════════════════════════════════════
+  const TAB_PC_ENTRIES = 'FinancePettyCashRegister';
+  const TAB_PC_MONTHS = 'FinancePettyCashMonths';
+  const PC_ENTRY_COLS = ['EntryID','EntryDate','EntryType','InvoiceNo','PartyName','IncurredBy','Nature','Amount','DocURLs','EnteredBy','EnteredAt','EditedBy','EditedAt'];
+  const PC_MONTH_COLS = ['MonthKey','OpeningBalance','CompletedBy','CompletedAt','ReopenedBy','ReopenedAt'];
+  const PC_DUE_DAY = 7;   // previous month must be confirmed complete by this day of the next month
+  const PC_MAX_DOCS = 3;
+  let pcEntriesCache = [];
+  let pcMonthsCache = [];
+  let pcSelectedMonth = null;
+
+  function pcSetCaches(entryRows, monthRows) {
+    pcEntriesCache = entryRows ? entryRows.slice(1).map((r, i) => rowToObj(PC_ENTRY_COLS, r, i + 2)).filter(e => e.EntryID) : [];
+    pcMonthsCache = monthRows ? monthRows.slice(1).map((r, i) => rowToObj(PC_MONTH_COLS, r, i + 2)).filter(m => m.MonthKey) : [];
+  }
+  async function pcLoad(force) {
+    const [entryRows, monthRows] = await Promise.all([
+      MVOA.sheetsRead(TAB_PC_ENTRIES, force).catch(() => null),
+      MVOA.sheetsRead(TAB_PC_MONTHS, force).catch(() => null)
+    ]);
+    pcSetCaches(entryRows, monthRows);
+  }
+
+  // ── small date helpers ('YYYY-MM' month keys, 'YYYY-MM-DD' entry dates)
+  const PC_MONTH_RE = /^\d{4}-\d{2}$/;
+  const PC_DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+  function pcMonthOf(dateStr) { return String(dateStr || '').slice(0, 7); }
+  function pcMonthLabel(key) {
+    const [y, m] = key.split('-').map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+  }
+  function pcAddMonths(key, n) {
+    const [y, m] = key.split('-').map(Number);
+    const d = new Date(y, m - 1 + n, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+  function pcAmt(e) { return Number(e.Amount) || 0; }
+  function pcMonthRow(key) { return pcMonthsCache.find(m => m.MonthKey === key); }
+  function pcIsCompleted(key) { const m = pcMonthRow(key); return !!(m && m.CompletedAt); }
+  function pcExplicitOpening(m) {
+    if (!m || m.OpeningBalance == null || String(m.OpeningBalance).trim() === '') return undefined;
+    const n = Number(m.OpeningBalance);
+    return isNaN(n) ? undefined : n;
+  }
+  function pcCompareEntries(a, b) {
+    if (a.EntryDate !== b.EntryDate) return String(a.EntryDate).localeCompare(String(b.EntryDate));
+    if ((a.EnteredAt || '') !== (b.EnteredAt || '')) return String(a.EnteredAt || '').localeCompare(String(b.EnteredAt || ''));
+    return String(a.EntryID).localeCompare(String(b.EntryID), undefined, { numeric: true });
+  }
+  function pcDocUrls(e) { return String(e.DocURLs || '').split('|').map(s => s.trim()).filter(Boolean); }
+
+  // Builds the full running ledger. excludeEntryId lets the entry form ask
+  // "what would cash on hand be without the entry I'm editing?".
+  function pcBuildLedger(excludeEntryId) {
+    const entries = pcEntriesCache.filter(e => e.EntryID !== excludeEntryId && PC_DATE_RE.test(e.EntryDate || ''));
+    const explicit = {};
+    pcMonthsCache.forEach(m => {
+      const v = pcExplicitOpening(m);
+      if (v !== undefined && PC_MONTH_RE.test(m.MonthKey)) explicit[m.MonthKey] = v;
+    });
+    const candidates = [...Object.keys(explicit), ...entries.map(e => pcMonthOf(e.EntryDate))].sort();
+    if (!candidates.length) return { start: null, end: null, byMonth: {}, keys: [] };
+    const start = candidates[0];
+    let end = candidates[candidates.length - 1];
+    const cur = currentMonthStr();
+    if (cur > end) end = cur;
+    const byMonth = {}, keys = [];
+    let running = 0;
+    for (let k = start, guard = 0; k <= end && guard < 600; k = pcAddMonths(k, 1), guard++) {
+      if (explicit[k] !== undefined) running = explicit[k];
+      const opening = running;
+      let expense = 0, cashIn = 0;
+      const rows = entries.filter(e => pcMonthOf(e.EntryDate) === k).sort(pcCompareEntries).map(e => {
+        const op = running;
+        const a = pcAmt(e);
+        if (e.EntryType === 'CashIn') { running += a; cashIn += a; } else { running -= a; expense += a; }
+        return Object.assign({}, e, { _opening: op, _closing: running });
+      });
+      byMonth[k] = { opening, closing: running, rows, expense, cashIn };
+      keys.push(k);
+    }
+    return { start, end, byMonth, keys };
+  }
+  // Cash on hand at the END of the given date (used for the over-balance warning).
+  function pcBalanceAsOf(dateStr, excludeEntryId) {
+    const L = pcBuildLedger(excludeEntryId);
+    const key = pcMonthOf(dateStr);
+    const prev = L.byMonth[key];
+    if (!prev) {
+      // Date is outside the ledger range — nothing recorded yet, so use the latest known closing.
+      const lastKey = L.keys[L.keys.length - 1];
+      return lastKey ? L.byMonth[lastKey].closing : 0;
+    }
+    let bal = prev.opening;
+    prev.rows.forEach(r => { if (r.EntryDate <= dateStr) bal = r._closing; });
+    return bal;
+  }
+  // Past months (from the register's first month) not yet confirmed complete
+  // whose "complete by the 7th" deadline has passed.
+  function pcOverdueMonths() {
+    const L = pcBuildLedger();
+    if (!L.start) return [];
+    const cur = currentMonthStr();
+    const lastDue = new Date().getDate() >= PC_DUE_DAY ? pcAddMonths(cur, -1) : pcAddMonths(cur, -2);
+    const out = [];
+    for (let k = L.start, guard = 0; k <= lastDue && guard < 600; k = pcAddMonths(k, 1), guard++) {
+      if (!pcIsCompleted(k)) out.push(k);
+    }
+    return out;
+  }
+
+  // ── who can do what
+  function pcIsFm(p) { return roleMatchesToken(p, 'fm') || (p.Title || '').toLowerCase().indexOf('finance manager') !== -1; }
+  function pcIsTreasurerLike(p) { return isTreasurerPerson(p) || isAdmin(p); }
+  function pcIsViewer(p) { return pcIsFm(p) || isTreasurerPerson(p) || isSecretaryPerson(p) || isPresidentPerson(p) || isAdmin(p); }
+  function pcViewPerson() {
+    const u = effectiveUser();
+    return rolesCache.find(p => p.Name === u.name) || { Name: u.name, Role: u.role, Title: u.title };
+  }
+
+  async function pcSaveMonthRow(key, patch) {
+    await MVOA.sheetsEnsureTab(TAB_PC_MONTHS, PC_MONTH_COLS);
+    await pcLoad(true);
+    const existing = pcMonthRow(key);
+    if (existing) {
+      await MVOA.sheetsUpdateRow(TAB_PC_MONTHS, existing.rowNumber, objToRow(PC_MONTH_COLS, Object.assign({}, existing, patch)));
+    } else {
+      await MVOA.sheetsAppend(TAB_PC_MONTHS, objToRow(PC_MONTH_COLS, Object.assign({ MonthKey: key, OpeningBalance: '', CompletedBy: '', CompletedAt: '', ReopenedBy: '', ReopenedAt: '' }, patch)));
+    }
+  }
+  function pcAudit(entryId, eventType, comment) {
+    return MVOA.logAudit({ module: 'Finance', requestId: entryId || '', eventType, comment: comment || '', statusAfter: '' });
+  }
+
+  function renderPettyCashRegister(body, container) {
+    const viewer = pcViewPerson();
+    if (!pcIsViewer(viewer)) {
+      body.innerHTML = `<p class="muted">The Petty Cash register is visible to the FM, Treasurer, Secretary and President only.</p>`;
+      return;
+    }
+    const real = currentPerson();
+    const user = MVOA.getUser();
+    const canWrite = currentSectionCanEdit && !isViewingAs();
+    const realIsFm = pcIsFm(real);
+    const realTres = pcIsTreasurerLike(real);
+    const L = pcBuildLedger();
+    const cur = currentMonthStr();
+
+    // ── Nothing recorded yet: first-time setup of the opening cash on hand
+    if (!L.start) {
+      const canSetup = canWrite && (realIsFm || realTres);
+      const options = [0, -1, -2, -3, -4, -5].map(n => pcAddMonths(cur, n));
+      body.innerHTML = `
+        <div class="card" style="max-width:520px;margin:0;">
+          <h3 style="margin-top:0;">💰 Petty Cash Register</h3>
+          <p class="muted">Petty Cash requests and approvals now happen off the app; the FM records every cash-in and expense here. To start the register, set the cash on hand at the beginning of the first month.</p>
+          ${canSetup ? `
+            <label>Register starts from
+              <select id="pc-setup-month" style="width:100%;margin-bottom:8px;">${options.map(m => `<option value="${m}">${escapeHtml(pcMonthLabel(m))}</option>`).join('')}</select>
+            </label>
+            <label>Opening cash on hand (₹) on the 1st of that month
+              <input type="number" id="pc-setup-amount" min="0" step="0.01" style="width:100%;box-sizing:border-box;margin-bottom:8px;">
+            </label>
+            <p class="error-text" id="pc-setup-err" style="min-height:1em;"></p>
+            <button class="btn-primary" id="pc-setup-btn" style="margin:0;">Start Register</button>
+          ` : `<p class="muted">Waiting for the FM or Treasurer to set the opening balance.</p>`}
+        </div>`;
+      const btn = body.querySelector('#pc-setup-btn');
+      if (btn) btn.addEventListener('click', async () => {
+        const amt = body.querySelector('#pc-setup-amount').value;
+        const errEl = body.querySelector('#pc-setup-err');
+        if (amt === '' || isNaN(Number(amt)) || Number(amt) < 0) { errEl.textContent = 'Please enter the opening cash on hand (zero or more).'; return; }
+        const key = body.querySelector('#pc-setup-month').value;
+        setBtnBusy(btn, 'Saving…');
+        try {
+          await pcSaveMonthRow(key, { OpeningBalance: Number(amt) });
+          await pcAudit('', 'Petty Cash register started', `Opening cash on hand ${formatAmount(Number(amt))} for ${pcMonthLabel(key)}`);
+          await pcLoad(true);
+          render(container);
+        } catch (e) {
+          errEl.textContent = 'Could not save: ' + e.message;
+          clearBtnBusy(btn, 'Start Register');
+        }
+      });
+      return;
+    }
+
+    // ── Month selection
+    const keysNewestFirst = L.keys.slice().reverse();
+    if (!pcSelectedMonth || !L.byMonth[pcSelectedMonth]) pcSelectedMonth = L.keys.includes(cur) ? cur : keysNewestFirst[0];
+    const month = pcSelectedMonth;
+    const M = L.byMonth[month];
+    const monthRow = pcMonthRow(month);
+    const completed = pcIsCompleted(month);
+    const isPast = month < cur;
+    const dueDate = new Date(Number(pcAddMonths(month, 1).slice(0, 4)), Number(pcAddMonths(month, 1).slice(5)) - 1, PC_DUE_DAY);
+    const overdue = !completed && new Date() >= dueDate && isPast;
+    const overdueMonths = pcOverdueMonths();
+
+    const canAdd = canWrite && (realIsFm || realTres) && (realTres || !completed);
+    const canConfirm = canWrite && (realIsFm || realTres) && isPast && !completed;
+    const canReopen = canWrite && realTres && completed;
+    const canEntryEdit = (e) => canWrite && (realTres || (realIsFm && !pcIsCompleted(pcMonthOf(e.EntryDate))));
+    const canEntryDelete = canWrite && realTres;
+
+    const statusHtml = completed
+      ? `<p style="margin:0 0 10px;color:#1e6b33;">✅ Confirmed complete by <strong>${escapeHtml(monthRow.CompletedBy)}</strong> on ${formatDate(monthRow.CompletedAt)}${realIsFm && !realTres ? ' — locked; ask the Treasurer if something needs correcting.' : ''}</p>`
+      : isPast
+        ? `<p style="margin:0 0 10px;color:${overdue ? '#b3261e' : '#8a6d00'};font-weight:600;">${overdue ? '⚠️ Overdue — ' : '⏳ '}${escapeHtml(pcMonthLabel(month))} entries not yet confirmed complete (due by the ${PC_DUE_DAY}th of ${escapeHtml(pcMonthLabel(pcAddMonths(month, 1)))}).</p>`
+        : `<p class="muted" style="margin:0 0 10px;">Current month — open for entries.</p>`;
+    const otherOverdue = overdueMonths.filter(k => k !== month);
+
+    const rowsHtml = M.rows.map(e => {
+      const isIn = e.EntryType === 'CashIn';
+      const docs = pcDocUrls(e).map((u, i) => `<a href="${escapeHtml(u)}" target="_blank" rel="noopener">📎 ${i + 1}</a>`).join(' ');
+      const actions = [
+        canEntryEdit(e) ? `<button class="btn-secondary pc-edit-btn" data-entry-id="${escapeHtml(e.EntryID)}" style="font-size:0.75rem;padding:3px 8px;margin:0 4px 4px 0;">✏️ Edit</button>` : '',
+        canEntryDelete ? `<button class="btn-secondary pc-del-btn" data-entry-id="${escapeHtml(e.EntryID)}" style="font-size:0.75rem;padding:3px 8px;margin:0 0 4px;color:#b3261e;">🗑️</button>` : ''
+      ].join('');
+      return `<tr>
+        <td style="white-space:nowrap;">${escapeHtml(formatDateOnly(e.EntryDate))}</td>
+        <td style="text-align:right;">${formatAmount(e._opening)}</td>
+        <td>${isIn ? '' : escapeHtml(e.InvoiceNo || '')}</td>
+        <td>${escapeHtml(e.PartyName || '')}</td>
+        <td>${escapeHtml(e.IncurredBy || '')}</td>
+        <td>${isIn ? '💵 <strong>Cash in</strong> — ' : ''}${escapeHtml(e.Nature || '')}
+          <br><span class="muted" style="font-size:0.75rem;">Entered by ${escapeHtml(e.EnteredBy || '—')} · ${formatDate(e.EnteredAt)}${e.EditedBy ? ` · ✏️ edited by ${escapeHtml(e.EditedBy)} · ${formatDate(e.EditedAt)}` : ''}</span></td>
+        <td style="text-align:right;color:#b3261e;">${isIn ? '' : formatAmount(pcAmt(e))}</td>
+        <td style="text-align:right;color:#1e6b33;">${isIn ? formatAmount(pcAmt(e)) : ''}</td>
+        <td style="text-align:right;font-weight:600;">${formatAmount(e._closing)}</td>
+        <td style="white-space:nowrap;">${docs || '<span class="muted">—</span>'}</td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join('');
+
+    const tile = (label, value, color) => `<div style="flex:1 1 130px;border:1px solid #dde3ea;border-radius:8px;padding:8px 10px;background:#fff;"><div class="muted" style="font-size:0.75rem;">${label}</div><div style="font-size:1.1rem;font-weight:700;${color ? 'color:' + color + ';' : ''}">${value}</div></div>`;
+
+    body.innerHTML = `
+      <div class="card">
+        <div class="mvoa-row" style="margin-bottom:10px;flex-wrap:wrap;gap:10px;align-items:center;">
+          <h3 style="margin:0;">💰 Petty Cash Register — ${escapeHtml(pcMonthLabel(month))}</h3>
+          <label style="margin:0;">Month
+            <select id="pc-month-select">
+              ${keysNewestFirst.map(k => `<option value="${k}" ${k === month ? 'selected' : ''}>${escapeHtml(pcMonthLabel(k))}${k === cur ? ' (current)' : ''}${!pcIsCompleted(k) && k < cur ? ' ⏳' : ''}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        ${otherOverdue.length ? `<p style="margin:0 0 10px;color:#b3261e;font-weight:600;">⚠️ Also not yet confirmed complete: ${otherOverdue.map(k => escapeHtml(pcMonthLabel(k))).join(', ')}</p>` : ''}
+        ${statusHtml}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+          ${canAdd ? `<button class="btn-primary" id="pc-add-btn" style="margin:0;">➕ Add Entry</button>` : ''}
+          ${canConfirm ? `<button class="btn-secondary" id="pc-confirm-btn" style="margin:0;">✅ Confirm ${escapeHtml(pcMonthLabel(month))} complete</button>` : ''}
+          ${canReopen ? `<button class="btn-secondary" id="pc-reopen-btn" style="margin:0;">🔓 Reopen month</button>` : ''}
+          ${canWrite && realTres ? `<button class="btn-secondary" id="pc-opening-btn" style="margin:0;" title="Overrides the amount carried forward from the previous month">✏️ Opening balance</button>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+          ${tile('Opening cash on hand', formatAmount(M.opening))}
+          ${tile('Cash in', formatAmount(M.cashIn), '#1e6b33')}
+          ${tile('Expenses', formatAmount(M.expense), '#b3261e')}
+          ${tile(month === cur ? 'Cash on hand now' : 'Closing cash on hand', formatAmount(M.closing), M.closing < 0 ? '#b3261e' : '')}
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="mvoa-table" style="min-width:900px;">
+            <thead>
+              <tr>
+                <th>Date</th><th style="text-align:right;">Cash on hand<br><span class="muted" style="font-weight:400;">(opening)</span></th>
+                <th>Inv No.</th><th>Name of the party<br><span class="muted" style="font-weight:400;">(bill / vendor)</span></th>
+                <th>Expense incurred by<br><span class="muted" style="font-weight:400;">(MVOA staff)</span></th><th>Nature of the expense</th>
+                <th style="text-align:right;">Expense<br><span class="muted" style="font-weight:400;">(INR)</span></th><th style="text-align:right;">Cash in<br><span class="muted" style="font-weight:400;">(INR)</span></th>
+                <th style="text-align:right;">Cash on hand<br><span class="muted" style="font-weight:400;">(closing)</span></th><th>Documents</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || `<tr><td colspan="11" class="muted" style="text-align:center;">No entries recorded for ${escapeHtml(pcMonthLabel(month))}.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    body.querySelector('#pc-month-select').addEventListener('change', (e) => {
+      pcSelectedMonth = e.target.value;
+      renderPettyCashRegister(body, container);
+    });
+    const addBtn = body.querySelector('#pc-add-btn');
+    if (addBtn) addBtn.addEventListener('click', () => openPcEntryDialog(null, container, month));
+    body.querySelectorAll('.pc-edit-btn').forEach(btn => btn.addEventListener('click', () => openPcEntryDialog(btn.dataset.entryId, container, month)));
+    body.querySelectorAll('.pc-del-btn').forEach(btn => btn.addEventListener('click', () => {
+      const e = pcEntriesCache.find(x => x.EntryID === btn.dataset.entryId);
+      if (!e) return;
+      const reason = prompt(`Delete this entry (${formatDateOnly(e.EntryDate)} — ${e.Nature || e.PartyName || ''} — ${formatAmount(pcAmt(e))})?\nPlease enter the reason for deleting it:`);
+      if (!reason || !reason.trim()) return;
+      runOnce(btn, 'Deleting…', async () => {
+        try {
+          await pcLoad(true);
+          const fresh = pcEntriesCache.find(x => x.EntryID === e.EntryID);
+          if (!fresh) throw new Error('Entry not found — refresh and try again');
+          await MVOA.sheetsDeleteRows(TAB_PC_ENTRIES, [fresh.rowNumber]);
+          await pcAudit(e.EntryID, 'Petty Cash entry deleted', `${user.name} deleted: ${fresh.EntryDate} · ${fresh.EntryType} · ${fresh.PartyName || ''} · ${fresh.Nature || ''} · ${formatAmount(pcAmt(fresh))}. Reason: ${reason.trim()}`);
+          await pcLoad(true);
+          render(container);
+        } catch (err) { alert('Could not delete: ' + err.message); }
+      });
+    }));
+    const confirmBtn = body.querySelector('#pc-confirm-btn');
+    if (confirmBtn) confirmBtn.addEventListener('click', () => {
+      const note = M.rows.length ? '' : '\n\nNo entries were recorded for this month.';
+      if (!confirm(`Confirm that ALL ${pcMonthLabel(month)} petty cash entries are recorded?${note}\n\nThe month will then be locked for the FM (the Treasurer can still edit).`)) return;
+      runOnce(confirmBtn, 'Saving…', async () => {
+        try {
+          await pcSaveMonthRow(month, { CompletedBy: user.name, CompletedAt: new Date().toISOString(), ReopenedBy: '', ReopenedAt: '' });
+          await pcAudit('', 'Petty Cash month confirmed complete', pcMonthLabel(month));
+          await pcLoad(true);
+          render(container);
+        } catch (err) { alert('Could not save: ' + err.message); }
+      });
+    });
+    const reopenBtn = body.querySelector('#pc-reopen-btn');
+    if (reopenBtn) reopenBtn.addEventListener('click', () => {
+      if (!confirm(`Reopen ${pcMonthLabel(month)}? The FM will be able to add and edit entries again, and the month will count as not complete until it is confirmed again.`)) return;
+      runOnce(reopenBtn, 'Reopening…', async () => {
+        try {
+          await pcSaveMonthRow(month, { CompletedBy: '', CompletedAt: '', ReopenedBy: user.name, ReopenedAt: new Date().toISOString() });
+          await pcAudit('', 'Petty Cash month reopened', pcMonthLabel(month));
+          await pcLoad(true);
+          render(container);
+        } catch (err) { alert('Could not save: ' + err.message); }
+      });
+    });
+    const openingBtn = body.querySelector('#pc-opening-btn');
+    if (openingBtn) openingBtn.addEventListener('click', () => {
+      const v = prompt(`Opening cash on hand for ${pcMonthLabel(month)} (₹).\nThis overrides the amount carried forward from the previous month (currently ${formatAmount(M.opening)}).`, M.opening);
+      if (v === null) return;
+      if (v.trim() === '' || isNaN(Number(v))) { alert('Please enter a number.'); return; }
+      runOnce(openingBtn, 'Saving…', async () => {
+        try {
+          await pcSaveMonthRow(month, { OpeningBalance: Number(v) });
+          await pcAudit('', 'Petty Cash opening balance set', `${pcMonthLabel(month)}: ${formatAmount(M.opening)} → ${formatAmount(Number(v))}`);
+          await pcLoad(true);
+          render(container);
+        } catch (err) { alert('Could not save: ' + err.message); }
+      });
+    });
+  }
+
+  // Add / edit dialog. existingId null = new entry. Documents: existing
+  // ones can be removed individually and new ones added (up to PC_MAX_DOCS).
+  function openPcEntryDialog(existingId, container, presetMonth) {
+    const existing = existingId ? pcEntriesCache.find(e => e.EntryID === existingId) : null;
+    if (existingId && !existing) return;
+    const real = currentPerson();
+    const realTres = pcIsTreasurerLike(real);
+    const user = MVOA.getUser();
+    const today = todayYmd();
+    let defaultDate = today;
+    if (!existing && presetMonth && presetMonth !== currentMonthStr()) defaultDate = presetMonth + '-01';
+    const keptUrls = existing ? pcDocUrls(existing) : [];
+    const removedUrls = [];
+    const pendingNew = [];
+    const staffNames = [...new Set(rolesCache.map(p => p.Name).filter(Boolean))];
+
+    const modal = document.createElement('div');
+    modal.className = 'ops-qr-modal';
+    modal.innerHTML = `
+      <div class="ops-qr-box" style="text-align:left;max-height:90vh;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+        <button id="pc-dlg-close" class="btn-secondary" style="position:sticky;top:0;float:right;z-index:1;">✕ Close</button>
+        <h3 style="margin-top:0;">${existing ? '✏️ Edit' : '➕ Add'} Petty Cash Entry${existing ? ' — ' + escapeHtml(existing.EntryID) : ''}</h3>
+        <div style="display:flex;gap:14px;margin-bottom:10px;flex-wrap:wrap;">
+          <label style="margin:0;"><input type="radio" name="pc-type" value="Expense" ${!existing || existing.EntryType !== 'CashIn' ? 'checked' : ''}> Expense</label>
+          <label style="margin:0;"><input type="radio" name="pc-type" value="CashIn" ${existing && existing.EntryType === 'CashIn' ? 'checked' : ''}> Cash in</label>
+        </div>
+        <label>Date <input type="date" id="pc-date" max="${today}" value="${escapeHtml(existing ? String(existing.EntryDate).slice(0, 10) : defaultDate)}" style="width:100%;box-sizing:border-box;margin-bottom:8px;"></label>
+        <label>Amount (₹) <input type="number" id="pc-amount" min="0" step="0.01" value="${existing ? escapeHtml(String(pcAmt(existing))) : ''}" style="width:100%;box-sizing:border-box;margin-bottom:4px;"></label>
+        <p id="pc-balance-warn" style="margin:0 0 8px;color:#b3261e;font-size:0.85rem;min-height:1em;"></p>
+        <div id="pc-expense-only">
+          <label>Inv No. <input type="text" id="pc-inv" placeholder="Invoice / bill number, or 'No bill'" value="${escapeHtml(existing ? existing.InvoiceNo || '' : '')}" style="width:100%;box-sizing:border-box;margin-bottom:8px;"></label>
+        </div>
+        <label><span id="pc-party-label">Name of the party (bill / vendor name)</span> <input type="text" id="pc-party" placeholder="N.A. if not applicable" value="${escapeHtml(existing ? existing.PartyName || '' : '')}" style="width:100%;box-sizing:border-box;margin-bottom:8px;"></label>
+        <div id="pc-expense-only-2">
+          <label>Expense incurred by (MVOA staff name) <input type="text" id="pc-by" list="pc-staff-list" value="${escapeHtml(existing ? existing.IncurredBy || '' : '')}" style="width:100%;box-sizing:border-box;margin-bottom:8px;"></label>
+          <datalist id="pc-staff-list">${staffNames.map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
+        </div>
+        <label><span id="pc-nature-label">Nature of the expense</span> <input type="text" id="pc-nature" value="${escapeHtml(existing ? existing.Nature || '' : '')}" style="width:100%;box-sizing:border-box;margin-bottom:8px;"></label>
+        <p style="margin:6px 0 4px;font-weight:600;">Documents <span class="muted" style="font-weight:400;">(optional, up to ${PC_MAX_DOCS})</span></p>
+        <div id="pc-kept-docs"></div>
+        <div id="pc-new-chips"></div>
+        <div id="pc-new-btns" style="margin-bottom:8px;"></div>
+        <p class="error-text" id="pc-dlg-err" style="min-height:1em;margin:4px 0;"></p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="pc-dlg-save" class="btn-primary" style="margin:0;">${existing ? 'Save Changes' : 'Save Entry'}</button>
+          <button id="pc-dlg-cancel" class="btn-secondary" style="margin:0;">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const q = (sel) => modal.querySelector(sel);
+    const close = () => { if (modal.parentNode) modal.parentNode.removeChild(modal); };
+    q('#pc-dlg-close').addEventListener('click', close);
+    q('#pc-dlg-cancel').addEventListener('click', close);
+
+    const typeVal = () => modal.querySelector('input[name="pc-type"]:checked').value;
+    function syncType() {
+      const isIn = typeVal() === 'CashIn';
+      q('#pc-expense-only').style.display = isIn ? 'none' : '';
+      q('#pc-expense-only-2').style.display = isIn ? 'none' : '';
+      q('#pc-party-label').textContent = isIn ? 'Cash received from' : 'Name of the party (bill / vendor name)';
+      q('#pc-nature-label').textContent = isIn ? 'Remarks / purpose' : 'Nature of the expense';
+      checkBalance();
+    }
+    function checkBalance() {
+      const warn = q('#pc-balance-warn');
+      const amt = Number(q('#pc-amount').value) || 0;
+      const date = q('#pc-date').value;
+      if (typeVal() !== 'Expense' || !amt || !PC_DATE_RE.test(date)) { warn.textContent = ''; return; }
+      const bal = pcBalanceAsOf(date, existing ? existing.EntryID : null);
+      warn.textContent = amt > bal ? `⚠️ This is more than the cash on hand (${formatAmount(bal)}) as of that date — please double-check.` : `Cash on hand before this entry: ${formatAmount(bal)}`;
+      warn.style.color = amt > bal ? '#b3261e' : '';
+    }
+    function renderKept() {
+      const el = q('#pc-kept-docs');
+      el.innerHTML = keptUrls.map((u, i) => `
+        <div class="mvoa-row" style="margin-bottom:4px;">
+          <span>📄 <a href="${escapeHtml(u)}" target="_blank" rel="noopener">Uploaded document ${i + 1}</a></span>
+          <button class="btn-secondary pc-kept-remove" data-idx="${i}" style="padding:4px 10px;margin:0;">✕ Remove</button>
+        </div>`).join('');
+      el.querySelectorAll('.pc-kept-remove').forEach(btn => btn.addEventListener('click', () => {
+        removedUrls.push(keptUrls.splice(parseInt(btn.dataset.idx), 1)[0]);
+        renderKept();
+      }));
+      // New-document picker sized to whatever room is left after the kept ones.
+      renderDocAttachmentPicker(modal, '#pc-new-chips', '#pc-new-btns', pendingNew, [], Math.max(0, PC_MAX_DOCS - keptUrls.length));
+      if (keptUrls.length >= PC_MAX_DOCS && !pendingNew.length) {
+        q('#pc-new-btns').innerHTML = `<p class="muted" style="margin:0;">Maximum ${PC_MAX_DOCS} documents — remove one to add another.</p>`;
+      }
+    }
+    // renderDocAttachmentPicker re-renders itself when a pending one is removed/added;
+    // when a kept one is removed the room changes, so renderKept() re-sizes it.
+    modal.querySelectorAll('input[name="pc-type"]').forEach(r => r.addEventListener('change', syncType));
+    q('#pc-amount').addEventListener('input', checkBalance);
+    q('#pc-date').addEventListener('change', checkBalance);
+    renderKept();
+    syncType();
+
+    const saveBtn = q('#pc-dlg-save');
+    saveBtn.addEventListener('click', async () => {
+      const errEl = q('#pc-dlg-err');
+      errEl.textContent = '';
+      const type = typeVal();
+      const isIn = type === 'CashIn';
+      const date = q('#pc-date').value;
+      const amount = Number(q('#pc-amount').value);
+      const inv = q('#pc-inv').value.trim();
+      const party = q('#pc-party').value.trim();
+      const by = q('#pc-by').value.trim();
+      const nature = q('#pc-nature').value.trim();
+      if (!PC_DATE_RE.test(date)) { errEl.textContent = 'Please choose a date.'; return; }
+      if (date > todayYmd()) { errEl.textContent = 'The date cannot be in the future.'; return; }
+      if (!(amount > 0)) { errEl.textContent = 'Please enter an amount greater than zero.'; return; }
+      if (!isIn && !by) { errEl.textContent = 'Please enter who incurred the expense (MVOA staff name).'; return; }
+      if (!nature) { errEl.textContent = isIn ? 'Please enter a remark / purpose for this cash in.' : 'Please enter the nature of the expense.'; return; }
+      if (isIn && !party) { errEl.textContent = 'Please enter who the cash was received from.'; return; }
+      setBtnBusy(saveBtn, 'Saving…');
+      try {
+        await MVOA.sheetsEnsureTab(TAB_PC_ENTRIES, PC_ENTRY_COLS);
+        await pcLoad(true); // fresh view: lock state, row numbers and next ID
+        const fresh = existing ? pcEntriesCache.find(e => e.EntryID === existing.EntryID) : null;
+        if (existing && !fresh) throw new Error('This entry no longer exists — refresh and try again.');
+        // Lock check against BOTH the old and new month: the FM may not move an entry into or out of a completed month.
+        const months = [pcMonthOf(date)];
+        if (fresh) months.push(pcMonthOf(fresh.EntryDate));
+        if (!realTres && months.some(m => pcIsCompleted(m))) {
+          throw new Error('That month has been confirmed complete and is locked — ask the Treasurer to make this change.');
+        }
+        const entryId = fresh ? fresh.EntryID : MVOA.nextId('PCE', pcEntriesCache.map(e => e.EntryID));
+        const uploaded = [];
+        for (let i = 0; i < pendingNew.length; i++) {
+          uploaded.push(await MVOA.uploadPhotoToDrive(pendingNew[i].file, `${entryId}_doc${i + 1}_${pendingNew[i].name}`));
+        }
+        const now = new Date().toISOString();
+        const row = {
+          EntryID: entryId, EntryDate: date, EntryType: type,
+          InvoiceNo: isIn ? '' : (inv || 'No bill'),
+          PartyName: party || 'N.A.', IncurredBy: isIn ? '' : by, Nature: nature, Amount: amount,
+          DocURLs: keptUrls.concat(uploaded).join('|'),
+          EnteredBy: fresh ? fresh.EnteredBy : user.name, EnteredAt: fresh ? fresh.EnteredAt : now,
+          EditedBy: fresh ? user.name : '', EditedAt: fresh ? now : ''
+        };
+        if (fresh) {
+          await MVOA.sheetsUpdateRow(TAB_PC_ENTRIES, fresh.rowNumber, objToRow(PC_ENTRY_COLS, row));
+          const changes = [];
+          if (fresh.EntryDate !== date) changes.push(`date ${fresh.EntryDate}→${date}`);
+          if (pcAmt(fresh) !== amount) changes.push(`amount ${formatAmount(pcAmt(fresh))}→${formatAmount(amount)}`);
+          if ((fresh.Nature || '') !== nature) changes.push('nature');
+          if ((fresh.PartyName || '') !== row.PartyName) changes.push('party');
+          if (removedUrls.length || uploaded.length) changes.push(`documents (−${removedUrls.length} +${uploaded.length})`);
+          await pcAudit(entryId, 'Petty Cash entry edited', changes.join('; ') || 'saved without field changes');
+        } else {
+          await MVOA.sheetsAppend(TAB_PC_ENTRIES, objToRow(PC_ENTRY_COLS, row));
+          await pcAudit(entryId, 'Petty Cash entry added', `${type} ${formatAmount(amount)} — ${nature}`);
+        }
+        // Reclaim Drive space for documents the user removed — best-effort, the entry is already saved.
+        for (const u of removedUrls) { try { await MVOA.deletePhotoFromDrive(u); } catch (e) { /* non-critical */ } }
+        pcSelectedMonth = pcMonthOf(date);
+        await pcLoad(true);
+        close();
+        render(container);
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        clearBtnBusy(saveBtn, existing ? 'Save Changes' : 'Save Entry');
+      }
+    });
   }
 
   // ───────────────────────────────────────────────────────────
@@ -1910,7 +2463,9 @@ const FinanceModule = (function () {
   // DoFA matrix rather than hardcoded thresholds.
   // ───────────────────────────────────────────────────────────
   function selectableCategories() {
-    return [...new Set(rulesCache.filter(r => r.RuleID !== 'R03').map(r => r.ExpenseCategory))].sort((a, b) => a.localeCompare(b));
+    // Petty Cash is no longer raised through Spend Approval (Nov 2026) — it
+    // is recorded in the Petty Cash register instead.
+    return [...new Set(rulesCache.filter(r => r.RuleID !== 'R03' && r.ExpenseCategory !== 'Petty Cash').map(r => r.ExpenseCategory))].sort((a, b) => a.localeCompare(b));
   }
 
   // Categories offered on the Contracts form specifically — everything
@@ -3378,6 +3933,26 @@ const FinanceModule = (function () {
           ${dashboardRequestsTableHtml(ctx.paidThisMonthRows, { label: 'Paid', field: 'PaymentDate' })}
         </div>`;
     }
+    if (key === 'pettyCashSpendThisMonth' && ctx.pcUsingRegister) {
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml(`Petty Cash Spend This Month — ${ctx.pcSpendRows.length}`, closeId)}
+          ${ctx.pcSpendRows.length ? `
+            <div style="overflow-x:auto;width:100%;">
+            <table class="mvoa-table" style="width:100%;">
+              <thead><tr><th>Date</th><th>Party</th><th>Incurred by</th><th>Nature</th><th>Amount</th></tr></thead>
+              <tbody>${ctx.pcSpendRows.map(e => `<tr><td>${escapeHtml(formatDateOnly(e.EntryDate))}</td><td>${escapeHtml(e.PartyName || '')}</td><td>${escapeHtml(e.IncurredBy || '')}</td><td>${escapeHtml(e.Nature || '')}</td><td>${formatAmount(pcAmt(e))}</td></tr>`).join('')}</tbody>
+            </table></div>` : `<p class="muted">No petty cash expenses recorded this month.</p>`}
+        </div>`;
+    }
+    if (key === 'pettyCashBalance' && ctx.pcUsingRegister) {
+      const m = ctx.pcCurMonth || { opening: 0, cashIn: 0, expense: 0, closing: 0 };
+      return `
+        <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
+          ${dashboardPanelHeaderHtml('Petty Cash Balance — how it’s made up (this month)', closeId)}
+          <p style="margin:4px 0;font-size:0.85rem;">Opening ${formatAmount(m.opening)} + Cash in ${formatAmount(m.cashIn)} − Expenses ${formatAmount(m.expense)} = <strong>${formatAmount(m.closing)}</strong></p>
+        </div>`;
+    }
     if (key === 'pettyCashSpendThisMonth') {
       return `
         <div class="card" style="background:#f7f9fb;margin-top:10px;margin-bottom:16px;">
@@ -3497,8 +4072,16 @@ const FinanceModule = (function () {
       const d = new Date(r.PaymentDate);
       return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
     });
-    const pettyCashSpendThisMonthAmount = pettyCashSpendThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
-    const pettyCashBalance = computeFloatBalance();
+    // REVISED Nov 2026 — once the Petty Cash register is in use, the tiles read
+    // from it (entries recorded by the FM) instead of the old Payment Request flow.
+    const pcLedgerNow = pcBuildLedger();
+    const pcUsingRegister = !!pcLedgerNow.start;
+    const pcCurMonth = pcLedgerNow.byMonth[currentMonthStr()];
+    const pcSpendRows = pcCurMonth ? pcCurMonth.rows.filter(e => e.EntryType !== 'CashIn') : [];
+    const pettyCashSpendThisMonthAmount = pcUsingRegister ? pcSpendRows.reduce((s, e) => s + pcAmt(e), 0)
+      : pettyCashSpendThisMonthRows.reduce((s, r) => s + (Number(r.Amount) || 0), 0);
+    const pettyCashSpendCount = pcUsingRegister ? pcSpendRows.length : pettyCashSpendThisMonthRows.length;
+    const pettyCashBalance = pcUsingRegister ? (pcCurMonth ? pcCurMonth.closing : 0) : computeFloatBalance();
 
     // Oldest pending — every request still open (see isRequestTerminal,
     // which already covers every stage: PendingApproval, NeedsExpenseEntry,
@@ -3555,6 +4138,7 @@ const FinanceModule = (function () {
       fy, budgetRowsFy, budgetTotals, remaining,
       pendingApprovalAll, pendingPaymentRows, paidThisMonthRows,
       pettyCashSpendThisMonthRows, pettyCashBalance,
+      pcUsingRegister, pcSpendRows, pcCurMonth,
       pendingApprovalsStageMap: dashboardStatDrilldownStageMap
     };
     body.innerHTML = `
@@ -3565,8 +4149,8 @@ const FinanceModule = (function () {
         ${dashboardStatTileHtml('Pending Approvals', String(pendingApprovalAll.length), `${pendingApprovalSpendRows.length} spend · ${pendingApprovalPaymentRows.length} payment`, null, 'pendingApprovals', dashboardStatDrilldownKey === 'pendingApprovals')}
         ${dashboardStatTileHtml('Awaiting Disbursement', formatAmount(awaitingDisbursementAmount), `${pendingPaymentRows.length} request(s)`, null, 'awaitingDisbursement', dashboardStatDrilldownKey === 'awaitingDisbursement')}
         ${dashboardStatTileHtml('Paid This Month', formatAmount(paidThisMonthAmount), `${paidThisMonthRows.length} payment(s)`, null, 'paidThisMonth', dashboardStatDrilldownKey === 'paidThisMonth')}
-        ${dashboardStatTileHtml('Petty Cash Spend This Month', formatAmount(pettyCashSpendThisMonthAmount), `${pettyCashSpendThisMonthRows.length} entr${pettyCashSpendThisMonthRows.length === 1 ? 'y' : 'ies'}`, null, 'pettyCashSpendThisMonth', dashboardStatDrilldownKey === 'pettyCashSpendThisMonth')}
-        ${dashboardStatTileHtml('Petty Cash Balance (with FM)', formatAmount(pettyCashBalance), `of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below minimum' : ''}`, pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? '#b3261e' : '#1e6b33', 'pettyCashBalance', dashboardStatDrilldownKey === 'pettyCashBalance')}
+        ${dashboardStatTileHtml('Petty Cash Spend This Month', formatAmount(pettyCashSpendThisMonthAmount), `${pettyCashSpendCount} entr${pettyCashSpendCount === 1 ? 'y' : 'ies'}`, null, 'pettyCashSpendThisMonth', dashboardStatDrilldownKey === 'pettyCashSpendThisMonth')}
+        ${dashboardStatTileHtml('Petty Cash Balance (with FM)', formatAmount(pettyCashBalance), pcUsingRegister ? 'cash on hand per the Petty Cash register' : `of ${formatAmount(PETTY_CASH_FLOAT_TARGET)} target float${pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN ? ' — below minimum' : ''}`, (pcUsingRegister ? pettyCashBalance < 0 : pettyCashBalance < PETTY_CASH_OPERATIONAL_MIN) ? '#b3261e' : '#1e6b33', 'pettyCashBalance', dashboardStatDrilldownKey === 'pettyCashBalance')}
       </div>
       <div style="margin-bottom:16px;">
         ${dashboardStatDrilldownKey ? dashboardStatDrilldownPanelHtml(dashboardStatDrilldownKey, statCtx) : ''}
@@ -3798,7 +4382,11 @@ const FinanceModule = (function () {
       body.innerHTML = `<p class="muted">Payment Requests aren't set up yet — add rows to the <strong>FinancePaymentRules</strong> sheet (one per Schedule D Payment Type) to enable this.</p>`;
       return;
     }
-    const paymentTypes = [...new Set(paymentRulesCache.map(r => r.PaymentType))].sort((a, b) => a.localeCompare(b));
+    // Petty Cash Payment / Replenishment are no longer raised as Payment Requests (Nov 2026) —
+    // Petty Cash is recorded in the Petty Cash register instead.
+    const paymentTypes = [...new Set(paymentRulesCache.map(r => r.PaymentType))]
+      .filter(t => t !== PETTY_CASH_PAYMENT_TYPE && t !== PETTY_CASH_REPLENISHMENT_PAYMENT_TYPE)
+      .sort((a, b) => a.localeCompare(b));
     body.innerHTML = `
       <div class="card" style="max-width:560px;margin:0;">
         <label>Payment Type
