@@ -1496,6 +1496,7 @@ const FinanceModule = (function () {
           ${canAdd ? `<button class="btn-primary" id="pc-add-btn" style="margin:0;">➕ Add Entry</button>` : ''}
           ${canConfirm ? `<button class="btn-secondary" id="pc-confirm-btn" style="margin:0;">✅ Confirm ${escapeHtml(pcMonthLabel(month))} complete</button>` : ''}
           ${canReopen ? `<button class="btn-secondary" id="pc-reopen-btn" style="margin:0;">🔓 Reopen month</button>` : ''}
+          <button class="btn-secondary" id="pc-print-btn" style="margin:0;">🖨️ Print / Save as PDF</button>
           ${canWrite && realTres ? `<button class="btn-secondary" id="pc-opening-btn" style="margin:0;" title="Overrides the amount carried forward from the previous month">✏️ Opening balance</button>` : ''}
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
@@ -1526,6 +1527,7 @@ const FinanceModule = (function () {
       pcSelectedMonth = e.target.value;
       renderPettyCashRegister(body, container);
     });
+    body.querySelector('#pc-print-btn').addEventListener('click', () => printPcStatement(month, M, { completed, monthRow, user }));
     const addBtn = body.querySelector('#pc-add-btn');
     if (addBtn) addBtn.addEventListener('click', () => openPcEntryDialog(null, container, month));
     body.querySelectorAll('.pc-edit-btn').forEach(btn => btn.addEventListener('click', () => openPcEntryDialog(btn.dataset.entryId, container, month)));
@@ -1585,6 +1587,91 @@ const FinanceModule = (function () {
         } catch (err) { alert('Could not save: ' + err.message); }
       });
     });
+  }
+
+  // ADDED Nov 2026 — printable monthly statement ("Details for Cash expenses"),
+  // opened in a new tab and sent straight to the browser's print dialog,
+  // where "Save as PDF" produces the PDF. Same approach as the Plant Rounds
+  // reports. Read-only, so it's offered to everyone who can see the register.
+  function printPcStatement(month, M, info) {
+    const win = window.open('', '_blank');
+    if (!win) { alert('Your browser blocked the print window — please allow pop-ups for this site and try again.'); return; }
+    const label = pcMonthLabel(month);
+    const rows = M.rows.map(e => {
+      const isIn = e.EntryType === 'CashIn';
+      const nDocs = pcDocUrls(e).length;
+      return `<tr>
+        <td>${escapeHtml(formatDateOnly(e.EntryDate))}</td>
+        <td class="num">${formatAmount(e._opening)}</td>
+        <td>${isIn ? '' : escapeHtml(e.InvoiceNo || '')}</td>
+        <td>${escapeHtml(e.PartyName || '')}</td>
+        <td>${escapeHtml(e.IncurredBy || '')}</td>
+        <td>${isIn ? '<strong>Cash in</strong> — ' : ''}${escapeHtml(e.Nature || '')}</td>
+        <td class="num">${isIn ? '' : formatAmount(pcAmt(e))}</td>
+        <td class="num">${isIn ? formatAmount(pcAmt(e)) : ''}</td>
+        <td class="num"><strong>${formatAmount(e._closing)}</strong></td>
+        <td class="ctr">${nDocs ? 'Yes (' + nDocs + ')' : '—'}</td>
+      </tr>`;
+    }).join('');
+    const status = info.completed
+      ? `Confirmed complete by ${escapeHtml(info.monthRow.CompletedBy)} on ${escapeHtml(formatDate(info.monthRow.CompletedAt))}`
+      : 'Not yet confirmed complete';
+    win.document.write(`
+      <html>
+      <head>
+        <title>MVOA Petty Cash — ${escapeHtml(label)}</title>
+        <style>
+          body { font-family: -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
+          h1 { color: #1d4e6b; font-size: 1.3rem; margin: 0; }
+          h2 { font-size: 1rem; margin: 2px 0 6px; font-weight: 600; }
+          .meta { color: #6b7280; font-size: 0.82rem; margin: 0 0 12px; padding-bottom: 10px; border-bottom: 2px solid #1d4e6b; }
+          .summary { display: flex; gap: 22px; margin: 0 0 12px; font-size: 0.85rem; flex-wrap: wrap; }
+          .summary div span { display: block; color: #6b7280; font-size: 0.72rem; }
+          table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+          th, td { border: 1px solid #c9d0d8; padding: 5px 6px; font-size: 0.72rem; text-align: left; word-break: break-word; vertical-align: top; }
+          th { background: #eaf1f6; color: #1d4e6b; font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.02em; }
+          th small { text-transform: none; font-weight: 400; display: block; color: #51606e; }
+          td.num, th.num { text-align: right; } td.ctr { text-align: center; }
+          tfoot td { font-weight: 700; background: #f3f6f9; }
+          .sign { display: flex; justify-content: space-between; margin-top: 46px; font-size: 0.8rem; gap: 20px; }
+          .sign div { border-top: 1px solid #1f2937; padding-top: 4px; width: 22%; text-align: center; }
+          .back-btn { display: inline-block; margin-bottom: 16px; padding: 10px 18px; border-radius: 8px; border: none; background: #1d4e6b; color: white; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+          @media print { .back-btn { display: none; } }
+          @page { size: landscape; margin: 10mm; }
+        </style>
+      </head>
+      <body>
+        <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
+        <h1>MVOA</h1>
+        <h2>Details for Cash expenses — ${escapeHtml(label)}</h2>
+        <p class="meta">${status} · Generated ${escapeHtml(new Date().toLocaleString())} by ${escapeHtml(info.user.name)}</p>
+        <div class="summary">
+          <div><span>Opening cash on hand</span><strong>${formatAmount(M.opening)}</strong></div>
+          <div><span>Cash in</span><strong>${formatAmount(M.cashIn)}</strong></div>
+          <div><span>Expenses</span><strong>${formatAmount(M.expense)}</strong></div>
+          <div><span>Closing cash on hand</span><strong>${formatAmount(M.closing)}</strong></div>
+        </div>
+        <table>
+          <colgroup><col style="width:7%"><col style="width:9%"><col style="width:7%"><col style="width:15%"><col style="width:13%"><col style="width:20%"><col style="width:8%"><col style="width:8%"><col style="width:9%"><col style="width:6%"></colgroup>
+          <thead><tr>
+            <th>Date</th><th class="num">Cash on hand<small>(opening)</small></th><th>Inv No.</th><th>Name of the party<small>(bill / vendor name)</small></th>
+            <th>Expense incurred by<small>(MVOA staff)</small></th><th>Nature of the expense</th>
+            <th class="num">Expense<small>(INR)</small></th><th class="num">Cash in<small>(INR)</small></th><th class="num">Cash on hand<small>(closing)</small></th><th>Docs</th>
+          </tr></thead>
+          <tbody>${rows || `<tr><td colspan="10" style="text-align:center;">No entries recorded for ${escapeHtml(label)}.</td></tr>`}</tbody>
+          <tfoot><tr><td colspan="6">Total for ${escapeHtml(label)}</td><td class="num">${formatAmount(M.expense)}</td><td class="num">${formatAmount(M.cashIn)}</td><td class="num">${formatAmount(M.closing)}</td><td></td></tr></tfoot>
+        </table>
+        <div class="sign"><div>Prepared by (FM)</div><div>Verified by (Treasurer)</div><div>Secretary</div><div>President</div></div>
+        <script>
+          window.onload = () => { window.print(); };
+          document.getElementById('back-to-app-btn').addEventListener('click', () => {
+            window.close();
+            setTimeout(() => { document.body.innerHTML = '<p style="padding:20px;">You can close this tab/window now and return to the MVOA app in your other tab.</p>'; }, 300);
+          });
+        <\/script>
+      </body>
+      </html>`);
+    win.document.close();
   }
 
   // Add / edit dialog. existingId null = new entry. Documents: existing
