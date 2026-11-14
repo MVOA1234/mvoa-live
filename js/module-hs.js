@@ -936,9 +936,10 @@ const HSModule = (function () {
   // "Gardening" category's single "Gardening Log" template
   // (CustomScreen = 'GardenLog'). One entry = a date + one or MORE
   // activities picked from a multi-select dropdown (plus an optional
-  // free-text "Other") + Location + Remarks + Pass/Fail + notes when it
-  // fails — mirroring the paper register's columns. Several entries per
-  // day are fine (e.g. different locations).
+  // free-text "Other"). EACH ticked activity gets its own Location,
+  // Remarks, Pass/Fail and fail notes, and is stored as its own row
+  // (one row = one activity, like one row of the paper register).
+  // Several entries per day are fine.
   //
   // Own sheet tab (auto-created on first save): HSGardenLog.
   // Not part of the Due/Overdue machinery at all (CustomScreen templates
@@ -1001,49 +1002,50 @@ const HSModule = (function () {
     if (gardenEditId && !editing) gardenEditId = null;
     const knownLocations = [...new Set(entries.map(e => e.Location).filter(Boolean))].sort();
 
-    // ── entry form (only for people with edit access)
-    const selected = new Set(editing ? String(editing.Activities || '').split('|').map(s => s.trim()).filter(Boolean) : []);
-    if (editing && editing.OtherText) selected.add(GARDEN_OTHER_LABEL);
+    // ── entry form. One entry in the sheet = ONE activity with its own
+    // location / remarks / pass-fail / fail notes (like one row of the paper
+    // register). The FM can tick several activities for the same date; each
+    // ticked activity gets its own small block to fill in, and Save writes
+    // one row per activity. `drafts` keeps what has been typed in each block
+    // so un-ticking and re-ticking an activity doesn't lose it.
+    const ALL_KEYS = GARDEN_ACTIVITIES.concat([GARDEN_OTHER_LABEL]);
+    const selected = new Set();
+    const drafts = {};
+    if (editing) {
+      const acts = String(editing.Activities || '').split('|').map(s => s.trim()).filter(Boolean);
+      const key = acts.length ? acts[0] : GARDEN_OTHER_LABEL;
+      selected.add(key);
+      drafts[key] = { otherText: editing.OtherText || '', location: editing.Location || '', remarks: editing.Remarks || '', result: editing.Result || '', failNotes: editing.FailNotes || '' };
+    }
+    const draftOf = k => (drafts[k] = drafts[k] || { otherText: '', location: '', remarks: '', result: '', failNotes: '' });
     const formDate = editing ? gardenEntryDate(editing) : todayStr;
     const formMin = formDate < minDateStr ? formDate : minDateStr;
+    // Inline styles on every control: the app's global label/input rules
+    // otherwise stretch checkboxes and radios across the whole row.
+    const ctlStyle = 'width:100%;padding:8px;margin:4px 0 8px;box-sizing:border-box;';
+    const fieldLbl = 'font-size:0.85rem;text-align:left;';
+    const rowLbl = 'display:flex;align-items:center;justify-content:flex-start;gap:10px;margin:0;padding:7px 0;text-align:left;width:auto;cursor:pointer;';
+    const boxStyle = 'width:18px;height:18px;min-width:18px;margin:0;padding:0;flex:none;';
     const formHtml = canEdit ? `
-      <div class="card" style="max-width:560px;margin:0 0 16px 0;" id="hs-garden-form-card">
+      <div class="card" style="max-width:600px;margin:0 0 16px 0;" id="hs-garden-form-card">
         <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${editing ? '✏️ Edit entry' : '➕ New entry'}</h3>
-        <label style="display:block;margin-bottom:8px;">Date
-          <input type="date" id="hs-g-date" min="${formMin}" max="${todayStr}" value="${gEsc(formDate)}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
-        </label>
-        <div style="margin-bottom:8px;">
-          <div style="margin-bottom:4px;">Description <span class="muted" style="font-size:0.8rem;">(select one or more)</span></div>
-          <details id="hs-g-act" style="border:1px solid #cfd6dd;border-radius:6px;background:#fff;">
-            <summary id="hs-g-act-sum" style="padding:8px;cursor:pointer;"></summary>
-            <div style="padding:4px 10px 8px;border-top:1px solid #e3e8ed;">
-              ${GARDEN_ACTIVITIES.concat([GARDEN_OTHER_LABEL]).map(a => `
-                <label style="display:flex;align-items:center;gap:8px;padding:6px 0;margin:0;"><input type="checkbox" class="hs-g-act-cb" value="${gEsc(a)}" ${selected.has(a) ? 'checked' : ''}> ${gEsc(a)}</label>`).join('')}
-            </div>
-          </details>
-          <input type="text" id="hs-g-other" placeholder="Describe the other work" value="${gEsc(editing ? editing.OtherText || '' : '')}" style="width:100%;padding:8px;margin-top:6px;box-sizing:border-box;${selected.has(GARDEN_OTHER_LABEL) ? '' : 'display:none;'}">
-        </div>
-        <label style="display:block;margin-bottom:8px;">Location
-          <input type="text" id="hs-g-loc" list="hs-g-loc-list" placeholder="e.g. Near Club House, Zone 3 road side" value="${gEsc(editing ? editing.Location || '' : '')}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
-          <datalist id="hs-g-loc-list">${knownLocations.map(l => `<option value="${gEsc(l)}">`).join('')}</datalist>
-        </label>
-        <label style="display:block;margin-bottom:8px;">Remarks <span class="muted" style="font-size:0.8rem;">(optional)</span>
-          <textarea id="hs-g-remarks" rows="2" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">${gEsc(editing ? editing.Remarks || '' : '')}</textarea>
-        </label>
-        <div style="margin-bottom:8px;">
-          <div style="margin-bottom:4px;">Pass / Fail</div>
-          <label style="margin-right:18px;"><input type="radio" name="hs-g-result" value="Pass" ${editing && editing.Result === 'Pass' ? 'checked' : ''}> Pass</label>
-          <label><input type="radio" name="hs-g-result" value="Fail" ${editing && editing.Result === 'Fail' ? 'checked' : ''}> Fail</label>
-        </div>
-        <label id="hs-g-fail-wrap" style="display:${editing && editing.Result === 'Fail' ? 'block' : 'none'};margin-bottom:8px;">Notes in case of fail <span class="muted" style="font-size:0.8rem;">(required)</span>
-          <textarea id="hs-g-failnotes" rows="2" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">${gEsc(editing ? editing.FailNotes || '' : '')}</textarea>
-        </label>
+        <div style="${fieldLbl}">Date</div>
+        <input type="date" id="hs-g-date" min="${formMin}" max="${todayStr}" value="${gEsc(formDate)}" style="${ctlStyle}">
+        <div style="${fieldLbl}">Description <span class="muted">(${editing ? 'one activity per entry' : 'select one or more — each gets its own details below'})</span></div>
+        <details id="hs-g-act" style="border:1px solid #cfd6dd;border-radius:6px;background:#fff;margin:4px 0 10px;">
+          <summary id="hs-g-act-sum" style="padding:8px;cursor:pointer;text-align:left;"></summary>
+          <div style="padding:2px 12px 6px;border-top:1px solid #e3e8ed;">
+            ${ALL_KEYS.map(a => `<label style="${rowLbl}"><input type="checkbox" class="hs-g-act-cb" value="${gEsc(a)}" style="${boxStyle}"><span style="text-align:left;">${gEsc(a)}</span></label>`).join('')}
+          </div>
+        </details>
+        <div id="hs-g-details"></div>
         <p class="error-text" id="hs-g-err" style="min-height:1.2em;margin:4px 0;"></p>
         <div class="mvoa-row" style="gap:8px;justify-content:flex-start;">
           <button id="hs-g-save" class="btn-primary">${editing ? 'Update Entry' : 'Save Entry'}</button>
           ${editing ? '<button id="hs-g-cancel-edit" class="btn-secondary">Cancel</button>' : ''}
         </div>
-      </div>` : `<p class="muted">View only — you don't have edit access here.</p>`;
+      </div>
+      <datalist id="hs-g-loc-list">${knownLocations.map(l => `<option value="${gEsc(l)}">`).join('')}</datalist>` : `<p class="muted">View only — you don't have edit access here.</p>`;
 
     // ── list for the selected month
     const monthEntries = entries.filter(e => gardenEntryDate(e).startsWith(gardenMonth)).sort(gardenSortDesc);
@@ -1094,19 +1096,61 @@ const HSModule = (function () {
 
     // ── form wiring
     const actSum = bodyEl.querySelector('#hs-g-act-sum');
-    const otherInput = bodyEl.querySelector('#hs-g-other');
+    const detailsEl = bodyEl.querySelector('#hs-g-details');
     const cbs = [...bodyEl.querySelectorAll('.hs-g-act-cb')];
-    function refreshSummary() {
-      const picked = cbs.filter(c => c.checked).map(c => c.value);
+    cbs.forEach(c => { c.checked = selected.has(c.value); });
+
+    function renderDetails() {
+      const picked = ALL_KEYS.filter(k => selected.has(k));
       actSum.textContent = picked.length ? picked.join(', ') : 'Select one or more…';
-      otherInput.style.display = picked.includes(GARDEN_OTHER_LABEL) ? '' : 'none';
+      detailsEl.innerHTML = picked.map(k => {
+        const i = ALL_KEYS.indexOf(k);
+        const d = draftOf(k);
+        return `
+          <div class="hs-g-detail" data-key="${gEsc(k)}" style="border:1px solid #cfd6dd;border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#fafbfc;">
+            <div style="font-weight:700;color:var(--mvoa-blue);margin-bottom:6px;text-align:left;">🌿 ${gEsc(k === GARDEN_OTHER_LABEL ? 'Other' : k)}</div>
+            ${k === GARDEN_OTHER_LABEL ? `
+              <div style="${fieldLbl}">Describe the work</div>
+              <input type="text" class="hs-g-d-other" value="${gEsc(d.otherText)}" style="${ctlStyle}">` : ''}
+            <div style="${fieldLbl}">Location</div>
+            <input type="text" class="hs-g-d-loc" list="hs-g-loc-list" placeholder="e.g. Near Club House, Zone 3 road side" value="${gEsc(d.location)}" style="${ctlStyle}">
+            <div style="${fieldLbl}">Remarks <span class="muted">(optional)</span></div>
+            <textarea class="hs-g-d-rem" rows="2" style="${ctlStyle}">${gEsc(d.remarks)}</textarea>
+            <div style="${fieldLbl}">Pass / Fail</div>
+            <div style="display:flex;gap:28px;align-items:center;margin:2px 0 8px;">
+              <label style="${rowLbl}"><input type="radio" class="hs-g-d-res" name="hs-g-r-${i}" value="Pass" ${d.result === 'Pass' ? 'checked' : ''} style="${boxStyle}"><span>Pass</span></label>
+              <label style="${rowLbl}"><input type="radio" class="hs-g-d-res" name="hs-g-r-${i}" value="Fail" ${d.result === 'Fail' ? 'checked' : ''} style="${boxStyle}"><span>Fail</span></label>
+            </div>
+            <div class="hs-g-d-failwrap" style="display:${d.result === 'Fail' ? 'block' : 'none'};">
+              <div style="${fieldLbl}">Notes in case of fail <span class="muted">(required)</span></div>
+              <textarea class="hs-g-d-fail" rows="2" style="${ctlStyle}">${gEsc(d.failNotes)}</textarea>
+            </div>
+          </div>`;
+      }).join('');
+      detailsEl.querySelectorAll('.hs-g-detail').forEach(card => {
+        const d = draftOf(card.dataset.key);
+        const on = (sel, ev, fn) => { const el = card.querySelector(sel); if (el) el.addEventListener(ev, fn); };
+        on('.hs-g-d-other', 'input', e => { d.otherText = e.target.value; });
+        on('.hs-g-d-loc', 'input', e => { d.location = e.target.value; });
+        on('.hs-g-d-rem', 'input', e => { d.remarks = e.target.value; });
+        on('.hs-g-d-fail', 'input', e => { d.failNotes = e.target.value; });
+        card.querySelectorAll('.hs-g-d-res').forEach(r => r.addEventListener('change', () => {
+          d.result = r.value;
+          card.querySelector('.hs-g-d-failwrap').style.display = r.value === 'Fail' ? 'block' : 'none';
+        }));
+      });
     }
-    cbs.forEach(c => c.addEventListener('change', refreshSummary));
-    refreshSummary();
-    const failWrap = bodyEl.querySelector('#hs-g-fail-wrap');
-    bodyEl.querySelectorAll('input[name="hs-g-result"]').forEach(r => r.addEventListener('change', () => {
-      failWrap.style.display = bodyEl.querySelector('input[name="hs-g-result"]:checked').value === 'Fail' ? 'block' : 'none';
+    cbs.forEach(c => c.addEventListener('change', () => {
+      if (editing) {
+        // editing changes ONE existing entry — behave like a single choice
+        if (!c.checked) { c.checked = true; return; }
+        cbs.forEach(o => { if (o !== c) o.checked = false; });
+        selected.clear();
+      }
+      if (c.checked) selected.add(c.value); else selected.delete(c.value);
+      renderDetails();
     }));
+    renderDetails();
     const cancelBtn = bodyEl.querySelector('#hs-g-cancel-edit');
     if (cancelBtn) cancelBtn.addEventListener('click', () => { gardenEditId = null; renderGardenLog(container); });
 
@@ -1116,43 +1160,50 @@ const HSModule = (function () {
       const errEl = bodyEl.querySelector('#hs-g-err');
       errEl.textContent = '';
       const date = bodyEl.querySelector('#hs-g-date').value;
-      const picked = cbs.filter(c => c.checked).map(c => c.value);
-      const activities = picked.filter(p => p !== GARDEN_OTHER_LABEL);
-      const otherText = picked.includes(GARDEN_OTHER_LABEL) ? otherInput.value.trim().replace(/\|/g, '/') : '';
-      const location = bodyEl.querySelector('#hs-g-loc').value.trim();
-      const remarks = bodyEl.querySelector('#hs-g-remarks').value.trim();
-      const resultEl = bodyEl.querySelector('input[name="hs-g-result"]:checked');
-      const result = resultEl ? resultEl.value : '';
-      const failNotes = bodyEl.querySelector('#hs-g-failnotes').value.trim();
+      const picked = ALL_KEYS.filter(k => selected.has(k));
       if (!date || date > todayStr) { errEl.textContent = 'Please choose a date (not in the future).'; return; }
       if (date < formMin) { errEl.textContent = `Please choose a date within the last ${GARDEN_MAX_DAYS_AGO} days.`; return; }
       if (!picked.length) { errEl.textContent = 'Please select at least one description.'; return; }
-      if (picked.includes(GARDEN_OTHER_LABEL) && !otherText) { errEl.textContent = 'Please describe the "Other" work.'; return; }
-      if (!location) { errEl.textContent = 'Please enter the location.'; return; }
-      if (!result) { errEl.textContent = 'Please choose Pass or Fail.'; return; }
-      if (result === 'Fail' && !failNotes) { errEl.textContent = 'Please enter the notes in case of fail.'; return; }
+      const toSave = [];
+      for (const k of picked) {
+        const d = draftOf(k);
+        const name = k === GARDEN_OTHER_LABEL ? 'Other' : k;
+        const otherText = k === GARDEN_OTHER_LABEL ? String(d.otherText || '').trim().replace(/\|/g, '/') : '';
+        const location = String(d.location || '').trim();
+        const failNotes = String(d.failNotes || '').trim();
+        if (k === GARDEN_OTHER_LABEL && !otherText) { errEl.textContent = 'Other: please describe the work.'; return; }
+        if (!location) { errEl.textContent = `${name}: please enter the location.`; return; }
+        if (!d.result) { errEl.textContent = `${name}: please choose Pass or Fail.`; return; }
+        if (d.result === 'Fail' && !failNotes) { errEl.textContent = `${name}: please enter the notes in case of fail.`; return; }
+        toSave.push({
+          EntryDate: date, Activities: k === GARDEN_OTHER_LABEL ? '' : k, OtherText: otherText, Location: location,
+          Remarks: String(d.remarks || '').trim(), Result: d.result, FailNotes: d.result === 'Fail' ? failNotes : ''
+        });
+      }
       isSaving = true;
       const saveBtn = bodyEl.querySelector('#hs-g-save');
       saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+      const labelOf = b => b.Activities || b.OtherText;
       try {
         await MVOA.sheetsEnsureTab(TAB_HS_GARDEN_LOG, GARDEN_LOG_COLS);
         const fresh = await gardenLoadEntries();
         const now = new Date().toISOString();
-        const base = {
-          EntryDate: date, Activities: activities.join('|'), OtherText: otherText, Location: location,
-          Remarks: remarks, Result: result, FailNotes: result === 'Fail' ? failNotes : ''
-        };
         if (editing) {
           const cur = fresh.find(e => e.EntryID === editing.EntryID);
           if (!cur) throw new Error('This entry no longer exists — it may have been deleted.');
-          const updated = Object.assign({}, cur, base, { EditedBy: user.name, EditedAt: now });
+          const b = toSave[0];
+          const updated = Object.assign({}, cur, b, { EditedBy: user.name, EditedAt: now });
           await MVOA.sheetsUpdateRow(TAB_HS_GARDEN_LOG, cur.rowNumber, GARDEN_LOG_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
-          try { await MVOA.logAudit({ module: 'GardenLog', requestId: cur.EntryID, eventType: 'Entry edited', comment: `${date}: ${activities.concat(otherText ? [otherText] : []).join(', ')} — ${result}` }); } catch (e) { /* best-effort */ }
+          try { await MVOA.logAudit({ module: 'GardenLog', requestId: cur.EntryID, eventType: 'Entry edited', comment: `${date}: ${labelOf(b)} — ${b.Result}` }); } catch (e) { /* best-effort */ }
         } else {
-          const entryId = MVOA.nextId('GRD', fresh.map(e => e.EntryID));
-          const row = Object.assign({ EntryID: entryId, LoggedBy: user.name, LoggedAt: now, EditedBy: '', EditedAt: '' }, base);
-          await MVOA.sheetsAppend(TAB_HS_GARDEN_LOG, GARDEN_LOG_COLS.map(c => row[c] !== undefined ? row[c] : ''));
-          try { await MVOA.logAudit({ module: 'GardenLog', requestId: entryId, eventType: 'Entry added', comment: `${date}: ${activities.concat(otherText ? [otherText] : []).join(', ')} — ${result}` }); } catch (e) { /* best-effort */ }
+          const ids = fresh.map(e => e.EntryID);
+          for (const b of toSave) {
+            const entryId = MVOA.nextId('GRD', ids);
+            ids.push(entryId);
+            const row = Object.assign({ EntryID: entryId, LoggedBy: user.name, LoggedAt: now, EditedBy: '', EditedAt: '' }, b);
+            await MVOA.sheetsAppend(TAB_HS_GARDEN_LOG, GARDEN_LOG_COLS.map(c => row[c] !== undefined ? row[c] : ''));
+            try { await MVOA.logAudit({ module: 'GardenLog', requestId: entryId, eventType: 'Entry added', comment: `${date}: ${labelOf(b)} — ${b.Result}` }); } catch (e) { /* best-effort */ }
+          }
         }
         gardenMonth = date.slice(0, 7);
         gardenEditId = null;
