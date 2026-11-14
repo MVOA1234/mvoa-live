@@ -929,6 +929,267 @@ const HSModule = (function () {
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
 
+  // ───────────────────────────────────────────────────────────
+  // GARDENING LOG (ADDED Nov 2026) — replaces the old fixed Zone Rotation
+  // checklist. There is no zone rotation and no weekly plan any more: the
+  // FM simply logs what was actually done, whenever it is done, on the
+  // "Gardening" category's single "Gardening Log" template
+  // (CustomScreen = 'GardenLog'). One entry = a date + one or MORE
+  // activities picked from a multi-select dropdown (plus an optional
+  // free-text "Other") + Location + Remarks + Pass/Fail + notes when it
+  // fails — mirroring the paper register's columns. Several entries per
+  // day are fine (e.g. different locations).
+  //
+  // Own sheet tab (auto-created on first save): HSGardenLog.
+  // Not part of the Due/Overdue machinery at all (CustomScreen templates
+  // are skipped there), so there is nothing to be "overdue" for this log.
+  // ───────────────────────────────────────────────────────────
+  const TAB_HS_GARDEN_LOG = 'HSGardenLog';
+  const GARDEN_LOG_COLS = ['EntryID', 'EntryDate', 'Activities', 'OtherText', 'Location', 'Remarks', 'Result', 'FailNotes', 'LoggedBy', 'LoggedAt', 'EditedBy', 'EditedAt'];
+  const GARDEN_ACTIVITIES = ['Palm Cutting', 'Grass Cutting', 'Green Waste', 'Soil Turning', 'Watering', 'Removal of Weeds', 'Removal of dry Palms'];
+  const GARDEN_OTHER_LABEL = 'Other (free text)';
+  const GARDEN_MAX_DAYS_AGO = 30; // how far back the date picker allows
+  let gardenMonth = null;   // 'YYYY-MM' currently shown in the list
+  let gardenEditId = null;  // EntryID being edited in the form, or null for a new entry
+
+  function gEsc(s) { return String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function gardenActivityList(e) {
+    const list = String(e.Activities || '').split('|').map(s => s.trim()).filter(Boolean);
+    if (e.OtherText) list.push(e.OtherText);
+    return list;
+  }
+  function gardenMonthLabel(key) {
+    const [y, m] = key.split('-').map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+  }
+  function gardenEntryDate(e) { return String(e.EntryDate || '').slice(0, 10); }
+  function gardenSortDesc(a, b) {
+    const d = gardenEntryDate(b).localeCompare(gardenEntryDate(a));
+    return d || String(b.LoggedAt || '').localeCompare(String(a.LoggedAt || ''));
+  }
+
+  async function gardenLoadEntries() {
+    try {
+      const rows = await MVOA.sheetsRead(TAB_HS_GARDEN_LOG, true);
+      return rowsToObjs(rows, GARDEN_LOG_COLS).filter(e => e.EntryID);
+    } catch (e) {
+      return []; // tab not created yet (first use) — treated as empty
+    }
+  }
+
+  async function renderGardenLog(container) {
+    const user = MVOA.getUser();
+    const canEdit = MVOA.canEditPlantRoundsSection(currentScan.qrTarget, user);
+    container.innerHTML = `
+      <div class="mvoa-row" style="margin-bottom:10px;">
+        <button id="hs-back-scan" class="btn-secondary">← Back</button>
+        <strong>🌿 Gardening Log</strong>
+      </div>
+      <div id="hs-garden-body"><p class="muted">Loading…</p></div>
+    `;
+    container.querySelector('#hs-back-scan').addEventListener('click', () => renderScanResult(container));
+    const bodyEl = container.querySelector('#hs-garden-body');
+    const entries = await gardenLoadEntries();
+
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const todayStr = isoDate(today);
+    const minDateStr = isoDate(new Date(today.getTime() - GARDEN_MAX_DAYS_AGO * 86400000));
+    const currentMonthKey = todayStr.slice(0, 7);
+    const monthKeys = [...new Set(entries.map(e => gardenEntryDate(e).slice(0, 7)).filter(k => /^\d{4}-\d{2}$/.test(k)).concat([currentMonthKey]))].sort().reverse();
+    if (!gardenMonth || !monthKeys.includes(gardenMonth)) gardenMonth = currentMonthKey;
+    const editing = gardenEditId ? entries.find(e => e.EntryID === gardenEditId) : null;
+    if (gardenEditId && !editing) gardenEditId = null;
+    const knownLocations = [...new Set(entries.map(e => e.Location).filter(Boolean))].sort();
+
+    // ── entry form (only for people with edit access)
+    const selected = new Set(editing ? String(editing.Activities || '').split('|').map(s => s.trim()).filter(Boolean) : []);
+    if (editing && editing.OtherText) selected.add(GARDEN_OTHER_LABEL);
+    const formDate = editing ? gardenEntryDate(editing) : todayStr;
+    const formMin = formDate < minDateStr ? formDate : minDateStr;
+    const formHtml = canEdit ? `
+      <div class="card" style="max-width:560px;margin:0 0 16px 0;" id="hs-garden-form-card">
+        <h3 style="margin:0 0 10px;color:var(--mvoa-blue);">${editing ? '✏️ Edit entry' : '➕ New entry'}</h3>
+        <label style="display:block;margin-bottom:8px;">Date
+          <input type="date" id="hs-g-date" min="${formMin}" max="${todayStr}" value="${gEsc(formDate)}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+        </label>
+        <div style="margin-bottom:8px;">
+          <div style="margin-bottom:4px;">Description <span class="muted" style="font-size:0.8rem;">(select one or more)</span></div>
+          <details id="hs-g-act" style="border:1px solid #cfd6dd;border-radius:6px;background:#fff;">
+            <summary id="hs-g-act-sum" style="padding:8px;cursor:pointer;"></summary>
+            <div style="padding:4px 10px 8px;border-top:1px solid #e3e8ed;">
+              ${GARDEN_ACTIVITIES.concat([GARDEN_OTHER_LABEL]).map(a => `
+                <label style="display:flex;align-items:center;gap:8px;padding:6px 0;margin:0;"><input type="checkbox" class="hs-g-act-cb" value="${gEsc(a)}" ${selected.has(a) ? 'checked' : ''}> ${gEsc(a)}</label>`).join('')}
+            </div>
+          </details>
+          <input type="text" id="hs-g-other" placeholder="Describe the other work" value="${gEsc(editing ? editing.OtherText || '' : '')}" style="width:100%;padding:8px;margin-top:6px;box-sizing:border-box;${selected.has(GARDEN_OTHER_LABEL) ? '' : 'display:none;'}">
+        </div>
+        <label style="display:block;margin-bottom:8px;">Location
+          <input type="text" id="hs-g-loc" list="hs-g-loc-list" placeholder="e.g. Near Club House, Zone 3 road side" value="${gEsc(editing ? editing.Location || '' : '')}" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">
+          <datalist id="hs-g-loc-list">${knownLocations.map(l => `<option value="${gEsc(l)}">`).join('')}</datalist>
+        </label>
+        <label style="display:block;margin-bottom:8px;">Remarks <span class="muted" style="font-size:0.8rem;">(optional)</span>
+          <textarea id="hs-g-remarks" rows="2" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">${gEsc(editing ? editing.Remarks || '' : '')}</textarea>
+        </label>
+        <div style="margin-bottom:8px;">
+          <div style="margin-bottom:4px;">Pass / Fail</div>
+          <label style="margin-right:18px;"><input type="radio" name="hs-g-result" value="Pass" ${editing && editing.Result === 'Pass' ? 'checked' : ''}> Pass</label>
+          <label><input type="radio" name="hs-g-result" value="Fail" ${editing && editing.Result === 'Fail' ? 'checked' : ''}> Fail</label>
+        </div>
+        <label id="hs-g-fail-wrap" style="display:${editing && editing.Result === 'Fail' ? 'block' : 'none'};margin-bottom:8px;">Notes in case of fail <span class="muted" style="font-size:0.8rem;">(required)</span>
+          <textarea id="hs-g-failnotes" rows="2" style="width:100%;padding:8px;margin-top:4px;box-sizing:border-box;">${gEsc(editing ? editing.FailNotes || '' : '')}</textarea>
+        </label>
+        <p class="error-text" id="hs-g-err" style="min-height:1.2em;margin:4px 0;"></p>
+        <div class="mvoa-row" style="gap:8px;justify-content:flex-start;">
+          <button id="hs-g-save" class="btn-primary">${editing ? 'Update Entry' : 'Save Entry'}</button>
+          ${editing ? '<button id="hs-g-cancel-edit" class="btn-secondary">Cancel</button>' : ''}
+        </div>
+      </div>` : `<p class="muted">View only — you don't have edit access here.</p>`;
+
+    // ── list for the selected month
+    const monthEntries = entries.filter(e => gardenEntryDate(e).startsWith(gardenMonth)).sort(gardenSortDesc);
+    const rowsHtml = monthEntries.map(e => {
+      const isFail = e.Result === 'Fail';
+      return `<tr>
+        <td style="white-space:nowrap;">${gEsc(gardenEntryDate(e).split('-').reverse().join('-'))}</td>
+        <td>${gardenActivityList(e).map(gEsc).join(', ')}</td>
+        <td>${gEsc(e.Location)}</td>
+        <td>${gEsc(e.Remarks)}</td>
+        <td style="font-weight:700;color:${isFail ? '#b3261e' : '#1e6b33'};">${gEsc(e.Result)}</td>
+        <td>${gEsc(isFail ? e.FailNotes : '')}</td>
+        <td class="muted" style="font-size:0.78rem;">${gEsc(e.LoggedBy)}<br>${gEsc(formatDate(e.LoggedAt))}${e.EditedBy ? `<br>✏️ ${gEsc(e.EditedBy)}` : ''}</td>
+        <td style="white-space:nowrap;">${canEdit ? `
+          <button class="btn-secondary hs-g-edit" data-id="${gEsc(e.EntryID)}" style="font-size:0.72rem;padding:2px 7px;">✏️</button>
+          <button class="btn-secondary hs-g-del" data-id="${gEsc(e.EntryID)}" style="font-size:0.72rem;padding:2px 7px;color:#b3261e;border-color:#b3261e;">🗑️</button>` : ''}</td>
+      </tr>`;
+    }).join('');
+
+    bodyEl.innerHTML = `
+      ${formHtml}
+      <div class="mvoa-row" style="margin:0 0 8px;flex-wrap:wrap;gap:8px;">
+        <label style="margin:0;">Month
+          <select id="hs-g-month">${monthKeys.map(k => `<option value="${k}" ${k === gardenMonth ? 'selected' : ''}>${gEsc(gardenMonthLabel(k))}</option>`).join('')}</select>
+        </label>
+        <button id="hs-g-pdf" class="btn-secondary">🖨 Print to PDF</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="mvoa-table" style="min-width:760px;width:100%;">
+          <thead><tr><th>Date</th><th>Description</th><th>Location</th><th>Remarks</th><th>Pass/Fail</th><th>Notes in case of fail</th><th>Entered by</th><th></th></tr></thead>
+          <tbody>${rowsHtml || `<tr><td colspan="8" class="muted" style="text-align:center;">No entries for ${gEsc(gardenMonthLabel(gardenMonth))}.</td></tr>`}</tbody>
+        </table>
+      </div>`;
+
+    bodyEl.querySelector('#hs-g-month').addEventListener('change', (ev) => { gardenMonth = ev.target.value; renderGardenLog(container); });
+    bodyEl.querySelector('#hs-g-pdf').addEventListener('click', () => {
+      const asc = monthEntries.slice().reverse();
+      printTablePdf(`Gardening Log — ${gardenMonthLabel(gardenMonth)}`,
+        ['Date', 'Description', 'Location', 'Remarks', 'Pass/Fail', 'Notes in case of fail'],
+        asc.map(e => ({
+          'Date': gardenEntryDate(e).split('-').reverse().join('-'),
+          'Description': gardenActivityList(e).join(', '),
+          'Location': e.Location, 'Remarks': e.Remarks, 'Pass/Fail': e.Result,
+          'Notes in case of fail': e.Result === 'Fail' ? e.FailNotes : ''
+        })));
+    });
+    if (!canEdit) return;
+
+    // ── form wiring
+    const actSum = bodyEl.querySelector('#hs-g-act-sum');
+    const otherInput = bodyEl.querySelector('#hs-g-other');
+    const cbs = [...bodyEl.querySelectorAll('.hs-g-act-cb')];
+    function refreshSummary() {
+      const picked = cbs.filter(c => c.checked).map(c => c.value);
+      actSum.textContent = picked.length ? picked.join(', ') : 'Select one or more…';
+      otherInput.style.display = picked.includes(GARDEN_OTHER_LABEL) ? '' : 'none';
+    }
+    cbs.forEach(c => c.addEventListener('change', refreshSummary));
+    refreshSummary();
+    const failWrap = bodyEl.querySelector('#hs-g-fail-wrap');
+    bodyEl.querySelectorAll('input[name="hs-g-result"]').forEach(r => r.addEventListener('change', () => {
+      failWrap.style.display = bodyEl.querySelector('input[name="hs-g-result"]:checked').value === 'Fail' ? 'block' : 'none';
+    }));
+    const cancelBtn = bodyEl.querySelector('#hs-g-cancel-edit');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => { gardenEditId = null; renderGardenLog(container); });
+
+    let isSaving = false;
+    bodyEl.querySelector('#hs-g-save').addEventListener('click', async () => {
+      if (isSaving) return;
+      const errEl = bodyEl.querySelector('#hs-g-err');
+      errEl.textContent = '';
+      const date = bodyEl.querySelector('#hs-g-date').value;
+      const picked = cbs.filter(c => c.checked).map(c => c.value);
+      const activities = picked.filter(p => p !== GARDEN_OTHER_LABEL);
+      const otherText = picked.includes(GARDEN_OTHER_LABEL) ? otherInput.value.trim().replace(/\|/g, '/') : '';
+      const location = bodyEl.querySelector('#hs-g-loc').value.trim();
+      const remarks = bodyEl.querySelector('#hs-g-remarks').value.trim();
+      const resultEl = bodyEl.querySelector('input[name="hs-g-result"]:checked');
+      const result = resultEl ? resultEl.value : '';
+      const failNotes = bodyEl.querySelector('#hs-g-failnotes').value.trim();
+      if (!date || date > todayStr) { errEl.textContent = 'Please choose a date (not in the future).'; return; }
+      if (date < formMin) { errEl.textContent = `Please choose a date within the last ${GARDEN_MAX_DAYS_AGO} days.`; return; }
+      if (!picked.length) { errEl.textContent = 'Please select at least one description.'; return; }
+      if (picked.includes(GARDEN_OTHER_LABEL) && !otherText) { errEl.textContent = 'Please describe the "Other" work.'; return; }
+      if (!location) { errEl.textContent = 'Please enter the location.'; return; }
+      if (!result) { errEl.textContent = 'Please choose Pass or Fail.'; return; }
+      if (result === 'Fail' && !failNotes) { errEl.textContent = 'Please enter the notes in case of fail.'; return; }
+      isSaving = true;
+      const saveBtn = bodyEl.querySelector('#hs-g-save');
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+      try {
+        await MVOA.sheetsEnsureTab(TAB_HS_GARDEN_LOG, GARDEN_LOG_COLS);
+        const fresh = await gardenLoadEntries();
+        const now = new Date().toISOString();
+        const base = {
+          EntryDate: date, Activities: activities.join('|'), OtherText: otherText, Location: location,
+          Remarks: remarks, Result: result, FailNotes: result === 'Fail' ? failNotes : ''
+        };
+        if (editing) {
+          const cur = fresh.find(e => e.EntryID === editing.EntryID);
+          if (!cur) throw new Error('This entry no longer exists — it may have been deleted.');
+          const updated = Object.assign({}, cur, base, { EditedBy: user.name, EditedAt: now });
+          await MVOA.sheetsUpdateRow(TAB_HS_GARDEN_LOG, cur.rowNumber, GARDEN_LOG_COLS.map(c => updated[c] !== undefined ? updated[c] : ''));
+          try { await MVOA.logAudit({ module: 'GardenLog', requestId: cur.EntryID, eventType: 'Entry edited', comment: `${date}: ${activities.concat(otherText ? [otherText] : []).join(', ')} — ${result}` }); } catch (e) { /* best-effort */ }
+        } else {
+          const entryId = MVOA.nextId('GRD', fresh.map(e => e.EntryID));
+          const row = Object.assign({ EntryID: entryId, LoggedBy: user.name, LoggedAt: now, EditedBy: '', EditedAt: '' }, base);
+          await MVOA.sheetsAppend(TAB_HS_GARDEN_LOG, GARDEN_LOG_COLS.map(c => row[c] !== undefined ? row[c] : ''));
+          try { await MVOA.logAudit({ module: 'GardenLog', requestId: entryId, eventType: 'Entry added', comment: `${date}: ${activities.concat(otherText ? [otherText] : []).join(', ')} — ${result}` }); } catch (e) { /* best-effort */ }
+        }
+        gardenMonth = date.slice(0, 7);
+        gardenEditId = null;
+        await renderGardenLog(container);
+      } catch (e) {
+        errEl.textContent = 'Could not save: ' + e.message;
+        isSaving = false;
+        saveBtn.disabled = false; saveBtn.textContent = editing ? 'Update Entry' : 'Save Entry';
+      }
+    });
+
+    bodyEl.querySelectorAll('.hs-g-edit').forEach(btn => btn.addEventListener('click', () => {
+      gardenEditId = btn.dataset.id;
+      renderGardenLog(container).then(() => {
+        const card = container.querySelector('#hs-garden-form-card');
+        if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }));
+    bodyEl.querySelectorAll('.hs-g-del').forEach(btn => btn.addEventListener('click', async () => {
+      const e = entries.find(x => x.EntryID === btn.dataset.id);
+      if (!e) return;
+      if (!confirm(`Delete the ${gardenEntryDate(e).split('-').reverse().join('-')} entry (${gardenActivityList(e).join(', ')})? This cannot be undone.`)) return;
+      btn.disabled = true;
+      try {
+        const cur = (await gardenLoadEntries()).find(x => x.EntryID === e.EntryID);
+        if (!cur) throw new Error('This entry no longer exists — it may already have been deleted.');
+        await MVOA.sheetsDeleteRows(TAB_HS_GARDEN_LOG, [cur.rowNumber]);
+        try { await MVOA.logAudit({ module: 'GardenLog', requestId: cur.EntryID, eventType: 'Entry deleted', comment: `${gardenEntryDate(cur)}: ${gardenActivityList(cur).join(', ')} (logged by ${cur.LoggedBy})` }); } catch (er) { /* best-effort */ }
+        if (gardenEditId === cur.EntryID) gardenEditId = null;
+        await renderGardenLog(container);
+      } catch (er) {
+        alert('Could not delete: ' + er.message);
+        btn.disabled = false;
+      }
+    }));
+  }
+
   async function renderShiftDuty(container) {
     container.innerHTML = `
       <div class="mvoa-row" style="margin-bottom:10px;">
@@ -4684,6 +4945,7 @@ const HSModule = (function () {
         // to their own dedicated render function instead, while still
         // appearing in this same template-card list for discoverability.
         if (t && t.CustomScreen === 'InOutLog') { renderInOutLog(container); return; }
+        if (t && t.CustomScreen === 'GardenLog') { renderGardenLog(container); return; }
         currentTemplate = t;
         currentShift = '';
         currentFloor = '';
