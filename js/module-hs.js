@@ -985,6 +985,92 @@ const HSModule = (function () {
     }
   }
 
+  // Tamil names for the fixed activities, used on the printed work sheet the
+  // FM hands to the gardening team. Edit the Tamil text here if the team
+  // prefers different wording. Location and Remarks are free text typed by
+  // the FM, so they print exactly as entered (they cannot be auto-translated).
+  const GARDEN_TAMIL = {
+    'Palm Cutting': 'பனை மரம் கத்தரித்தல்',
+    'Grass Cutting': 'புல் வெட்டுதல்',
+    'Green Waste': 'பசுமைக் கழிவுகள் அகற்றுதல்',
+    'Soil Turning': 'மண் கிளறுதல்',
+    'Watering': 'தண்ணீர் பாய்ச்சுதல்',
+    'Removal of Weeds': 'களை எடுத்தல்',
+    'Removal of dry Palms': 'காய்ந்த பனை ஓலைகளை அகற்றுதல்'
+  };
+
+  // Printable work sheet of everything issued for one day, in English with
+  // the Tamil activity name beside it. Includes open AND already-closed
+  // entries for that date (it is the day's issue list), with blank "Done"
+  // and "Team signature" columns for the team to fill on paper.
+  function printGardenIssued(entries, dateStr) {
+    const list = entries.filter(e => gardenEntryDate(e) === dateStr)
+      .sort((a, b) => String(a.LoggedAt || '').localeCompare(String(b.LoggedAt || '')));
+    const dShow = dateStr.split('-').reverse().join('-');
+    const win = window.open('', '_blank');
+    if (!win) { alert('Please allow pop-ups for this site to print.'); return; }
+    const rowsHtml = list.map((e, i) => {
+      const acts = String(e.Activities || '').split('|').map(x => x.trim()).filter(Boolean);
+      const actHtml = acts.map(a => `<div>${gEsc(a)}</div><div class="ta">${gEsc(GARDEN_TAMIL[a] || '')}</div>`).join('')
+        + (e.OtherText ? `<div>${gEsc(e.OtherText)}</div>` : '');
+      return `<tr><td class="c">${i + 1}</td><td>${actHtml}</td><td>${gEsc(e.Location)}</td><td>${gEsc(e.Remarks)}</td><td></td><td></td></tr>`;
+    }).join('');
+    win.document.write(`
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Gardening Work Sheet — ${gEsc(dShow)}</title>
+        <style>
+          body { font-family: 'Nirmala UI', 'Latha', 'Noto Sans Tamil', -apple-system, Arial, sans-serif; padding: 24px; color: #1f2937; }
+          h1 { color: #1d4e6b; font-size: 1.3rem; margin: 0 0 2px; }
+          .sub { color: #374151; font-size: 1rem; margin: 0 0 4px; }
+          .muted { color: #6b7280; font-size: 0.85rem; margin: 0 0 14px; padding-bottom: 12px; border-bottom: 2px solid #1d4e6b; }
+          table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+          th, td { border: 1px solid #9aa4ae; padding: 9px 10px; text-align: left; vertical-align: top; font-size: 0.95rem; }
+          th { background: #eaf1f6; color: #1d4e6b; font-size: 0.8rem; line-height: 1.35; }
+          td.c { text-align: center; width: 34px; }
+          .ta { color: #1d4e6b; font-weight: 600; }
+          td:nth-child(5) { width: 70px; } td:nth-child(6) { width: 120px; }
+          tr { page-break-inside: avoid; }
+          .back-btn { display: inline-block; margin-bottom: 16px; padding: 10px 18px; border-radius: 8px; border: none; background: #1d4e6b; color: white; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+          .sign { margin-top: 36px; display: flex; justify-content: space-between; font-size: 0.9rem; }
+          .sign div { width: 40%; border-top: 1px solid #1f2937; padding-top: 4px; text-align: center; }
+          @media print { .back-btn { display: none; } th, td { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+          @page { size: portrait; margin: 12mm; }
+        </style>
+      </head>
+      <body>
+        <button class="back-btn" id="back-to-app-btn">&larr; Back to App</button>
+        <h1>MVOA — Gardening Work Sheet / தோட்டப் பராமரிப்புப் பணிகள்</h1>
+        <p class="sub"><strong>Date / தேதி:</strong> ${gEsc(dShow)}</p>
+        <p class="muted">Generated ${gEsc(new Date().toLocaleString())}</p>
+        <table>
+          <thead><tr>
+            <th>#</th>
+            <th>Activity<br>பணி</th>
+            <th>Location<br>இடம்</th>
+            <th>Remarks<br>குறிப்புகள்</th>
+            <th>Done ✓<br>முடிந்தது</th>
+            <th>Team signature<br>கையொப்பம்</th>
+          </tr></thead>
+          <tbody>${rowsHtml || '<tr><td colspan="6">No activities issued for this date.</td></tr>'}</tbody>
+        </table>
+        <div class="sign"><div>Issued by (FM) / வழங்கியவர்</div><div>Received by (Team) / பெற்றவர்</div></div>
+        <script>
+          window.onload = () => { window.print(); };
+          document.getElementById('back-to-app-btn').addEventListener('click', () => {
+            window.close();
+            setTimeout(() => {
+              document.body.innerHTML = '<p style="padding:20px;">You can close this tab/window now and return to the MVOA app in your other tab.</p>';
+            }, 300);
+          });
+        </script>
+      </body>
+      </html>
+    `);
+    win.document.close();
+  }
+
   async function renderGardenLog(container) {
     const user = MVOA.getUser();
     const canEdit = MVOA.canEditPlantRoundsSection(currentScan.qrTarget, user);
@@ -1080,6 +1166,11 @@ const HSModule = (function () {
     const openHtml = !canEdit ? '' : `
       <div class="card" style="max-width:760px;margin:0 0 16px 0;" id="hs-g-open-card">
         <h3 style="margin:0 0 4px;color:#a15c00;">🟡 Open activities <span class="muted" style="font-size:0.85rem;font-weight:400;">(${openEntries.length}) — awaiting Pass / Fail</span></h3>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0 6px;text-align:left;">
+          <span style="font-size:0.85rem;">Work sheet for</span>
+          <input type="date" id="hs-g-print-date" max="${todayStr}" value="${todayStr}" style="width:auto;padding:5px 8px;margin:0;">
+          <button id="hs-g-print-issued" class="btn-secondary" style="font-size:0.85rem;">🖨 Print issued activities (English + தமிழ்)</button>
+        </div>
         ${openEntries.length ? '' : '<p class="muted" style="margin:6px 0 0;">Nothing open. Issue an activity above and it will appear here until it is assessed.</p>'}
         ${openEntries.map(e => `
           <div class="hs-g-open-item" data-id="${gEsc(e.EntryID)}" style="border-top:1px solid #e3e8ed;padding:10px 0;text-align:left;">
@@ -1267,6 +1358,10 @@ const HSModule = (function () {
       }
     });
 
+    bodyEl.querySelector('#hs-g-print-issued').addEventListener('click', () => {
+      const d = bodyEl.querySelector('#hs-g-print-date').value || todayStr;
+      printGardenIssued(entries, d);
+    });
     bodyEl.querySelectorAll('.hs-g-open-item').forEach(item => {
       const panel = item.querySelector('.hs-g-close-panel');
       const failWrap = item.querySelector('.hs-g-c-failwrap');
