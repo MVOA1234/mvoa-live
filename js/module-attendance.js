@@ -1155,6 +1155,20 @@
             ${roleOptionsHtml(isEdit ? staff.AgencyID : '', isEdit ? staff.Role : '')}
           </select>
         </label>
+        <div id="att-role-quickadd" style="margin:-4px 0 12px;text-align:left;">
+          ${canManageCategoriesAndHolidays(user) ? `
+            <button type="button" id="att-role-add-toggle" class="btn-secondary" style="font-size:0.8rem;padding:3px 10px;">➕ Add a new role</button>
+            <div id="att-role-add-panel" style="display:none;margin-top:8px;">
+              <input type="text" id="att-role-add-name" placeholder="e.g. Multi Skilled Technician" maxlength="60" style="width:100%;box-sizing:border-box;margin-bottom:6px;">
+              <div style="display:flex;gap:8px;">
+                <button type="button" id="att-role-add-save" class="btn-primary" style="font-size:0.85rem;padding:5px 12px;">Add role</button>
+                <button type="button" id="att-role-add-cancel" class="btn-secondary" style="font-size:0.85rem;padding:5px 12px;">Cancel</button>
+              </div>
+              <p class="error-text" id="att-role-add-err" style="min-height:1.1em;margin:4px 0 0;"></p>
+              <p class="muted" style="font-size:0.78rem;margin:2px 0 0;">Adds the role to the selected agency's Category of Staff list. Rate, shifts and weekly off can be filled in later on the Agency page.</p>
+            </div>` : `
+            <span class="muted" style="font-size:0.8rem;">Role not listed? Ask the Secretary, President or an admin to add it.</span>`}
+        </div>
         <label>Phone (optional)
           <input type="tel" id="att-staff-phone" value="${isEdit ? escapeHtml(staff.Phone) : ''}" placeholder="e.g. 98400 12345">
         </label>
@@ -1208,6 +1222,59 @@
     host.querySelector('#att-staff-agency').addEventListener('change', (e) => {
       host.querySelector('#att-staff-role').innerHTML = roleOptionsHtml(e.target.value, '');
     });
+
+    // Quick-add a role without leaving the enrolment form (so the photos /
+    // details already entered are not lost). A role here IS a Category of
+    // Staff row for the selected agency — the same record the Agency page
+    // manages — created with just the role name; rate, shifts and weekly
+    // off stay blank until someone fills them in on the Agency page.
+    const roleAddToggle = host.querySelector('#att-role-add-toggle');
+    if (roleAddToggle) {
+      const panel = host.querySelector('#att-role-add-panel');
+      const nameEl = host.querySelector('#att-role-add-name');
+      const errEl2 = host.querySelector('#att-role-add-err');
+      const saveBtn2 = host.querySelector('#att-role-add-save');
+      roleAddToggle.addEventListener('click', () => {
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        if (panel.style.display === 'block') nameEl.focus();
+      });
+      host.querySelector('#att-role-add-cancel').addEventListener('click', () => { panel.style.display = 'none'; errEl2.textContent = ''; });
+      saveBtn2.addEventListener('click', async () => {
+        errEl2.textContent = '';
+        const agencyId = host.querySelector('#att-staff-agency').value;
+        const roleName = nameEl.value.trim().replace(/\s+/g, ' ');
+        if (!agencyId) { errEl2.textContent = 'Please select the agency first.'; return; }
+        if (!roleName) { errEl2.textContent = 'Please type the role name.'; return; }
+        const roleSelect = host.querySelector('#att-staff-role');
+        const existing = staffCategoriesCache.find(c => c.AgencyID === agencyId && String(c.Role || '').trim().toLowerCase() === roleName.toLowerCase());
+        if (existing) {
+          // already there — just pick it rather than creating a duplicate
+          roleSelect.innerHTML = roleOptionsHtml(agencyId, existing.Role);
+          roleSelect.value = existing.Role;
+          nameEl.value = ''; panel.style.display = 'none';
+          return;
+        }
+        saveBtn2.disabled = true; saveBtn2.textContent = 'Adding…';
+        try {
+          await MVOA.sheetsEnsureTab(TAB_STAFF_CATEGORIES, STAFF_CATEGORY_COLS);
+          const existingRows = await MVOA.sheetsRead(TAB_STAFF_CATEGORIES, true);
+          const existingIds = existingRows.slice(1).map(r => r[0]).filter(Boolean);
+          const row = {
+            CategoryID: MVOA.nextId('CAT', existingIds), AgencyID: agencyId, Role: roleName,
+            CreatedDate: new Date().toISOString(), CreatedBy: (user && user.name) || ''
+          };
+          await MVOA.sheetsAppend(TAB_STAFF_CATEGORIES, objToRow(STAFF_CATEGORY_COLS, row));
+          await loadAll(true);
+          roleSelect.innerHTML = roleOptionsHtml(agencyId, roleName);
+          roleSelect.value = roleName;
+          nameEl.value = ''; panel.style.display = 'none';
+        } catch (e) {
+          errEl2.textContent = 'Could not add role: ' + e.message;
+        } finally {
+          saveBtn2.disabled = false; saveBtn2.textContent = 'Add role';
+        }
+      });
+    }
 
     host.querySelector('#att-photo-pick').addEventListener('click', async () => {
       const p = await MVOA.capturePhoto({ useCamera: true });
