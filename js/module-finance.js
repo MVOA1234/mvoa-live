@@ -11,7 +11,7 @@
 //
 // FinanceRequests columns: RequestID | RuleID | Category | BudgetStatus |
 //   Amount | Vendor | Description | RequestedBy | RequestedDate |
-//   RequestType | AttachmentURL_1 | AttachmentURL_2 | AttachmentURL_3 |
+//   RequestType | AttachmentURL_1 | AttachmentURL_2 | AttachmentURL_3 (+ AttachmentURL_4 appended at the end, Nov 2026) |
 //   RequiredDocsSnapshot | Status | QuorumRequired | ECApprovalCount |
 //   ClosedDate | ClosedBy | PaymentStatus | PaymentDate | PaymentRef |
 //   NotifiedAt | ReminderSentAt | DisbursementStage | ExpenseTab | ExpenseRow
@@ -279,7 +279,12 @@ const FinanceModule = (function () {
     // shown — it also now drives the actual Expense Sheet 'Date' column
     // (see disbursePayment), which previously always auto-stamped
     // "today" regardless of when the payment was really released.
-    'PaymentReleaseDate','PaymentRemarks'];
+    'PaymentReleaseDate','PaymentRemarks',
+    // ADDED Nov 2026 — per explicit request, spend approval AND payment
+    // approval now allow up to 4 attachments (was 3). Appended at the very
+    // end so every existing sheet column stays correctly aligned; blank on
+    // every older row, which simply means "no 4th attachment".
+    'AttachmentURL_4'];
 
   const APPROVAL_COLS = ['ApprovalID','RequestID','ApproverName','ApproverRole','Stage','Decision','Comment','Timestamp',
     // ADDED Sept 2026 — "Approve with modified amount". AmountAtDecision
@@ -423,7 +428,7 @@ const FinanceModule = (function () {
   let myApprovalsNewNoteCounts = { spend: 0, payment: 0 }; // see computeMyApprovalsNewNoteCounts()
   let currentTopTab = 'home'; // 'home' | 'spend' | 'payment' | 'budget' | 'contracts'
   let currentView = 'mine'; // 'submit' | 'mine' | 'queue' | 'payments' | 'budget'
-  let pendingAttachments = []; // up to 3: { name, file, isPhoto, compressedSizeBytes }
+  let pendingAttachments = []; // up to 4: { name, file, isPhoto, compressedSizeBytes }
   // ADDED Oct 2026 — the single required EC Approval Note attachment,
   // kept as its own array (never more than 1 element) purely so it can
   // reuse renderDocAttachmentPicker's existing chip/remove UI unchanged.
@@ -3666,7 +3671,7 @@ const FinanceModule = (function () {
   // itself needed no change to support this — it already overwrites
   // whatever field name it's given.
   async function renderAttachmentManager(bodyEl, request, container) {
-    const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3']
+    const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3', 'AttachmentURL_4']
       .map((slot, i) => ({ slot, label: `Attachment ${i + 1}` }));
     if (request.RequestType !== 'PaymentRequest') {
       const rule = rulesCache.find(r => r.RuleID === request.RuleID) || {};
@@ -4517,7 +4522,7 @@ const FinanceModule = (function () {
     // isn't wiped out mid-sentence by the next digit they type into
     // Amount. Reset fresh each time this form is (re)rendered.
     let overageJustificationVisible = false;
-    renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, [], 3);
+    renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, [], 4);
 
     const typeEl = body.querySelector('#pr-type');
     const amtEl = body.querySelector('#pr-amount');
@@ -4738,7 +4743,7 @@ const FinanceModule = (function () {
               ✅ Original documents submitted to Accountant
             </label>` : ''}
         </div>`;
-      // Requires an attachment for each listed document (capped at 3,
+      // Requires an attachment for each listed document (capped at 4,
       // matching the existing Schedule A/B/C flow's pattern) rather than
       // a flat "1 required" regardless of how many are actually listed —
       // bug found in testing: a payment type listing 3 documents was only
@@ -4749,10 +4754,10 @@ const FinanceModule = (function () {
       // in practice that just means a photo can stand in as evidence.
       // A pure confirmation doc (Petty Cash Replenishment's "Original
       // Documents Submitted to Accountant") needs a checkbox, not a file.
-      const minAttachments = isDocsConfirmationOnly(docs) ? 0 : (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+      const minAttachments = isDocsConfirmationOnly(docs) ? 0 : (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 4);
       labelEl.parentElement.style.display = isDocsConfirmationOnly(docs) ? 'none' : '';
       labelEl.textContent = minAttachments > 0 ? `Attachments — at least ${minAttachments} required (see documents needed above)` : 'Attachments (optional)';
-      renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, docs, 3);
+      renderDocAttachmentPicker(body, '#pr-attachment-chips', '#pr-attachment-btns', paymentPendingAttachments, docs, 4);
     }
 
     typeEl.addEventListener('change', () => {
@@ -4821,7 +4826,7 @@ const FinanceModule = (function () {
         return;
       }
     }
-    const minAttachments = isDocsConfirmationOnly(docs) ? 0 : (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 3);
+    const minAttachments = isDocsConfirmationOnly(docs) ? 0 : (docs.length === 1 && docs[0].trim() === '-') ? 0 : Math.min(docs.length, 4);
     if (paymentPendingAttachments.length < minAttachments) {
       errEl.textContent = `This payment type requires at least ${minAttachments} attachment(s): ${docs.join(', ')}.`;
       return;
@@ -4877,9 +4882,9 @@ const FinanceModule = (function () {
     const requestId = MVOA.nextId('ATP', existingIds);
     const now = new Date().toISOString();
 
-    const attachmentUrls = ['', '', ''];
+    const attachmentUrls = ['', '', '', ''];
     if (paymentPendingAttachments.length) {
-      for (let i = 0; i < Math.min(paymentPendingAttachments.length, 3); i++) {
+      for (let i = 0; i < Math.min(paymentPendingAttachments.length, 4); i++) {
         const att = paymentPendingAttachments[i];
         try {
           attachmentUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_att${i+1}_${att.name}`);
@@ -4904,7 +4909,7 @@ const FinanceModule = (function () {
       RequestID: requestId, RuleID: '', Category: paymentType, BudgetStatus: '',
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
       RequestType: 'PaymentRequest', AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
-      AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: docs.join(' + '),
+      AttachmentURL_3: attachmentUrls[2], AttachmentURL_4: attachmentUrls[3], RequiredDocsSnapshot: docs.join(' + '),
       Status: initialStatus, QuorumRequired: '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '', DisbursementStage: '', ExpenseTab: '', ExpenseRow: '',
@@ -5055,7 +5060,7 @@ const FinanceModule = (function () {
     `;
     pendingAttachments = [];
     pendingEcNote = [];
-    renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, [], 3);
+    renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, [], 4);
 
     const catEl = body.querySelector('#fin-category');
     const amtEl = body.querySelector('#fin-amount');
@@ -5132,7 +5137,7 @@ const FinanceModule = (function () {
         if (fillCsInApp && /comparative statement/i.test(d)) return false;
         return true;
       });
-      const docsMin = Math.min(docsNeedingUpload.length, 3);
+      const docsMin = Math.min(docsNeedingUpload.length, 4);
       const methodEl = body.querySelector('#fin-pr-method');
       const quoteMin = (fillPrInApp && methodEl) ? quotationCountFor(methodEl.value) : 0;
       const min = Math.max(docsMin, quoteMin);
@@ -5143,7 +5148,7 @@ const FinanceModule = (function () {
       } else if (min > 0) {
         label.textContent = `Attachments — at least ${min} required`;
       } else {
-        label.textContent = 'Attachments (optional — up to 3)';
+        label.textContent = 'Attachments (optional — up to 4)';
       }
       // Named-button picker: quotation labels take priority when the
       // Purchase Requisition's Procurement Method calls for more of them
@@ -5151,7 +5156,7 @@ const FinanceModule = (function () {
       const docLabels = quoteMin > docsMin
         ? Array.from({ length: quoteMin }, (_, i) => `Quotation ${i + 1}`)
         : docsNeedingUpload;
-      renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, docLabels, 3);
+      renderDocAttachmentPicker(body, '#fin-attachment-chips', '#fin-attachment-btns', pendingAttachments, docLabels, 4);
     }
 
     // ADDED Oct 2026 — shows/hides the dedicated EC Approval Note picker
@@ -5237,7 +5242,7 @@ const FinanceModule = (function () {
           ${requiresEcNote(rule)
             ? `<p class="muted" style="margin:2px 0;">EC ${rule.ECApprovalRequired === 'Ratification' ? 'ratification' : 'approval'} — attach the EC Approval Note below (no live EC vote needed in-app)</p>` : ''}
           ${rule.AGMApprovalRequired === 'Yes' ? `<p class="muted" style="margin:2px 0;">AGM approval required</p>` : ''}
-          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field above, no attachment needed.' : isDocsConfirmationOnly(docs) ? ' — confirm with the checkbox below, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 3) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
+          ${docs.length ? `<p class="muted" style="margin:6px 0 0;">Minimum documents: ${docs.map(escapeHtml).join(', ')}${isJustificationOnly(docs) ? ' — write it in the Description field above, no attachment needed.' : isDocsConfirmationOnly(docs) ? ' — confirm with the checkbox below, no attachment needed.' : ' — please attach at least ' + Math.min(docs.length, 4) + ' file(s) below, or fill the Purchase Requisition in-app if offered.'}</p>` : ''}
           ${isDocsConfirmationOnly(docs) ? `
             <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
               <input type="checkbox" id="fin-pc-docs-confirmed">
@@ -5579,7 +5584,7 @@ const FinanceModule = (function () {
       if (fillCsInApp && /comparative statement/i.test(d)) return false;
       return true;
     });
-    const docsMinAttachments = Math.min(docsNeedingUpload.length, 3);
+    const docsMinAttachments = Math.min(docsNeedingUpload.length, 4);
     // Procurement Method chosen on the Purchase Requisition carries its own
     // attachment requirement (N quotations) — take whichever minimum is
     // stricter.
@@ -5661,9 +5666,9 @@ const FinanceModule = (function () {
     const requestId = MVOA.nextId('ATS', existingIds);
     const now = new Date().toISOString();
 
-    const attachmentUrls = ['', '', ''];
+    const attachmentUrls = ['', '', '', ''];
     if (pendingAttachments.length) {
-      for (let i = 0; i < Math.min(pendingAttachments.length, 3); i++) {
+      for (let i = 0; i < Math.min(pendingAttachments.length, 4); i++) {
         const att = pendingAttachments[i];
         try {
           attachmentUrls[i] = await MVOA.uploadPhotoToDrive(att.file, `${requestId}_att${i+1}_${att.name}`);
@@ -5710,7 +5715,7 @@ const FinanceModule = (function () {
       RequestID: requestId, RuleID: rule.RuleID, Category: category, BudgetStatus: savedBudgetStatus,
       Amount: amount, Vendor: vendor, Description: desc, RequestedBy: user.name, RequestedDate: now,
       RequestType: requestType, AttachmentURL_1: attachmentUrls[0], AttachmentURL_2: attachmentUrls[1],
-      AttachmentURL_3: attachmentUrls[2], RequiredDocsSnapshot: rule.MinimumDocs || '',
+      AttachmentURL_3: attachmentUrls[2], AttachmentURL_4: attachmentUrls[3], RequiredDocsSnapshot: rule.MinimumDocs || '',
       Status: initialStatus, QuorumRequired: rule.QuorumOverride || '', ECApprovalCount: 0,
       ClosedDate: '', ClosedBy: '', PaymentStatus: 'Unpaid', PaymentDate: '', PaymentRef: '',
       NotifiedAt: '', ReminderSentAt: '',
@@ -6916,7 +6921,7 @@ const FinanceModule = (function () {
   }
 
   function attachmentLinksHtml(r) {
-    const urls = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3];
+    const urls = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3, r.AttachmentURL_4];
     const links = urls.filter(Boolean).map((url, i) => `<a href="${url}" target="_blank" rel="noopener">📎 Attachment ${i + 1}</a>`).join(' · ');
     // On Line Procurement (or any ProcuredByDisbursement category) never
     // has a vendor invoice among AttachmentURL_1-3 — at submission time
@@ -7170,7 +7175,7 @@ const FinanceModule = (function () {
       // Upload any newly-added attachment(s) into whichever
       // AttachmentURL slot(s) are still empty — never overwrites an
       // existing one, only fills gaps.
-      const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3'];
+      const slots = ['AttachmentURL_1', 'AttachmentURL_2', 'AttachmentURL_3', 'AttachmentURL_4'];
       const emptySlots = slots.filter(s => !req[s]);
       const uploads = (newAttachments || []).slice(0, emptySlots.length);
       const attachmentUpdates = {};
@@ -7243,13 +7248,13 @@ const FinanceModule = (function () {
     // "Resubmit" button with no way to actually act on the reason given
     // — the requester could see "need one more quotation" but had no
     // way to add it. Now shows the current Description (editable) and
-    // existing attachments, with room to add more (up to the 3-slot
+    // existing attachments, with room to add more (up to the 4-slot
     // cap) before resubmitting. Doesn't support REMOVING an old
     // attachment or changing Amount/Vendor — editing those still needs
     // the Notes thread; this covers the two most common corrections
     // (clarify the description, attach one more document).
     const openCardsHtml = openOnes.map(({ r, state }) => {
-      const existingAttachments = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean);
+      const existingAttachments = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3, r.AttachmentURL_4].filter(Boolean);
       if (!currentSectionCanEdit) {
         // Read Only — show the same info, but no edit fields or Resubmit
         // action; resubmitting is a write action on the request.
@@ -7279,7 +7284,7 @@ const FinanceModule = (function () {
           <textarea class="fin-sb-desc" data-request-id="${escapeHtml(r.RequestID)}" rows="2">${escapeHtml(r.Description || '')}</textarea>
         </label>
         ${existingAttachments.length ? `<p class="muted" style="margin:6px 0 2px;">Existing attachments: ${existingAttachments.map((u, i) => `<a href="${u}" target="_blank" rel="noopener">📎 ${i+1}</a>`).join(' · ')}</p>` : ''}
-        ${existingAttachments.length < 3 ? `
+        ${existingAttachments.length < 4 ? `
           <p class="muted" style="margin:6px 0 2px;">Add another attachment (optional):</p>
           <div class="fin-sb-attachment-chips" data-request-id="${escapeHtml(r.RequestID)}"></div>
           <div class="fin-sb-attachment-btns" data-request-id="${escapeHtml(r.RequestID)}" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;"></div>
@@ -7296,13 +7301,13 @@ const FinanceModule = (function () {
     // RequestID, so multiple cards on screen at once don't collide.
     sentBackPendingAttachments = {};
     if (currentSectionCanEdit) openOnes.forEach(({ r }) => {
-      const existingCount = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3].filter(Boolean).length;
-      if (existingCount >= 3) return;
+      const existingCount = [r.AttachmentURL_1, r.AttachmentURL_2, r.AttachmentURL_3, r.AttachmentURL_4].filter(Boolean).length;
+      if (existingCount >= 4) return;
       sentBackPendingAttachments[r.RequestID] = [];
       renderDocAttachmentPicker(body,
         `.fin-sb-attachment-chips[data-request-id="${r.RequestID}"]`,
         `.fin-sb-attachment-btns[data-request-id="${r.RequestID}"]`,
-        sentBackPendingAttachments[r.RequestID], [], 3 - existingCount);
+        sentBackPendingAttachments[r.RequestID], [], 4 - existingCount);
     });
     body.querySelectorAll('.fin-resubmit-btn').forEach(btn => {
       const id = btn.dataset.requestId;
