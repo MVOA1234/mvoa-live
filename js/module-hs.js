@@ -10,7 +10,7 @@
 //     belongs to. FailTaskCategory is which Daily Ops category an
 //     auto-flagged Fail task should land in.
 //   HSChecklistTemplates: TemplateID | Name | QRTarget | Frequency | Active
-//     QRTarget: a CategoryKey from HSCategories. Frequency: 'Daily'|'Weekly'|'Monthly'|'BiMonthly'
+//     QRTarget: a CategoryKey from HSCategories. Frequency: 'Daily'|'Weekly'|'Monthly'|'BiMonthly'|'SixMonthly'
 //   HSChecklistItems: ItemID | TemplateID | SeqNo | CheckItem | Requirement |
 //     InputType | ShiftApplicability | Active | Unit | FailThreshold | FailDirection
 //     InputType: 'PassFail' | 'Text' | 'Dropdown' | 'Numeric'
@@ -44,8 +44,8 @@ MVOA.registerModule('hs', {
 });
 
 const HSModule = (function () {
-  const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly'];
-  const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly' };
+  const FREQUENCY_ORDER = ['Daily', 'Weekly', 'Monthly', 'BiMonthly', 'SixMonthly'];
+  const FREQUENCY_LABEL = { Daily: 'Daily', Weekly: 'Weekly', Monthly: 'Monthly', BiMonthly: 'Bi-Monthly', SixMonthly: '6-Monthly' };
 
   const CATEGORY_COLS = ['CategoryKey', 'Label', 'QRMatchKeyword', 'FailTaskCategory', 'Icon', 'Active', 'RequiresScan', 'Group', 'LayoutImage'];
   const TEMPLATE_COLS = ['TemplateID', 'Name', 'QRTarget', 'Frequency', 'Active', 'ShiftBased', 'RequireOverallNotes', 'WindowStartDay', 'WindowEndDay', 'ShowZoneOfDay', 'FailTaskCategory', 'RoundBased', 'CustomScreen', 'FloorWise'];
@@ -3353,7 +3353,7 @@ const HSModule = (function () {
         <table class="mvoa-table" style="table-layout:fixed;width:100%;border-collapse:separate;border-spacing:0;">
           <thead><tr>
             <th style="width:220px;text-align:left;position:sticky;top:0;left:0;z-index:4;background:#eef2f6;">Equipment / Category</th>
-            <th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Daily</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Weekly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Monthly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Bi-Monthly</th>
+            <th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Daily</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Weekly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Monthly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">Bi-Monthly</th><th style="text-align:center;position:sticky;top:0;z-index:3;background:#eef2f6;">6-Monthly</th>
           </tr></thead>
           <tbody id="hs-schedule-body"></tbody>
         </table>
@@ -3366,7 +3366,7 @@ const HSModule = (function () {
         const t = templatesCache.find(t => t.QRTarget === c.CategoryKey && t.Frequency === freq);
         return t ? frequencyRuleText(t) || '✓' : '';
       };
-      return { label: c.Label, group: c.Group || '', Daily: cellFor('Daily'), Weekly: cellFor('Weekly'), Monthly: cellFor('Monthly'), BiMonthly: cellFor('BiMonthly') };
+      return { label: c.Label, group: c.Group || '', Daily: cellFor('Daily'), Weekly: cellFor('Weekly'), Monthly: cellFor('Monthly'), BiMonthly: cellFor('BiMonthly'), SixMonthly: cellFor('SixMonthly') };
     });
 
     const cellHtml = (val) => val ? `<span style="color:green;font-weight:700;">✓</span><br><span class="muted" style="font-size:0.72rem;">${escapeHtml(val === '✓' ? '' : val)}</span>` : '<span class="muted">—</span>';
@@ -3377,15 +3377,16 @@ const HSModule = (function () {
         <td style="text-align:center;">${cellHtml(r.Weekly)}</td>
         <td style="text-align:center;">${cellHtml(r.Monthly)}</td>
         <td style="text-align:center;">${cellHtml(r.BiMonthly)}</td>
+        <td style="text-align:center;">${cellHtml(r.SixMonthly)}</td>
       </tr>
     `).join('');
 
     container.querySelector('#hs-schedule-pdf').addEventListener('click', () => {
       const pdfRows = rows.map(r => ({
         Category: r.label + (r.group ? ` (${r.group})` : ''),
-        Daily: r.Daily ? '✓' : '—', Weekly: r.Weekly || '—', Monthly: r.Monthly || '—', BiMonthly: r.BiMonthly || '—'
+        Daily: r.Daily ? '✓' : '—', Weekly: r.Weekly || '—', Monthly: r.Monthly || '—', BiMonthly: r.BiMonthly || '—', '6-Monthly': r.SixMonthly || '—'
       }));
-      printTablePdf('Inspection Schedule', ['Category', 'Daily', 'Weekly', 'Monthly', 'BiMonthly'], pdfRows);
+      printTablePdf('Inspection Schedule', ['Category', 'Daily', 'Weekly', 'Monthly', 'BiMonthly', '6-Monthly'], pdfRows);
     });
   }
 
@@ -3393,7 +3394,7 @@ const HSModule = (function () {
   // HOUSEKEEPING SCHEDULE — a detailed, item-level version of the
   // Inspection Schedule above, specifically for Housekeeping. The
   // general schedule only shows which FREQUENCY applies per category
-  // (Daily/Weekly/Monthly/BiMonthly) — it has no concept of which
+  // (Daily/Weekly/Monthly/BiMonthly/SixMonthly) — it has no concept of which
   // zone/task happens on which actual day of the week. Housekeeping's
   // real schedule lives at the ITEM level via DayApplicability (e.g.
   // "Zone A: Mon/Wed/Fri", "Zone B: Tue/Thu") — the same field
@@ -4913,6 +4914,38 @@ const HSModule = (function () {
       return isMonday ? { text: 'Due today (Monday)', overdue: false, cycleKey: isoDate(monday), done: false } : { text: `Not done since ${formatDate(monday)}`, overdue: true, cycleKey: isoDate(monday), done: false };
     }
 
+    // SixMonthly (ADDED Nov 2026) — done once every 6 months, inside the
+    // template's WindowStartDay–WindowEndDay days of the month (e.g. 8–14;
+    // if no window is set, the last 7 days of the month). The cycle is
+    // counted FROM THE LAST LOG rather than from a fixed calendar month:
+    // the next one falls due in the month 6 months after the month it was
+    // last logged, so it stays correct whichever month it first got done
+    // in. Before that month it shows as up to date (with the next due
+    // month); inside the due month's window it shows "Due this week";
+    // after the window closes (or any later month) it is overdue. Never
+    // logged = treated as due in the current month's window.
+    if (template.Frequency === 'SixMonthly') {
+      const winStart = parseInt(template.WindowStartDay, 10);
+      const winEnd = parseInt(template.WindowEndDay, 10);
+      const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const nowIdx = now.getFullYear() * 12 + now.getMonth();
+      let dueIdx = nowIdx;
+      if (last) {
+        const ld = new Date(last.Timestamp);
+        if (!isNaN(ld)) dueIdx = ld.getFullYear() * 12 + ld.getMonth() + 6;
+      }
+      const dy = Math.floor(dueIdx / 12), dm0 = dueIdx % 12;
+      const dim = daysInMonth(dy, dm0);
+      const wS = (winStart && winEnd) ? Math.min(winStart, dim) : dim - 6;
+      const wE = (winStart && winEnd) ? Math.min(winEnd, dim) : dim;
+      const windowStart = new Date(dy, dm0, wS); windowStart.setHours(0, 0, 0, 0);
+      const windowEnd = new Date(dy, dm0, wE); windowEnd.setHours(23, 59, 59, 999);
+      const windowText = (winStart && winEnd) ? `days ${winStart}-${winEnd} of month` : 'last week of the month';
+      if (nowIdx < dueIdx) return { text: `${lastText} · Next due ${MON[dm0]} ${dy}`, overdue: false, cycleKey: isoDate(windowStart), done: true };
+      if (now <= windowEnd) return { text: `Due this week (${windowText})`, overdue: false, cycleKey: isoDate(windowStart), done: false };
+      return { text: `Overdue since ${formatDate(new Date(dy, dm0, wE + 1))}`, overdue: true, cycleKey: isoDate(windowStart), done: false };
+    }
+
     // Fixed day-of-month window (WindowStartDay/WindowEndDay set on the
     // template) — a generic replacement for the one-off "first week of
     // month" rule: any day range works (Club House: 1–7, this batch:
@@ -5058,6 +5091,7 @@ const HSModule = (function () {
     const winEnd = parseInt(template.WindowEndDay, 10);
     if (template.Frequency === 'Monthly' && winStart && winEnd) return `Due days ${winStart}-${winEnd} of the month`;
     if (template.Frequency === 'Monthly') return 'Due last week of the month';
+    if (template.Frequency === 'SixMonthly') return winStart && winEnd ? `Due days ${winStart}-${winEnd}, every 6 months` : 'Due last week, every 6 months';
     if (template.Frequency === 'BiMonthly') return 'Due last week of Jul / Sep / Nov / Jan / Mar / May';
     return ''; // Daily has no interval to state — it's due every day
   }
