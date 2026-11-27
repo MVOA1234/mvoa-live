@@ -2809,7 +2809,7 @@ const HSModule = (function () {
         const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
         const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
         if (alreadyExists) continue;
-        await MVOA.createOpsTask({
+        await createOpsTaskSerial({
           categoryName: 'Security',
           title,
           description: `Weekly minimum for ${t.key} is ${t.weeklyMin} visits (Monday–Sunday) — only ${count} recorded this week.`,
@@ -2880,7 +2880,7 @@ const HSModule = (function () {
           const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
           const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
           if (alreadyExists) continue;
-          await MVOA.createOpsTask({
+          await createOpsTaskSerial({
             categoryName: effectiveFailTaskCategory(template, qrTarget),
             title,
             description: `${item.CheckItem} (${template.Name}) has no Pass recorded Monday–Sunday this week.`,
@@ -2940,7 +2940,7 @@ const HSModule = (function () {
           const opsTaskRows = await MVOA.sheetsRead(MVOA.TABS.opsTasks);
           const alreadyExists = opsTaskRows.slice(1).some(r => (r[OPS_TASK_COL_IDX.Title] || '') === title);
           if (alreadyExists) continue;
-          await MVOA.createOpsTask({
+          await createOpsTaskSerial({
             categoryName: effectiveFailTaskCategory(template, qrTarget),
             title,
             description: `${shiftLabel(round)} for ${template.Name} was never logged on ${dateStr}.`,
@@ -4988,6 +4988,21 @@ const HSModule = (function () {
   // whichever category someone happens to visit. Both are best-effort
   // and non-blocking: errors are swallowed, never block rendering.
   // ───────────────────────────────────────────────────────────
+  // ADDED Nov 2026 — every Plant Rounds ticket is now created ONE AT A TIME.
+  // Several passive checks (missed rounds, overdue checklists, weekly items,
+  // shortfalls) can fire together when the home screen opens, and each used
+  // to call MVOA.createOpsTask() independently: two of them read the sheet at
+  // the same instant, both picked the same next TaskID, and two different
+  // tickets ended up sharing one ID (e.g. TASK-0459 on two rows) — after
+  // which Daily Operations could only ever act on the first of the pair.
+  // Queuing the calls makes each one see the previous ticket already saved.
+  let opsTaskCreateChain = Promise.resolve();
+  function createOpsTaskSerial(args) {
+    const run = opsTaskCreateChain.then(() => MVOA.createOpsTask(args));
+    opsTaskCreateChain = run.catch(() => {});
+    return run;
+  }
+
   async function evaluateAllMissedRounds() {
     // Round-window-based templates (Security's QR-scan rounds, and any
     // other category set up the same way) — reuses evaluateMissedRounds()
@@ -5054,7 +5069,7 @@ const HSModule = (function () {
       const title = overdueTitlePrefix(c) + `${c.due.cycleKey})`;
       if (existingTitles.has(title)) continue;
       try {
-        await MVOA.createOpsTask({
+        await createOpsTaskSerial({
           categoryName: effectiveFailTaskCategory(c.template, c.template.QRTarget),
           title,
           description: `${c.template.Name}${c.assetLabel ? ` (${c.assetLabel})` : ''} was due and has not been logged. ${c.due.text}.`,
@@ -6435,7 +6450,7 @@ const HSModule = (function () {
       const failedItems = items.filter(i => pendingResults[i.ItemID]?.result === 'Fail');
       for (const item of failedItems) {
         try {
-          await MVOA.createOpsTask({
+          await createOpsTaskSerial({
             categoryName: effectiveFailTaskCategory(currentTemplate, currentScan.qrTarget),
             title: `Plant Rounds: ${item.CheckItem} failed — ${categoryLabel(currentScan.qrTarget)}`,
             description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nLogged by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
@@ -6473,7 +6488,7 @@ const HSModule = (function () {
         && !/diesel level before top up/i.test(i.CheckItem));
       for (const item of outlierItems) {
         try {
-          await MVOA.createOpsTask({
+          await createOpsTaskSerial({
             categoryName: 'Maintenance',
             title: `Plant Rounds: ${item.CheckItem} reading needs recheck — ${categoryLabel(currentScan.qrTarget)}`,
             description: `Requirement: ${item.Requirement || '—'}\nRemarks: ${pendingResults[item.ItemID].remarks}\nEntered value was outside the usual ±20% range and confirmed anyway by the technician.\nLogged by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
@@ -6505,7 +6520,7 @@ const HSModule = (function () {
           for (const assetCode of entries) {
             if (hasOpenTaskFor(assetCode)) continue; // still-open task from an earlier night already tracks this light
             try {
-              await MVOA.createOpsTask({
+              await createOpsTaskSerial({
                 categoryName: effectiveFailTaskCategory(currentTemplate, currentScan.qrTarget),
                 title: `Plant Rounds: ${item.CheckItem} — ${assetCode}`,
                 description: `Reported not working by ${performedBy} on ${formatDate(now)} (Plant Rounds log ${logId}).`,
